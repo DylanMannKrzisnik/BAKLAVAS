@@ -18,6 +18,15 @@ from scvi.external import GIMVI
 from lightning.pytorch.loggers import CSVLogger
 
 
+def is_main_process():
+    """Check if this is the main process in distributed training."""
+    if not torch.distributed.is_available():
+        return True
+    if not torch.distributed.is_initialized():
+        return True
+    return torch.distributed.get_rank() == 0
+
+
 def cleanup_cuda():
     """Clean up CUDA memory and processes."""
     print('\nCleaning up CUDA resources...')
@@ -41,7 +50,7 @@ def cleanup_cuda():
 def main():
     #%% load data
     print('Loading data...')
-    datapath = '/home/mcb/users/dmannk/BAKLAVA/data/SEA_AD'
+    datapath = '/home/mcb/users/dmannk/BAKLAVA_base/data/SEA_AD'
 
     #rna = scanpy.read_h5ad(os.path.join(datapath, 'rna', 'rna_sub_100x.h5ad'))
     rna = scanpy.read_h5ad(os.path.join(datapath, 'rna', 'SEAAD_MTG_RNAseq_final-nuclei.2024-02-13.h5ad'))
@@ -80,7 +89,7 @@ def main():
     model = GIMVI(rna, spatial)
 
     # create logger
-    logpath = '/home/mcb/users/dmannk/BAKLAVA/outputs/logs'
+    logpath = '/home/mcb/users/dmannk/BAKLAVA_base/outputs/logs'
     logger = CSVLogger(save_dir=logpath, name='gimVI_SEA_AD')
     print('logpath set to:', logpath)
 
@@ -106,9 +115,40 @@ def main():
             "n_epochs_kl_warmup": 350
         }
     )
+    
+    # Synchronize all processes after training
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        print(f'Process rank {torch.distributed.get_rank()} reached barrier after training')
 
-    model.save('gimVI_SEA_AD.pth', overwrite=True)
-    print(f'Saving model to gimVI_SEA_AD.pth')
+    # Only run post-processing on the main process (rank 0) to avoid file conflicts
+    if not is_main_process():
+        print(f'\n=== Process rank {torch.distributed.get_rank()} skipping post-processing ===')
+        return  # Exit early for non-main processes
+    
+    print('\n=== Running post-processing on main process (rank 0) ===')
+
+    # Get the version number from the logger to create versioned output directories
+    version_num = logger.version
+    print(f'Training version: {version_num}')
+    
+    # Create versioned output directories
+    base_output_dir = '/home/mcb/users/dmannk/BAKLAVA_base/outputs'
+    version_output_dir = os.path.join(base_output_dir, 'gimVI_SEA_AD', f'version_{version_num}')
+    version_figures_dir = os.path.join(version_output_dir, 'figures')
+    version_models_dir = os.path.join(version_output_dir, 'models')
+    dumps_output_dir = os.path.join(base_output_dir, 'dumps')
+
+    os.makedirs(version_output_dir, exist_ok=True)
+    os.makedirs(version_figures_dir, exist_ok=True)
+    os.makedirs(version_models_dir, exist_ok=True)
+    os.makedirs(dumps_output_dir, exist_ok=True)    # meant to only save latest results to not repeatedly save to disk (e.g. h5ad files)
+    print(f'Created versioned output directories: {version_output_dir}, {version_figures_dir}, {version_models_dir}, {dumps_output_dir}')
+
+    # Save model to versioned directory
+    model_path = os.path.join(version_models_dir, 'gimVI_SEA_AD.pth')
+    model.save(model_path, overwrite=True)
+    print(f'Saved model to {model_path}')
     
     # Clear training-related GPU memory
     print('\nClearing training memory...')
@@ -139,10 +179,8 @@ def main():
     latent_adata.obs["labels"] = latent_labels
 
     # Save full latent representations before UMAP
-    output_dir = '/home/mcb/users/dmannk/BAKLAVA/outputs'
-    os.makedirs(output_dir, exist_ok=True)
-    latent_adata.write_h5ad(os.path.join(output_dir, 'latent_adata_full.h5ad'))
-    print(f'Saved full latent representations to {output_dir}/latent_adata_full.h5ad')
+    latent_adata.write_h5ad(os.path.join(dumps_output_dir, 'latent_adata_full.h5ad'))
+    print(f'Saved full latent representations to {dumps_output_dir}/latent_adata_full.h5ad')
 
     # subsample 100x
     print('Subsampling 100x...')
@@ -156,14 +194,15 @@ def main():
     print('UMAP computation complete')
 
     # Save subsampled latent representations after UMAP
-    os.makedirs(output_dir, exist_ok=True)
-    latent_adata.write_h5ad(os.path.join(output_dir, 'latent_adata_subsampled.h5ad'))
-    print(f'Saved subsampled latent representations to {output_dir}/latent_adata_subsampled.h5ad')
+    os.makedirs(dumps_output_dir, exist_ok=True)
+    latent_adata.write_h5ad(os.path.join(dumps_output_dir, 'latent_adata_subsampled.h5ad'))
+    print(f'Saved subsampled latent representations to {dumps_output_dir}/latent_adata_subsampled.h5ad')
 
-    # plot and save UMAP
+    # plot and save UMAP to versioned figures directory
     print('Plotting UMAP and saving...')
-    scanpy.settings.figdir = '/home/mcb/users/dmannk/BAKLAVA/outputs/figures'
+    scanpy.settings.figdir = version_figures_dir
     scanpy.pl.umap(latent_adata, color=['labels', 'Subclass'], show=True, wspace=0.2, save='_gimVI_SEA_AD')
+    print(f'Saved UMAP plots to {version_figures_dir}')
     
     print('\n=== Analysis complete ===')
 

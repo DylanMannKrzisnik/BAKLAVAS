@@ -1,0 +1,20 @@
+name: squidpy_scvi_gpu
+channels:
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - python=3.11
+  - pytorch-cuda=11.8
+  - pytorch
+  - anndata
+  - scvi-tools
+  - scanpy
+  - spatialdata
+  - squidpy
+  - ipykernel
+  - optax
+  - jax
+  - flax
+  - numpyro
+  - jaxlib
+prefix: /home/mcb/users/dmannk/.conda/envs/squidpy_scvi_gpu

@@ -12,11 +12,13 @@ from scvi.external import Tangram
 print('Loading data...')
 datapath = '/home/mcb/users/dmannk/BAKLAVA_base/data/SEA_AD'
 
-rna = sc.read_h5ad(os.path.join(datapath, 'rna', 'SEAAD_MTG_RNAseq_final-nuclei.2024-02-13.h5ad'))
+#rna = sc.read_h5ad(os.path.join(datapath, 'rna', 'SEAAD_MTG_RNAseq_final-nuclei.2024-02-13.h5ad'))
 #rna.layers['pseudo'] = rna.X.copy()
 #rna.X = rna.layers['UMIs']
+rna = sc.read_h5ad(os.path.join(datapath, 'rna', 'middle-temporal-gyrus', 'rna_donor_H21.33.021.h5ad'))
 
-spatial = sc.read_h5ad(os.path.join(datapath, 'merfish', 'SEAAD_MTG_MERFISH.2024-12-11.h5ad'))
+#spatial = sc.read_h5ad(os.path.join(datapath, 'merfish', 'SEAAD_MTG_MERFISH.2024-12-11.h5ad'))
+spatial = sc.read_h5ad(os.path.join(datapath, 'merfish', 'middle-temporal-gyrus', 'merfish_section_H21.33.021.Cx26.MTG.02.007.1.04.h5ad'))
 
 #%% populate spatial library with DAPI image
 def create_uns_library_merfish(adata, img=None):
@@ -97,7 +99,8 @@ spatial.obs = mdata.mod["sp"].obs.copy()
 
 #%% plot Tangram results
 
-tangram_columns = spatial.obs.columns[spatial.obs.columns.str.contains('_tangram')]
+#tangram_columns = spatial.obs.columns[spatial.obs.columns.str.contains('_tangram')]
+tangram_columns = list(mdata.mod["sp"].obsm["tangram_ct_pred"].columns.categories)
 sq.pl.spatial_scatter(spatial, shape=None, color=list(tangram_columns) + ['Subclass'], wspace=-0.3)
 
 #%% load MERFISH data and DAPI image with SpatialData library
@@ -107,11 +110,20 @@ from spatialdata_io import image as spatialdata_image
 from spatialdata.models._utils import DEFAULT_COORDINATE_SYSTEM
 import spatialdata_plot
 
-#spatial = make_anndata_spatialdata_compatible(spatial)
-sanitize_table(spatial)
-spatial = from_legacy_anndata(spatial)
+spatial_data = spatial.copy()
+del spatial_data.uns['spatial']
 
-dapipath = '/home/mcb/users/dmannk/BAKLAVA_base/data/SEA_AD/merfish/middle-temporal-gyrus/1170797659/DAPI_Max.tif'
+sanitize_table(spatial_data)
+spatial_data = from_legacy_anndata(spatial_data)
+
+fov = '1170797664'
+dapipath = os.path.join(datapath, 'merfish', 'middle-temporal-gyrus', fov, 'DAPI_Max.tif')
+polytpath = os.path.join(datapath, 'merfish', 'middle-temporal-gyrus', fov, 'PolyT_Max.tif')
 dapi = spatialdata_image(dapipath, data_axes=['c', 'y','x'], coordinate_system=DEFAULT_COORDINATE_SYSTEM)
-spatial.images = {'dapi':dapi}
-spatial.pl.render_images("dapi", cmap='gray').pl.show()
+polyt = spatialdata_image(polytpath, data_axes=['c', 'y','x'], coordinate_system=DEFAULT_COORDINATE_SYSTEM)
+
+spatial_data.images = {'dapi':dapi, 'polyt':polyt}
+spatial_data.pl.render_images("dapi", cmap='gray').pl.show()
+spatial_data.pl.render_images("polyt", cmap='gray').pl.show()
+
+# %%

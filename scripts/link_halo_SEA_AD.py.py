@@ -29,54 +29,44 @@ dapi = spatialdata_image(dapipath, data_axes=['c', 'y','x'], coordinate_system=D
 
 import tifffile
 import numpy as np
+import openslide
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Scale
 
 svspath = os.path.join(datapath, 'neuropathology', 'H21.33.021', 'H21.33.021-A7-ASYN', 'H21.33.021-A7-ASYN.svs')
+# --- open slide ---
+slide = openslide.OpenSlide(svspath)
 
-# Open SVS file with tifffile - SVS files are pyramidal TIFFs
-with tifffile.TiffFile(svspath) as tif:
-    # SVS files have multiple series (resolution levels)
-    # series[0] is the full resolution, series[1] is downsampled, etc.
-    num_levels = len(tif.series)
-    
-    # Choose a level (0 = full res, 1 = first downsample, etc.)
-    level = min(2, num_levels - 1)  # Level 2 or highest available
-    
-    # Get the series at this level
-    series = tif.series[level]
-    
-    # Calculate downsample factor (based on dimensions relative to level 0)
-    if level == 0:
-        downsample = 1.0
-    else:
-        full_res_shape = tif.series[0].shape
-        current_shape = series.shape
-        downsample = full_res_shape[0] / current_shape[0]  # y dimension ratio
-    
-    print(f"Loading SVS level {level}/{num_levels-1}: {series.shape} (downsample: {downsample}x)")
-    
-    # Read the image at this level
-    svs_array = series.asarray()
-    
-    # Handle different channel configurations
-    if svs_array.ndim == 3:
-        # Shape is (y, x, c) - need to transpose to (c, y, x)
-        svs_array = np.transpose(svs_array, (2, 0, 1))
-    elif svs_array.ndim == 2:
-        # Grayscale - add channel dimension
-        svs_array = svs_array[np.newaxis, :, :]
-    
-    # Remove alpha channel if present (4 channels -> 3 channels RGB)
-    if svs_array.shape[0] == 4:
-        svs_array = svs_array[:3, :, :]
+# choose a pyramid level (0 = full res, higher = downsampled)
+level = min(2, slide.level_count - 1)
 
-# Create Image2DModel with proper transformation
-# Scale transformation accounts for the downsampling
+# read full field-of-view at that level
+img = slide.read_region(
+    location=(0, 0),
+    level=level,
+    size=slide.level_dimensions[level],
+)
+
+# OpenSlide returns RGBA; drop alpha
+img = np.array(img)[..., :3]   # (y, x, c)
+
+# --- pixel size (microns per pixel) ---
+mpp_x = float(slide.properties["openslide.mpp-x"])
+mpp_y = float(slide.properties["openslide.mpp-y"])
+
+# OpenSlide downsample factor
+downsample = slide.level_downsamples[level]
+
+# --- create SpatialData image ---
 svs_image = Image2DModel.parse(
-    svs_array,
-    dims=("c", "y", "x"),
-    transformations={DEFAULT_COORDINATE_SYSTEM: Scale([downsample, downsample], axes=("x", "y"))}
+    img,
+    dims=("y", "x", "c"),
+    transformations={
+        DEFAULT_COORDINATE_SYSTEM: Scale(
+            [mpp_y * downsample, mpp_x * downsample],
+            axes=("y", "x"),
+        )
+    },
 )
 
 spatial.images = {

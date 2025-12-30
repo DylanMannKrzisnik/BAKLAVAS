@@ -111,7 +111,7 @@ from spatialdata.models._utils import DEFAULT_COORDINATE_SYSTEM
 import spatialdata_plot
 
 spatial_data = spatial.copy()
-del spatial_data.uns['spatial']
+#del spatial_data.uns['spatial']
 
 sanitize_table(spatial_data)
 spatial_data = from_legacy_anndata(spatial_data)

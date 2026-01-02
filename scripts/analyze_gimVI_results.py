@@ -324,6 +324,7 @@ def main():
     
     sc.tl.embedding_density(latent_adata, groupby='labels')
     sc.pl.embedding_density(latent_adata, key='umap_density_labels')
+exit()
 
 if __name__ == '__main__':
     main()

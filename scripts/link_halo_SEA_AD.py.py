@@ -2,6 +2,7 @@
 import scanpy as sc
 import os
 from pathlib import Path
+import matplotlib.pyplot as plt
 
 from spatialdata import sanitize_table
 from spatialdata_io.experimental import from_legacy_anndata
@@ -100,6 +101,8 @@ for stain in stains:
 
 #%%
 
-spatial.subset(['locations', 'halo_layer_ASYN']).pl.render_shapes().pl.show()
+fig, ax = plt.subplots(1, 2, figsize=(10, 10))
+spatial.pl.render_shapes('halo_layer_ASYN').pl.show(ax=ax[0])
+
 
 # %%

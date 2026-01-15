@@ -91,10 +91,10 @@ sc.pp.neighbors(rna_adata, use_rep='X_pca')
 # download models: models.download_models(force_update = True)
 # for a preview of models: models.models_description()
 
-predictions = celltypist.annotate(rna_adata, model = 'Developing_Mouse_Brain.pkl', majority_voting = True)
+predictions = celltypist.annotate(rna_adata, model = 'Developing_Mouse_Brain.pkl', majority_voting = False)
 
 print('WARNING: need to drop duplicates in predictions.predicted_labels due to incorrect formatting of rna_adata.obs_names')
-predicted_labels_df = predictions.predicted_labels.drop_duplicates(subset=['predicted_labels'], inplace=False)
+predicted_labels_df = predictions.predicted_labels#.drop_duplicates(subset=['predicted_labels'], inplace=False)
 predicted_labels_df = predicted_labels_df.assign(predicted_labels_broad = predicted_labels_df['predicted_labels'].str.split(':').str[0])
 
 predicted_labels = predicted_labels_df['predicted_labels']
@@ -107,10 +107,48 @@ rna_adata.obs = rna_adata.obs.merge(predicted_labels_df, left_index=True, right_
 sc.tl.umap(rna_adata, min_dist=0.1)
 sc.pl.umap(rna_adata, color=['sample_name', 'predicted_labels_broad'])
 
-#%% load spatial data
+#%% load imaging data
 
 spatial_tar = 'GSE308526.tar'
 spatial_tarpath = os.path.join(datapath, spatial_tar)
 
 with tarfile.open(spatial_tarpath, "r:*") as tar:
     filenames = tar.getnames()
+
+developmental_imaging_pattern = r'_P\d+S\d+_tissue_lowres_image\.png\.gz$'
+developmental_imaging_files = sorted(f for f in filenames if re.search(developmental_imaging_pattern, f))
+
+developmental_coords_pattern = r'_P\d+S\d+_tissue_positions_list\.csv\.gz$'
+developmental_coords_files = sorted(f for f in filenames if re.search(developmental_coords_pattern, f))
+
+import spatialdata as sd
+from spatialdata.models import Image2DModel, PointsModel
+from skimage.io import imread
+
+
+pbar = tqdm(zip(developmental_imaging_files, developmental_coords_files))
+for file, coords_file in pbar:
+
+    sample_name = file.strip('.png.gz').split('_')[2]
+    pbar.set_description(f'Processing sample {sample_name}')
+
+    with tarfile.open(spatial_tarpath, "r:*") as tar:
+        f = tar.extractfile(file)
+        img = imread(f)
+
+    with tarfile.open(spatial_tarpath, "r:*") as tar:
+        f = tar.extractfile(coords_file)
+        spot_location_df = pd.read_csv(f, compression='gzip', index_col=0, header=None)
+        spot_location_df.columns = ['in_tissue', 'array_row', 'array_col', 'pkl_row_in_fullres', 'pxl_col_in_fullres']
+
+    sdata = sd.SpatialData(
+        images = {
+            "histology": Image2DModel.parse(img)},
+        points = {
+            "spots": PointsModel.parse(
+                coords[["x", "y"]].values,
+                #index=coords.index
+            )},
+        tables = {
+            "cells": spatial
+        })

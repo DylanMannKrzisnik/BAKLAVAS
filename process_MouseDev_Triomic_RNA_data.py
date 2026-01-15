@@ -8,6 +8,7 @@ import re
 from scipy.sparse import csr_matrix
 import anndata as ad
 from tqdm import tqdm
+import celltypist
 
 #%% set paths to data and identify RNA data files from tar file
 datapath = '/home/mcb/users/dmannk/BAKLAVA_base/data/MouseDev_Spatial_Triomic'
@@ -27,7 +28,7 @@ if os.path.exists(os.path.join(datapath, 'rna_adata.h5ad')):
     rna_adata = ad.read_h5ad(os.path.join(datapath, 'rna_adata.h5ad'))
 else:
     ## define what is typical length of barcode
-    barcode_length = len('AACACGGTAACAACCA-1')
+    #barcode_length = len('AACACGGTAACAACCA-1')
 
     rna_adatas = []
     pbar = tqdm(developmental_rna_files)
@@ -41,9 +42,9 @@ else:
             rna_df = pd.read_csv(f, compression='gzip', index_col=0)
 
         ## check whether barcodes in index or columns
-        if (rna_df.index.str.len().nunique() == 1) and (rna_df.index.str.len().unique()[0].item() == barcode_length):
+        if (rna_df.index.str.len().nunique() == 1):
             pass
-        elif (rna_df.columns.str.len().nunique() == 1) and (rna_df.columns.str.len().unique()[0].item() == barcode_length):
+        elif (rna_df.columns.str.len().nunique() == 1):
             rna_df = rna_df.T
         else:
             raise ValueError(f'Barcodes in {file} are not in the same format')
@@ -81,12 +82,30 @@ sc.pp.highly_variable_genes(rna_adata, n_top_genes=2000)
 #rna_adata = rna_adata[:, rna_adata.var['highly_variable']].copy()
 
 sc.tl.pca(rna_adata, svd_solver='arpack', use_highly_variable=True)
-sc.external.pp.harmony_integrate(rna_adata, 'sample_name')
+sc.pp.neighbors(rna_adata, use_rep='X_pca')
+#sc.external.pp.harmony_integrate(rna_adata, 'sample_name')
+#sc.pp.neighbors(rna_adata, use_rep='X_pca_harmony')
 
-sc.pp.neighbors(rna_adata, use_rep='X_pca_harmony')
+#%% use celltypist for cell type annotation
+
+# download models: models.download_models(force_update = True)
+# for a preview of models: models.models_description()
+
+predictions = celltypist.annotate(rna_adata, model = 'Developing_Mouse_Brain.pkl', majority_voting = True)
+
+print('WARNING: need to drop duplicates in predictions.predicted_labels due to incorrect formatting of rna_adata.obs_names')
+predicted_labels_df = predictions.predicted_labels.drop_duplicates(subset=['predicted_labels'], inplace=False)
+predicted_labels_df = predicted_labels_df.assign(predicted_labels_broad = predicted_labels_df['predicted_labels'].str.split(':').str[0])
+
+predicted_labels = predicted_labels_df['predicted_labels']
+assert predicted_labels.reset_index().value_counts(['index', 'predicted_labels']).eq(1).all().item()
+
+rna_adata.obs = rna_adata.obs.merge(predicted_labels_df, left_index=True, right_index=True, how='left')
+
+
+#%% perform UMAP
 sc.tl.umap(rna_adata, min_dist=0.1)
-sc.pl.umap(rna_adata, color=['sample_name'])
-
+sc.pl.umap(rna_adata, color=['sample_name', 'predicted_labels_broad'])
 
 #%% load spatial data
 

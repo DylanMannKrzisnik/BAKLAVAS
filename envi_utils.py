@@ -30,7 +30,7 @@ class Envilogger(object):
         self.file.flush()
 
 # 2. Configuration and Directory Setup
-def envi_train_with_logger(envi_model, output_path, training_steps=10000):
+def envi_train_with_logger(envi_model, output_path, train_params_dict):
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -46,7 +46,7 @@ def envi_train_with_logger(envi_model, output_path, training_steps=10000):
         print(f"--- Starting ENVI Training Session: {datetime.now()} ---")
         
         # Only train the model - do NOT call impute_genes() or infer_niche_covet()
-        envi_model.train(training_steps=training_steps)        
+        envi_model.train(**train_params_dict)        
         print(f"--- Training Complete: {datetime.now()} ---")
 
     finally:

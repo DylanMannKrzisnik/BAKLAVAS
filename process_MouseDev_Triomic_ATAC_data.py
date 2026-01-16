@@ -1,71 +1,71 @@
-#%% import libraries
 import os
-import tarfile
 import re
+import tarfile
 import tempfile
-import shutil
+from pathlib import Path
+
 import snapatac2 as snap
-import anndata as ad
-from tqdm import tqdm
 
-#%% load data
-datapath = '/home/mcb/users/dmannk/BAKLAVA_base/data/MouseDev_Spatial_Triomic'
-tarfilename = 'GSE308623.tar'
-tarpath = os.path.join(datapath, tarfilename)
+datapath = "/home/mcb/users/dmannk/BAKLAVA_base/data/MouseDev_Spatial_Triomic"
+tarpath = os.path.join(datapath, "GSE308623.tar")
 
-with tarfile.open(tarpath, "r:*") as tar:
-    filenames = tar.getnames()
-
-developmental_atac_pattern = r'_P\d+S\d+_atac_fragments\.tsv\.gz$'
-developmental_atac_files = sorted(f for f in filenames if re.search(developmental_atac_pattern, f))
-
-#%% process data
+developmental_atac_pattern = r"_P\d+S\d+_atac_fragments\.tsv\.gz$"
 BIN_SIZE = 5000
-adatas = []
+
+# 1) Find matching members inside the tar
+with tarfile.open(tarpath, "r:*") as tar:
+    members = [
+        m for m in tar.getmembers()
+        if m.isfile() and re.search(developmental_atac_pattern, os.path.basename(m.name))
+    ]
+members = sorted(members, key=lambda m: os.path.basename(m.name))
+
+# 2) Extract all matching fragment files into a temp dir (ideally on node-local scratch)
+scratch_base = os.environ.get("SLURM_TMPDIR", None)
+workdir_ctx = tempfile.TemporaryDirectory(dir=scratch_base)
+workdir = Path(workdir_ctx.name)
+
+frag_paths = []
+out_h5ad_paths = []
+sample_names = []
 
 with tarfile.open(tarpath, "r:*") as tar:
-    pbar = tqdm(developmental_atac_files)
-    for member in pbar:
-        base = os.path.basename(member)
-        sample_name = base.replace(".tsv.gz", "")
-        pbar.set_description(f"Processing sample {sample_name}")
+    for m in members:
+        base = os.path.basename(m.name)
+        sample = base.replace(".tsv.gz", "")
+        out_path = workdir / f"{sample}.h5ad"
+        frag_path = workdir / base  # keep the .tsv.gz name
 
-        scratch = os.environ.get("SLURM_TMPDIR", None)  # or set to a known larger path
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".tsv.gz", dir=scratch) as tmp_file:
-            tmp_path = tmp_file.name
-            with tar.extractfile(member) as f:
-                shutil.copyfileobj(f, tmp_file)
+        # Stream member -> extracted gzip file on disk
+        with tar.extractfile(m) as src, open(frag_path, "wb") as dst:
+            # chunked copy to avoid reading whole file into RAM
+            for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                dst.write(chunk)
 
-        try:
-            adata = snap.pp.import_fragments(
-                tmp_path,
-                chrom_sizes=snap.genome.mm10,
-                file=None,
-                min_num_fragments=200,
-                sorted_by_barcode=False,
-                # n_jobs=1,  # if your version supports it
-            )
-            snap.pp.add_tile_matrix(adata, bin_size=BIN_SIZE)
-            adatas.append(adata)
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+        frag_paths.append(str(frag_path))
+        out_h5ad_paths.append(str(out_path))
+        sample_names.append(sample)
 
-        break
+# 3) Tutorial-style: one call that imports all samples
+adatas = snap.pp.import_fragments(
+    frag_paths,
+    file=out_h5ad_paths,              # per-sample output, like the tutorial :contentReference[oaicite:2]{index=2}
+    chrom_sizes=snap.genome.mm10,
+    min_num_fragments=200,
+    sorted_by_barcode=False,
+)
 
-
-#%% process data, works directly on list of adatas
-
+# 4) Tutorial-style: these accept a list of AnnData :contentReference[oaicite:3]{index=3}
 snap.metrics.tsse(adatas, snap.genome.mm10)
 snap.pp.filter_cells(adatas, min_tsse=1)
 snap.pp.add_tile_matrix(adatas, bin_size=BIN_SIZE)
 snap.pp.select_features(adatas, n_features=None)
-#snap.pp.scrublet(adatas)
-#snap.pp.filter_doublets(adatas)
 
-#%% create AnnDataSet
-
+# 5) Create AnnDataSet, like the tutorial :contentReference[oaicite:4]{index=4}
 data = snap.AnnDataSet(
-    adatas=[(filename.replace(".tsv.gz", "").split('_')[2], adata) for filename, adata in zip(developmental_atac_files, adatas)],
-    filename="MouseDev_Triomic_ATAC.h5ads"
+    adatas=[(name, adata) for name, adata in zip(sample_names, adatas)],
+    filename="MouseDev_Triomic_ATAC.h5ads",
 )
+
+# 6) Cleanup temp directory when you’re done with everything
+workdir_ctx.cleanup()

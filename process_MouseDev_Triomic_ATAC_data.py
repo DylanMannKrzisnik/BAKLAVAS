@@ -5,6 +5,7 @@ import re
 import tempfile
 import shutil
 import snapatac2 as snap
+import anndata as ad
 from tqdm import tqdm
 
 #%% load data
@@ -50,5 +51,21 @@ with tarfile.open(tarpath, "r:*") as tar:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
+        break
 
-# %%
+
+#%% process data, works directly on list of adatas
+
+snap.metrics.tsse(adatas, snap.genome.mm10)
+snap.pp.filter_cells(adatas, min_tsse=1)
+snap.pp.add_tile_matrix(adatas, bin_size=BIN_SIZE)
+snap.pp.select_features(adatas, n_features=None)
+#snap.pp.scrublet(adatas)
+#snap.pp.filter_doublets(adatas)
+
+#%% create AnnDataSet
+
+data = snap.AnnDataSet(
+    adatas=[(filename.replace(".tsv.gz", "").split('_')[2], adata) for filename, adata in zip(developmental_atac_files, adatas)],
+    filename="MouseDev_Triomic_ATAC.h5ads"
+)

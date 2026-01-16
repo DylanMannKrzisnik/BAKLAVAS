@@ -24,6 +24,7 @@ from shapely.geometry import Point
 import spatialdata as sd
 from spatialdata.models import Image2DModel, ShapesModel, TableModel
 from spatialdata.transformations import Scale
+import spatialdata_plot
 
 
 # -------------------------
@@ -249,6 +250,7 @@ with tarfile.open(spatial_tarpath, "r:*") as tar:
 
         # ---- subset RNA AnnData to this sample, align to available spots ----
         adata_s = rna_adata[rna_adata.obs["sample_name"] == sid].copy()
+        adata_s.obs_names = adata_s.obs_names.str.replace('-1', '', regex=False) # remove all '-1' from obs_names
         adata_s = adata_s[adata_s.obs_names.isin(pos.index)].copy()
 
         # join positions into obs
@@ -317,3 +319,17 @@ with tarfile.open(spatial_tarpath, "r:*") as tar:
 print("Done. SpatialData objects available in dict: sdata_by_sample")
 print("Example keys:", list(sdata_by_sample.keys())[:5])
 print("Example object:", sdata_by_sample[list(sdata_by_sample.keys())[0]])
+
+out_dir = os.path.join(datapath, "spatialdata_by_sample")
+os.makedirs(out_dir, exist_ok=True)
+
+for sid, sdata in sdata_by_sample.items():
+    path = os.path.join(out_dir, f"{sid}.zarr")
+    print(f"Saving {sid} -> {path}")
+    sdata.write(path)
+
+
+#sdata.pl.render_images("lowres_P0S1") \
+#    .pl.render_shapes("spots_P0S1", alpha=0.2) \
+#    .pl.show()
+

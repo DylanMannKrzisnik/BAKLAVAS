@@ -3,6 +3,7 @@ import re
 import tarfile
 import tempfile
 from pathlib import Path
+from tqdm import tqdm
 
 import snapatac2 as snap
 
@@ -30,7 +31,7 @@ out_h5ad_paths = []
 sample_names = []
 
 with tarfile.open(tarpath, "r:*") as tar:
-    for m in members:
+    for m in tqdm(members, desc="Extracting fragment files"):
         base = os.path.basename(m.name)
         sample = base.replace(".tsv.gz", "")
         out_path = workdir / f"{sample}.h5ad"

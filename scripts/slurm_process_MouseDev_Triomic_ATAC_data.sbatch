@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH --job-name=MouseDevTriomicATAC
+#SBATCH --account=def-liyue
+#SBATCH --time=01:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=20
+#SBATCH --mem=62G
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
+
+set -euo pipefail
+
+# Ensure relative paths in the Python script resolve correctly
+cd /home/dmannk/links/projects/ctb-liyue/dmannk/BAKLAVAS_base/BAKLAVAS
+
+module load StdEnv/2023 python/3.12.4 arrow/22.0.0 rust/1.91.0
+source /home/dmannk/links/projects/ctb-liyue/dmannk/envs/snapatac_312/bin/activate
+
+echo "JobID=${SLURM_JOB_ID:-}"
+echo "Host=$(hostname)"
+echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-}"
+python -c "import os; print('affinity_cpus=', len(os.sched_getaffinity(0)))"
+
+# Run as a SLURM step so CPU binding is applied
+srun --cpu-bind=cores -c "${SLURM_CPUS_PER_TASK:-1}" \
+  python /home/dmannk/links/projects/ctb-liyue/dmannk/BAKLAVAS_base/BAKLAVAS/process_MouseDev_Triomic_ATAC_data.py
+
+

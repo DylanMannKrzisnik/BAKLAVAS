@@ -3,10 +3,10 @@
 #SBATCH --account=def-liyue
 #SBATCH --time=02:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=20
-#SBATCH --mem=62G
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
+#SBATCH --output=/home/dmannk/links/scratch/%x-%j.out
+#SBATCH --error=/home/dmannk/links/scratch/%x-%j.err
 #SBATCH --mail-user=dylan.mann-krzisnik@mail.mcgill.ca
 #SBATCH --mail-type=BEGIN,END,FAIL
 

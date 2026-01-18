@@ -31,7 +31,8 @@ def _infer_n_jobs(default: int = 8) -> int:
 
 
 def main() -> None:
-    datapath = os.path.abspath("../data/MouseDev_Spatial_Triomic")
+    #datapath = os.path.abspath("../data/MouseDev_Spatial_Triomic")
+    datapath = "/home/dmannk/links/projects/ctb-liyue/dmannk/BAKLAVAS_base/data/MouseDev_Spatial_Triomic"
     tarpath = os.path.join(datapath, "GSE308623.tar")
 
     developmental_atac_pattern = r"_P\d+S\d+_atac_fragments\.tsv\.gz$"

@@ -1,20 +1,22 @@
 #!/bin/bash
 #SBATCH --job-name=MouseDevTriomicATAC
 #SBATCH --account=def-liyue
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=62G
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
+#SBATCH --mail-user=dylan.mann-krzisnik@mail.mcgill.ca
+#SBATCH --mail-type=BEGIN,END,FAIL
 
 set -euo pipefail
 
 # Ensure relative paths in the Python script resolve correctly
 cd /home/dmannk/links/projects/ctb-liyue/dmannk/BAKLAVAS_base/BAKLAVAS
 
-module load StdEnv/2023 python/3.12.4 arrow/22.0.0 rust/1.91.0
 source /home/dmannk/links/projects/ctb-liyue/dmannk/envs/snapatac_312/bin/activate
+module load StdEnv/2023 python/3.12.4 arrow/22.0.0 rust/1.91.0
 
 echo "JobID=${SLURM_JOB_ID:-}"
 echo "Host=$(hostname)"

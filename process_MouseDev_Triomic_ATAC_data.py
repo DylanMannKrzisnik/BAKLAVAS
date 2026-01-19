@@ -35,8 +35,8 @@ os.environ["RUST_BACKTRACE"] = "1"
 #%% main function
 def main() -> None:
     #datapath = os.path.abspath("../data/MouseDev_Spatial_Triomic")
-    scratch_base = "/home/dmannk/links/scratch"
     datapath = "/home/dmannk/links/projects/ctb-liyue/dmannk/BAKLAVAS_base/data/MouseDev_Spatial_Triomic"
+    scratch_base = os.environ.get("SLURM_TMPDIR", "/home/dmannk/links/scratch")
     tarpath = os.path.join(datapath, "GSE308623.tar")
 
     developmental_atac_pattern = r"_P\d+S\d+_atac_fragments\.tsv\.gz$"
@@ -85,8 +85,6 @@ def main() -> None:
         members = sorted(members, key=lambda m: os.path.basename(m.name))
 
         # 2) Extract all matching fragment files into a temp dir (ideally on node-local scratch)
-        # scratch_base = os.environ.get("SLURM_TMPDIR", None)
-        scratch_base = "/home/dmannk/links/scratch"
         workdir_ctx = tempfile.TemporaryDirectory(dir=scratch_base)
         workdir = Path(workdir_ctx.name)
 
@@ -162,34 +160,52 @@ def main() -> None:
     assert data.n_obs == np.unique(data.obs_names).size
 
     # spectral representation
+    print(f"[PROGRESS] Selecting features...")
     snap.pp.select_features(data, n_features=50000)
+    print(f"[PROGRESS] Computing spectral representation...")
     snap.tl.spectral(data)
 
     # UMAP
-    snap.tl.umap(data)
-    snap.pl.umap(data, color="sample", interactive=False)
+    #snap.tl.umap(data)
+    #snap.pl.umap(data, color="sample", interactive=False)
 
     # Batch correction
-    snap.pp.mnc_correct(data, batch="sample")
-    snap.pp.harmony(data, batch="sample", max_iter_harmony=20)
+    #snap.pp.mnc_correct(data, batch="sample")
+    #snap.pp.harmony(data, batch="sample", max_iter_harmony=20)
 
     # UMAP after batch correction
-    snap.tl.umap(data, use_rep="X_spectral_mnn")
-    snap.pl.umap(data, color="sample", interactive=False)
+    #snap.tl.umap(data, use_rep="X_spectral_mnn")
+    #snap.pl.umap(data, color="sample", interactive=False)
 
     # UMAP after Harmony batch correction
-    snap.tl.umap(data, use_rep="X_spectral_harmony")
-    snap.pl.umap(data, color="sample", interactive=False)
+    #snap.tl.umap(data, use_rep="X_spectral_harmony")
+    #snap.pl.umap(data, color="sample", interactive=False)
 
     # Clustering
-    snap.pp.knn(data, use_rep="X_spectral_harmony")
+    #snap.pp.knn(data, use_rep="X_spectral_harmony")
+    print(f"[PROGRESS] KNN...")
+    snap.pp.knn(data, use_rep="X_spectral")
+    print(f"[PROGRESS] Leiden clustering...")
     snap.tl.leiden(data)
-    snap.pl.umap(data, color="leiden", interactive=False)
+    print(f"[PROGRESS] Leiden clustering completed.")
+    #snap.pl.umap(data, color="leiden", interactive=False)
 
     # Peak calling
+    print(f"[PROGRESS] Peak calling...")
     snap.tl.macs3(data, groupby='leiden', replicate='sample', n_jobs=min(_infer_n_jobs(default=8), 4))
+    print(f"[PROGRESS] Merging peaks...")
     merged_peaks = snap.tl.merge_peaks(data.uns['macs3'], chrom_sizes=snap.genome.mm10)
     print(f"Number of merged peaks: {merged_peaks.shape[0]}")
+
+    ## create peak matrix from merged peaks
+    print(f"[PROGRESS] Creating peak matrix...")
+    peak_mat = snap.pp.make_peak_matrix(data, use_rep=merged_peaks['Peaks'])
+    print(f"[PROGRESS] Peak matrix created successfully.")
+
+    ## save peak matrix to disk
+    print(f"[PROGRESS] Saving peak matrix to disk...")
+    peak_mat.write_h5ad(os.path.join(datapath, "MouseDev_Triomic_ATAC_peak_matrix.h5ad"))
+    print(f"[PROGRESS] Peak matrix saved successfully.")
 
     # Save AnnDataSet to disk (writes the .h5ads file with all modifications)
     #print(f"[PROGRESS] Saving AnnDataSet to disk...")

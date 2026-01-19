@@ -1,10 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=MouseDevTriomicATAC
 #SBATCH --account=def-liyue
-#SBATCH --time=03:00:00
+#SBATCH --time=04:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=200G
+#SBATCH --cpus-per-task=1
+#SBATCH --nodes=1
+#SBATCH --mem=128G
 #SBATCH --output=/home/dmannk/links/scratch/%x-%j.out
 #SBATCH --error=/home/dmannk/links/scratch/%x-%j.err
 #SBATCH --mail-user=dylan.mann-krzisnik@mail.mcgill.ca
@@ -24,8 +25,10 @@ echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-}"
 python -c "import os; print('affinity_cpus=', len(os.sched_getaffinity(0)))"
 
 echo "SLURM_TMPDIR=${SLURM_TMPDIR:-}"
-cp /home/dmannk/links/scratch/GSM*h5ad "${SLURM_TMPDIR}/"
+rsync -av /home/dmannk/links/scratch/GSM*h5ad "${SLURM_TMPDIR}/"
 ls -lhtr "${SLURM_TMPDIR}/"
+
+export PYTHONUNBUFFERED=1
 
 # Run as a SLURM step so CPU binding is applied
 srun --cpu-bind=cores -c "${SLURM_CPUS_PER_TASK:-1}" \

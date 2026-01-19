@@ -105,19 +105,25 @@ def main() -> None:
                 out_h5ad_paths.append(str(out_path))
                 sample_names.append(sample)
 
-    # 3) Tutorial-style: one call that imports all samples
-    print(f"[PROGRESS] Starting import_fragments for {len(frag_paths)} samples...")
-    adatas = snap.pp.import_fragments(
-        frag_paths,
-        file=out_h5ad_paths,  # writes anndata to file
-        chrom_sizes=snap.genome.mm10,
-        min_num_fragments=200,
-        sorted_by_barcode=False,
-        n_jobs=min(_infer_n_jobs(default=8), 8), # possible deadlock issues beyond 8 cores
-    )
-    print(f"[PROGRESS] import_fragments completed. Loaded {len(adatas)} AnnData objects.")
+    # Check if all out_h5ad_paths already exist before running import_fragments
+    all_exist = all(os.path.exists(p) for p in out_h5ad_paths)
+    if all_exist:
+        print(f"[INFO] All output h5ad files already exist. Skipping import_fragments.")
+        adatas = [snap.read(path, backed='r') for path in out_h5ad_paths]
+    else:
+        print(f"[INFO] Not all output h5ad files exist. Proceeding with import_fragments.")
+    
+        print(f"[PROGRESS] Starting import_fragments for {len(frag_paths)} samples...")
+        adatas = snap.pp.import_fragments(
+            frag_paths,
+            file=out_h5ad_paths,  # writes anndata to file
+            chrom_sizes=snap.genome.mm10,
+            min_num_fragments=200,
+            sorted_by_barcode=False,
+            n_jobs=min(_infer_n_jobs(default=8), 8), # possible deadlock issues beyond 8 cores
+        )
+        print(f"[PROGRESS] import_fragments completed. Loaded {len(adatas)} AnnData objects.")
 
-    #adatas = [snap.read(path, backed='r') for path in out_h5ad_paths]
     #data = snap.AnnDataSet(adatas=list(zip(sample_names, adatas)), filename=os.path.join(datapath, "MouseDev_Triomic_ATAC.h5ads"))
 
     # 4) Tutorial-style: these accept a list of AnnData
@@ -192,7 +198,7 @@ def main() -> None:
 
     # Peak calling
     print(f"[PROGRESS] Peak calling...")
-    snap.tl.macs3(data, groupby='leiden', replicate='sample', n_jobs=min(_infer_n_jobs(default=8), 4))
+    snap.tl.macs3(data, groupby='leiden', replicate='sample', n_jobs=min(_infer_n_jobs(default=8), 1))
     print(f"[PROGRESS] Merging peaks...")
     merged_peaks = snap.tl.merge_peaks(data.uns['macs3'], chrom_sizes=snap.genome.mm10)
     print(f"Number of merged peaks: {merged_peaks.shape[0]}")

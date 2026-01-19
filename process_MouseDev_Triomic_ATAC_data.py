@@ -4,10 +4,21 @@ import re
 import numpy as np
 import tarfile
 import tempfile
+import sys
 from pathlib import Path
 from tqdm import tqdm
 
 import snapatac2 as snap
+
+def _tqdm(*args, **kwargs):
+    """tqdm wrapper that writes progress bars to stdout (so SLURM --output captures them)."""
+    kwargs.setdefault("file", sys.stdout)
+    kwargs.setdefault("dynamic_ncols", True)
+    # Reduce log spam when running without a TTY (common for SLURM output files)
+    kwargs.setdefault("mininterval", 5.0)
+    kwargs.setdefault("maxinterval", 30.0)
+    kwargs.setdefault("leave", True)
+    return tqdm(*args, **kwargs)
 
 def _infer_n_jobs(default: int = 8) -> int:
     """Infer a sensible worker count from SLURM / CPU affinity."""
@@ -53,7 +64,7 @@ def main() -> None:
 
     if use_untarred:
         # Use fragment files directly from untarred directory
-        print(f"Using untarred directory: {untarred_dir}")
+        print(f"Using untarred directory: {untarred_dir}", flush=True)
         fragment_files = sorted(
             [
                 f
@@ -64,7 +75,7 @@ def main() -> None:
             key=lambda f: f.name,
         )
 
-        for frag_file in tqdm(fragment_files, desc="Collecting fragment files"):
+        for frag_file in _tqdm(fragment_files, desc="Collecting fragment files"):
             sample = frag_file.name.replace(".tsv.gz", "")
             #out_path = Path(datapath) / f"{sample}.h5ad"
             out_path = Path(scratch_base) / f"{sample}.h5ad"
@@ -74,7 +85,7 @@ def main() -> None:
             sample_names.append(sample)
     else:
         # Fall back to extracting from tar
-        print(f"Untarred directory not found, extracting from: {tarpath}")
+        print(f"Untarred directory not found, extracting from: {tarpath}", flush=True)
         # 1) Find matching members inside the tar
         with tarfile.open(tarpath, "r:*") as tar:
             members = [
@@ -89,7 +100,7 @@ def main() -> None:
         workdir = Path(workdir_ctx.name)
 
         with tarfile.open(tarpath, "r:*") as tar:
-            for m in tqdm(members, desc="Extracting fragment files"):
+            for m in _tqdm(members, desc="Extracting fragment files"):
                 base = os.path.basename(m.name)
                 sample = base.replace(".tsv.gz", "")
                 out_path = Path(datapath) / f"{sample}.h5ad"
@@ -108,12 +119,12 @@ def main() -> None:
     # Check if all out_h5ad_paths already exist before running import_fragments
     all_exist = all(os.path.exists(p) for p in out_h5ad_paths)
     if all_exist:
-        print(f"[INFO] All output h5ad files already exist. Skipping import_fragments.")
+        print(f"[INFO] All output h5ad files already exist. Skipping import_fragments.", flush=True)
         adatas = [snap.read(path, backed='r') for path in out_h5ad_paths]
     else:
-        print(f"[INFO] Not all output h5ad files exist. Proceeding with import_fragments.")
+        print(f"[INFO] Not all output h5ad files exist. Proceeding with import_fragments.", flush=True)
     
-        print(f"[PROGRESS] Starting import_fragments for {len(frag_paths)} samples...")
+        print(f"[PROGRESS] Starting import_fragments for {len(frag_paths)} samples...", flush=True)
         adatas = snap.pp.import_fragments(
             frag_paths,
             file=out_h5ad_paths,  # writes anndata to file
@@ -122,7 +133,7 @@ def main() -> None:
             sorted_by_barcode=False,
             n_jobs=min(_infer_n_jobs(default=8), 8), # possible deadlock issues beyond 8 cores
         )
-        print(f"[PROGRESS] import_fragments completed. Loaded {len(adatas)} AnnData objects.")
+        print(f"[PROGRESS] import_fragments completed. Loaded {len(adatas)} AnnData objects.", flush=True)
 
     #data = snap.AnnDataSet(adatas=list(zip(sample_names, adatas)), filename=os.path.join(datapath, "MouseDev_Triomic_ATAC.h5ads"))
 
@@ -130,24 +141,24 @@ def main() -> None:
     gene_anno = '/home/dmannk/.cache/snapatac2/gencode.vM25.basic.annotation.gff3.gz'
     gene_anno_exists = os.path.exists(gene_anno)
 
-    print(f"[PROGRESS] Computing TSS enrichment scores...")
+    print(f"[PROGRESS] Computing TSS enrichment scores...", flush=True)
     snap.metrics.tsse(adatas, gene_anno if gene_anno_exists else snap.genome.mm10)
-    print(f"[PROGRESS] Filtering cells (min_tsse=1)...")
+    print(f"[PROGRESS] Filtering cells (min_tsse=1)...", flush=True)
     snap.pp.filter_cells(adatas, min_tsse=1)
-    print(f"[PROGRESS] Adding tile matrix (bin_size={BIN_SIZE})...")
+    print(f"[PROGRESS] Adding tile matrix (bin_size={BIN_SIZE})...", flush=True)
     snap.pp.add_tile_matrix(adatas, bin_size=BIN_SIZE)
-    print(f"[PROGRESS] Selecting features...")
+    print(f"[PROGRESS] Selecting features...", flush=True)
     snap.pp.select_features(adatas, n_features=None)
     # snap.pp.scrublet(adatas)
     # snap.pp.filter_doublets(adatas)
 
     # 5) Create AnnDataSet, like the tutorial
-    print(f"[PROGRESS] Creating AnnDataSet...")
+    print(f"[PROGRESS] Creating AnnDataSet...", flush=True)
     data = snap.AnnDataSet(
         adatas=[(name, adata) for name, adata in zip(sample_names, adatas)],
         filename=os.path.join(scratch_base, "MouseDev_Triomic_ATAC.h5ads"),
     )
-    print(f"[PROGRESS] AnnDataSet created successfully.")
+    print(f"[PROGRESS] AnnDataSet created successfully.", flush=True)
 
     '''
     if os.path.exists(os.path.join(datapath, "MouseDev_Triomic_ATAC.h5ads")):
@@ -158,17 +169,17 @@ def main() -> None:
     '''
 
     # check for duplicate barcodes
-    print(f"Number of cells: {data.n_obs}")
-    print(f"Number of unique barcodes: {np.unique(data.obs_names).size}")
+    print(f"Number of cells: {data.n_obs}", flush=True)
+    print(f"Number of unique barcodes: {np.unique(data.obs_names).size}", flush=True)
 
     unique_cell_ids = [sa + ":" + bc for sa, bc in zip(data.obs["sample"], data.obs_names)]
     data.obs_names = unique_cell_ids
     assert data.n_obs == np.unique(data.obs_names).size
 
     # spectral representation
-    print(f"[PROGRESS] Selecting features...")
+    print(f"[PROGRESS] Selecting features...", flush=True)
     snap.pp.select_features(data, n_features=50000)
-    print(f"[PROGRESS] Computing spectral representation...")
+    print(f"[PROGRESS] Computing spectral representation...", flush=True)
     snap.tl.spectral(data)
 
     # UMAP
@@ -189,29 +200,29 @@ def main() -> None:
 
     # Clustering
     #snap.pp.knn(data, use_rep="X_spectral_harmony")
-    print(f"[PROGRESS] KNN...")
+    print(f"[PROGRESS] KNN...", flush=True)
     snap.pp.knn(data, use_rep="X_spectral")
-    print(f"[PROGRESS] Leiden clustering...")
+    print(f"[PROGRESS] Leiden clustering...", flush=True)
     snap.tl.leiden(data)
-    print(f"[PROGRESS] Leiden clustering completed.")
+    print(f"[PROGRESS] Leiden clustering completed.", flush=True)
     #snap.pl.umap(data, color="leiden", interactive=False)
 
     # Peak calling
-    print(f"[PROGRESS] Peak calling...")
+    print(f"[PROGRESS] Peak calling...", flush=True)
     snap.tl.macs3(data, groupby='leiden', replicate='sample', n_jobs=min(_infer_n_jobs(default=8), 1))
-    print(f"[PROGRESS] Merging peaks...")
+    print(f"[PROGRESS] Merging peaks...", flush=True)
     merged_peaks = snap.tl.merge_peaks(data.uns['macs3'], chrom_sizes=snap.genome.mm10)
-    print(f"Number of merged peaks: {merged_peaks.shape[0]}")
+    print(f"Number of merged peaks: {merged_peaks.shape[0]}", flush=True)
 
     ## create peak matrix from merged peaks
-    print(f"[PROGRESS] Creating peak matrix...")
+    print(f"[PROGRESS] Creating peak matrix...", flush=True)
     peak_mat = snap.pp.make_peak_matrix(data, use_rep=merged_peaks['Peaks'])
-    print(f"[PROGRESS] Peak matrix created successfully.")
+    print(f"[PROGRESS] Peak matrix created successfully.", flush=True)
 
     ## save peak matrix to disk
-    print(f"[PROGRESS] Saving peak matrix to disk...")
+    print(f"[PROGRESS] Saving peak matrix to disk...", flush=True)
     peak_mat.write_h5ad(os.path.join(datapath, "MouseDev_Triomic_ATAC_peak_matrix.h5ad"))
-    print(f"[PROGRESS] Peak matrix saved successfully.")
+    print(f"[PROGRESS] Peak matrix saved successfully.", flush=True)
 
     # Save AnnDataSet to disk (writes the .h5ads file with all modifications)
     #print(f"[PROGRESS] Saving AnnDataSet to disk...")

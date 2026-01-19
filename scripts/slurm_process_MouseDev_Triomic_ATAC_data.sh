@@ -29,6 +29,7 @@ rsync -av /home/dmannk/links/scratch/GSM*h5ad "${SLURM_TMPDIR}/"
 ls -lhtr "${SLURM_TMPDIR}/"
 
 export PYTHONUNBUFFERED=1
+export TQDM_DISABLE=0
 
 # Run as a SLURM step so CPU binding is applied
 srun --cpu-bind=cores -c "${SLURM_CPUS_PER_TASK:-1}" \

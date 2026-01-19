@@ -1,3 +1,4 @@
+#%% load libraries
 import os
 import re
 import numpy as np
@@ -29,9 +30,12 @@ def _infer_n_jobs(default: int = 8) -> int:
     # Last resort
     return max(1, int(os.cpu_count() or default))
 
+os.environ["RUST_BACKTRACE"] = "1"
 
+#%% main function
 def main() -> None:
     #datapath = os.path.abspath("../data/MouseDev_Spatial_Triomic")
+    scratch_base = "/home/dmannk/links/scratch"
     datapath = "/home/dmannk/links/projects/ctb-liyue/dmannk/BAKLAVAS_base/data/MouseDev_Spatial_Triomic"
     tarpath = os.path.join(datapath, "GSE308623.tar")
 
@@ -62,7 +66,8 @@ def main() -> None:
 
         for frag_file in tqdm(fragment_files, desc="Collecting fragment files"):
             sample = frag_file.name.replace(".tsv.gz", "")
-            out_path = Path(datapath) / f"{sample}.h5ad"
+            #out_path = Path(datapath) / f"{sample}.h5ad"
+            out_path = Path(scratch_base) / f"{sample}.h5ad"
 
             frag_paths.append(str(frag_file))
             out_h5ad_paths.append(str(out_path))
@@ -136,7 +141,7 @@ def main() -> None:
     print(f"[PROGRESS] Creating AnnDataSet...")
     data = snap.AnnDataSet(
         adatas=[(name, adata) for name, adata in zip(sample_names, adatas)],
-        filename=os.path.join(datapath, "MouseDev_Triomic_ATAC.h5ads"),
+        filename=os.path.join(scratch_base, "MouseDev_Triomic_ATAC.h5ads"),
     )
     print(f"[PROGRESS] AnnDataSet created successfully.")
 
@@ -182,15 +187,20 @@ def main() -> None:
     snap.pl.umap(data, color="leiden", interactive=False)
 
     # Peak calling
-    snap.tl.macs3(data, groupby='leiden', replicate='sample', n_jobs=4)
+    snap.tl.macs3(data, groupby='leiden', replicate='sample', n_jobs=min(_infer_n_jobs(default=8), 4))
     merged_peaks = snap.tl.merge_peaks(data.uns['macs3'], chrom_sizes=snap.genome.mm10)
     print(f"Number of merged peaks: {merged_peaks.shape[0]}")
 
     # Save AnnDataSet to disk (writes the .h5ads file with all modifications)
     #print(f"[PROGRESS] Saving AnnDataSet to disk...")
     #adata = data.to_adata()
-    #adata.write_h5ad(os.path.join(datapath, "MouseDev_Triomic_ATAC.h5ad"))
-    #adata.write_zarr(os.path.join(datapath, "MouseDev_Triomic_ATAC.zarr"))
+
+    # interferes with writing to disk, probably not enough memory to store all the data
+    #adata.var = adata.var.drop(columns=['count'])
+    #del adata.obsm['X_spectral']
+
+    #adata.write_h5ad(os.path.join(scratch_base, "MouseDev_Triomic_ATAC.h5ad"))
+    #adata.write_zarr(os.path.join(scratch_base, "MouseDev_Triomic_ATAC.zarr"))
     #print(f"[PROGRESS] AnnDataSet saved successfully.")
 
     # 6) Cleanup temp directory when you're done with everything (only if we created one)

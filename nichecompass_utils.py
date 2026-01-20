@@ -7,20 +7,25 @@ override behavior from the NicheCompass package (e.g., custom VGPGAE forward).
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import List, Literal, Optional
 
-from torch_geometric.data import Data
-
-from nichecompass.data import SpatialAnnTorchDataset, dataprocessors
-from nichecompass.modules import VGPGAE
-from nichecompass.models import NicheCompass
-
+import math
+import mlflow
+import numpy as np
+import scipy.sparse as sp
 import torch
-import scipy as sp
 from anndata import AnnData
+from torch_geometric.data import Data
 from torch_geometric.utils import add_self_loops, remove_self_loops
+
+from nichecompass.data import (SpatialAnnTorchDataset,
+                               dataprocessors,
+                               initialize_dataloaders)
 from nichecompass.data.utils import encode_labels, sparse_mx_to_sparse_tensor
-from typing import List, Optional
+from nichecompass.models import NicheCompass
+from nichecompass.modules import VGPGAE
+from nichecompass.nn import Encoder
+from nichecompass.train import Trainer
 
 # Isolate functions from dataprocessors to avoid circular imports
 edge_level_split = dataprocessors.edge_level_split
@@ -431,6 +436,192 @@ class CustomNicheCompass(NicheCompass):
         # Store init params for saving and loading
         self.init_params_ = self._get_init_params(locals())
 
+    def train(self,
+              n_epochs: int=100,
+              n_epochs_all_gps: int=25,
+              n_epochs_no_edge_recon: int=0,
+              n_epochs_no_cat_covariates_contrastive: int=5,
+              lr: float=0.001,
+              weight_decay: float=0.,
+              lambda_edge_recon: Optional[float]=500000.,
+              lambda_gene_expr_recon: float=300.,
+              lambda_chrom_access_recon: float=100.,
+              lambda_cat_covariates_contrastive: float=0.,
+              contrastive_logits_pos_ratio: float=0.,
+              contrastive_logits_neg_ratio: float=0.,
+              lambda_group_lasso: float=0.,
+              lambda_l1_masked: float=0.,
+              l1_targets_categories: Optional[list]=["target_gene"],
+              l1_sources_categories: Optional[list]=None,
+              lambda_l1_addon: float=30.,
+              edge_val_ratio: float=0.1,
+              node_val_ratio: float=0.1,
+              edge_batch_size: int=256,
+              node_batch_size: Optional[int]=None,
+              mlflow_experiment_id: Optional[str]=None,
+              retrieve_cat_covariates_embeds: bool=False,
+              retrieve_recon_edge_probs: bool=False,
+              retrieve_agg_weights: bool=False,
+              use_cuda_if_available: bool=True,
+              n_sampled_neighbors: int=-1,
+              latent_dtype: type=np.float64,
+              **trainer_kwargs):
+        """
+        Train the CustomNicheCompass model using CustomTrainer.
+        """
+        self.trainer = CustomTrainer(
+            adata=self.adata,
+            adata_atac=self.adata_atac,
+            model=self.model,
+            counts_key=self.counts_key_,
+            adj_key=self.adj_key_,
+            gp_targets_mask_key=self.gp_targets_mask_key_,
+            gp_sources_mask_key=self.gp_sources_mask_key_,
+            cat_covariates_keys=self.cat_covariates_keys_,
+            edge_val_ratio=edge_val_ratio,
+            node_val_ratio=node_val_ratio,
+            edge_batch_size=edge_batch_size,
+            node_batch_size=node_batch_size,
+            use_cuda_if_available=use_cuda_if_available,
+            n_sampled_neighbors=n_sampled_neighbors,
+            latent_dtype=latent_dtype,
+            **trainer_kwargs)
+        
+        if lambda_l1_masked > 0.:
+            # Create mask for l1 regularization loss
+            if l1_targets_categories is None:
+                l1_targets_categories_encoded = list(self.adata.uns[
+                    self.targets_categories_label_encoder_key_].values())
+            else:
+                l1_targets_categories_encoded = [
+                    self.adata.uns[
+                        self.targets_categories_label_encoder_key_][category]
+                    for category in l1_targets_categories if category in
+                    self.adata.uns[self.targets_categories_label_encoder_key_]]
+            if l1_sources_categories is None:
+                l1_sources_categories_encoded = list(self.adata.uns[
+                    self.sources_categories_label_encoder_key_].values())
+            else:
+                l1_sources_categories_encoded = [
+                    self.adata.uns[
+                        self.sources_categories_label_encoder_key_][category]
+                    for category in l1_sources_categories if category in
+                    self.adata.uns[self.sources_categories_label_encoder_key_]]
+            l1_targets_mask = torch.from_numpy(np.isin(
+                self.adata.varm[self.gp_targets_categories_mask_key_],
+                l1_targets_categories_encoded))
+            l1_sources_mask = torch.from_numpy(np.isin(
+                self.adata.varm[self.gp_sources_categories_mask_key_],
+                l1_sources_categories_encoded))
+        else:
+            l1_targets_mask = None
+            l1_sources_mask = None
+
+        self.trainer.train(
+            n_epochs=n_epochs,
+            n_epochs_no_edge_recon=n_epochs_no_edge_recon,
+            n_epochs_no_cat_covariates_contrastive=n_epochs_no_cat_covariates_contrastive,
+            n_epochs_all_gps=n_epochs_all_gps,
+            lr=lr,
+            weight_decay=weight_decay,
+            lambda_edge_recon=lambda_edge_recon,
+            lambda_gene_expr_recon=lambda_gene_expr_recon,
+            lambda_chrom_access_recon=lambda_chrom_access_recon,
+            lambda_cat_covariates_contrastive=lambda_cat_covariates_contrastive,
+            contrastive_logits_pos_ratio=contrastive_logits_pos_ratio,
+            contrastive_logits_neg_ratio=contrastive_logits_neg_ratio,
+            lambda_group_lasso=lambda_group_lasso,
+            lambda_l1_masked=lambda_l1_masked,
+            l1_targets_mask=l1_targets_mask,
+            l1_sources_mask=l1_sources_mask,
+            lambda_l1_addon=lambda_l1_addon,
+            mlflow_experiment_id=mlflow_experiment_id)
+        
+        self.node_batch_size_ = self.trainer.node_batch_size_
+        
+        self.is_trained_ = True
+        self.model.eval()
+
+        self.adata.obsm[self.latent_key_], _ = self.get_latent_representation(
+           adata=self.adata,
+           counts_key=self.counts_key_,
+           adj_key=self.adj_key_,
+           cat_covariates_keys=self.cat_covariates_keys_,
+           only_active_gps=True,
+           return_mu_std=True,
+           node_batch_size=self.node_batch_size_,
+           dtype=latent_dtype)
+
+        self.adata.uns[self.active_gp_names_key_] = self.get_active_gps()
+
+        if ((len(self.cat_covariates_cats_) > 0) &
+            retrieve_cat_covariates_embeds):
+            for cat_covariates_embed_key, cat_covariate_embed in zip(
+                self.cat_covariates_embeds_keys_,
+                self.get_cat_covariates_embeddings()):
+                self.adata.uns[cat_covariates_embed_key] = cat_covariate_embed
+
+        if retrieve_recon_edge_probs:
+            self.adata.obsp[self.recon_adj_key_] = self.get_recon_edge_probs()
+
+        if retrieve_agg_weights:
+            self.adata.obsp[self.agg_weights_key_] = (
+                self.get_neighbor_importances(
+                    node_batch_size=self.node_batch_size_))
+
+        if mlflow_experiment_id is not None:
+            mlflow.log_metric("n_active_gps",
+                              len(self.adata.uns[self.active_gp_names_key_]))
+
+
+class CustomTrainer(Trainer):
+    """
+    Trainer that uses the project-specific prepare_data implementation.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        data_dict = prepare_data(
+            adata=self.adata,
+            cat_covariates_label_encoders=self.model.cat_covariates_label_encoders_,
+            adata_atac=self.adata_atac,
+            counts_key=self.counts_key,
+            adj_key=self.adj_key,
+            cat_covariates_keys=self.cat_covariates_keys,
+            edge_val_ratio=self.edge_val_ratio_,
+            edge_test_ratio=0.,
+            node_val_ratio=self.node_val_ratio_,
+            node_test_ratio=0.)
+
+        self.node_masked_data = data_dict["node_masked_data"]
+        self.edge_train_data = data_dict["edge_train_data"]
+        self.edge_val_data = data_dict["edge_val_data"]
+        self.n_nodes_train = self.node_masked_data.train_mask.sum().item()
+        self.n_nodes_val = self.node_masked_data.val_mask.sum().item()
+        self.n_edges_train = self.edge_train_data.edge_label_index.size(1)
+        self.n_edges_val = self.edge_val_data.edge_label_index.size(1)
+
+        if self.node_batch_size_ is None:
+            self.node_batch_size_ = int(self.edge_batch_size_ / math.floor(
+                self.n_edges_train / self.n_nodes_train))
+
+        loader_dict = initialize_dataloaders(
+            node_masked_data=self.node_masked_data,
+            edge_train_data=self.edge_train_data,
+            edge_val_data=self.edge_val_data,
+            edge_batch_size=self.edge_batch_size_,
+            node_batch_size=self.node_batch_size_,
+            n_direct_neighbors=self.n_sampled_neighbors_,
+            n_hops=self.loaders_n_hops_,
+            edges_directed=False,
+            neg_edge_sampling_ratio=1.)
+        self.edge_train_loader = loader_dict["edge_train_loader"]
+        self.edge_val_loader = loader_dict.pop("edge_val_loader", None)
+        self.node_train_loader = loader_dict["node_train_loader"]
+        self.node_val_loader = loader_dict.pop("node_val_loader", None)
+
+
 class CustomVGPGAE(VGPGAE):
     """
     Project-specific VGPGAE with custom behavior.
@@ -441,24 +632,68 @@ class CustomVGPGAE(VGPGAE):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        n_cat_covariates_embed_input = (
+            sum(self.cat_covariates_embeds_nums_)
+            if ("encoder" in self.cat_covariates_embeds_injection_) &
+            (self.n_cat_covariates_ > 0)
+            else 0
+        )
 
-    def multiply_gaussians_log_space(self):
+        # Separate encoders for RNA and ATAC inputs when available.
+        self.encoder_rna = Encoder(
+            n_input=self.n_output_genes_,
+            n_cat_covariates_embed_input=n_cat_covariates_embed_input,
+            n_fc_layers=self.n_fc_layers_encoder_,
+            n_layers=self.n_layers_encoder_,
+            n_hidden=self.n_hidden_encoder_,
+            n_latent=self.n_prior_gp_,
+            n_addon_latent=self.n_addon_gp_,
+            conv_layer=self.conv_layer_encoder_,
+            n_attention_heads=self.encoder_n_attention_heads_,
+            dropout_rate=self.dropout_rate_encoder_,
+            activation=torch.relu,
+            use_bn=self.encoder_use_bn_)
+
+        if self.n_output_peaks_ > 0:
+            self.encoder_atac = Encoder(
+                n_input=self.n_output_peaks_,
+                n_cat_covariates_embed_input=n_cat_covariates_embed_input,
+                n_fc_layers=self.n_fc_layers_encoder_,
+                n_layers=self.n_layers_encoder_,
+                n_hidden=self.n_hidden_encoder_,
+                n_latent=self.n_prior_gp_,
+                n_addon_latent=self.n_addon_gp_,
+                conv_layer=self.conv_layer_encoder_,
+                n_attention_heads=self.encoder_n_attention_heads_,
+                dropout_rate=self.dropout_rate_encoder_,
+                activation=torch.relu,
+                use_bn=self.encoder_use_bn_)
+        else:
+            self.encoder_atac = None
+
+
+    def multiply_gaussians_log_space(self,
+                                     mu_rna: torch.Tensor,
+                                     logstd_rna: torch.Tensor,
+                                     mu_atac: torch.Tensor,
+                                     logstd_atac: torch.Tensor) -> tuple:
         """
         Combines two Gaussians using log-standard-deviations.
         s1, s2: natural log of the standard deviation
         """
         # Calculate variances in log-space for stability
         # var = exp(2*s)
-        v1 = torch.exp(2 * self.logstd_rna)
-        v2 = torch.exp(2 * self.logstd_atac)
+        v1 = torch.exp(2 * logstd_rna)
+        v2 = torch.exp(2 * logstd_atac)
         denom = v1 + v2
         
         # New Mean
-        mu_new = (self.mu_rna * v2 + self.mu_atac * v1) / denom
+        mu_new = (mu_rna * v2 + mu_atac * v1) / denom
         
         # New Log-Std: s_new = s1 + s2 - 0.5 * ln(exp(2*s1) + exp(2*s2))
         # We use np.logaddexp for numerical stability
-        s_new = self.logstd_rna + self.logstd_atac - 0.5 * torch.logaddexp(2 * self.logstd_rna, 2 * self.logstd_atac)
+        s_new = logstd_rna + logstd_atac - 0.5 * torch.logaddexp(
+            2 * logstd_rna, 2 * logstd_atac)
         
         return mu_new, s_new
 
@@ -536,6 +771,15 @@ class CustomVGPGAE(VGPGAE):
         else:
             self.cat_covariates_embed = None         
 
+        if self.encoder_atac is None:
+            return super().forward(
+                data_batch=data_batch,
+                decoder=decoder,
+                use_only_active_gps=use_only_active_gps,
+                return_agg_weights=return_agg_weights,
+                update_atac_dynamic_decoder_mask=update_atac_dynamic_decoder_mask,
+            )
+
         output = {}
 
         # Separate rna and atac data
@@ -547,7 +791,7 @@ class CustomVGPGAE(VGPGAE):
         # Filter for nodes in current batch
 
         # Encode rna data
-        encoder_outputs_rna = self.encoder(
+        encoder_outputs_rna = self.encoder_rna(
             x=x_enc_rna,
             edge_index=edge_index,
             cat_covariates_embed=(self.cat_covariates_embed if "encoder" in
@@ -560,7 +804,7 @@ class CustomVGPGAE(VGPGAE):
         z_rna = self.reparameterize(self.mu_rna, self.logstd_rna)
 
         # Encode atac data
-        encoder_outputs_atac = self.encoder(
+        encoder_outputs_atac = self.encoder_atac(
             x=x_enc_atac,
             edge_index=edge_index,
             cat_covariates_embed=(self.cat_covariates_embed if "encoder" in
@@ -573,7 +817,12 @@ class CustomVGPGAE(VGPGAE):
         z_atac = self.reparameterize(self.mu_atac, self.logstd_atac)
 
         # Combine rna and atac latent distributions using product of Gaussians
-        self.mu, self.logstd = self.multiply_gaussians_log_space()
+        self.mu, self.logstd = self.multiply_gaussians_log_space(
+            self.mu_rna,
+            self.logstd_rna,
+            self.mu_atac,
+            self.logstd_atac,
+        )
         output["mu"] = self.mu
         output["logstd"] = self.logstd
         z = self.reparameterize(self.mu, self.logstd)
@@ -879,6 +1128,72 @@ class CustomVGPGAE(VGPGAE):
         return output
 
 
+    def get_latent_representation(
+            self,
+            node_batch: Data,
+            only_active_gps: bool=True,
+            return_mu_std: bool=False
+            ) -> torch.Tensor:
+        """
+        Encode RNA + ATAC separately and combine latents via Gaussian product.
+        """
+        if self.encoder_atac is None:
+            return super().get_latent_representation(
+                node_batch=node_batch,
+                only_active_gps=only_active_gps,
+                return_mu_std=return_mu_std)
+
+        if self.log_variational_:
+            x_enc = torch.log(1 + node_batch.x)
+        else:
+            x_enc = node_batch.x
+
+        x_enc_rna = x_enc[:, :self.n_output_genes_]
+        x_enc_atac = x_enc[:, self.n_output_genes_:]
+
+        if len(self.cat_covariates_cats_) > 0:
+            cat_covariates_embeds = []
+            for i in range(len(self.cat_covariates_embedders)):
+                cat_covariates_embeds.append(self.cat_covariates_embedders[i](
+                    node_batch.cat_covariates_cats[:, i]))
+                cat_covariates_embed = torch.cat(
+                    cat_covariates_embeds,
+                    dim=1)
+        else:
+            cat_covariates_embed = None
+
+        encoder_outputs_rna = self.encoder_rna(
+            x=x_enc_rna,
+            edge_index=node_batch.edge_index,
+            cat_covariates_embed=(cat_covariates_embed if "encoder" in
+                                  self.cat_covariates_embeds_injection_ else
+                                  None))
+        mu_rna = encoder_outputs_rna[0][:node_batch.batch_size, :]
+        logstd_rna = encoder_outputs_rna[1][:node_batch.batch_size, :]
+
+        encoder_outputs_atac = self.encoder_atac(
+            x=x_enc_atac,
+            edge_index=node_batch.edge_index,
+            cat_covariates_embed=(cat_covariates_embed if "encoder" in
+                                  self.cat_covariates_embeds_injection_ else
+                                  None))
+        mu_atac = encoder_outputs_atac[0][:node_batch.batch_size, :]
+        logstd_atac = encoder_outputs_atac[1][:node_batch.batch_size, :]
+
+        mu, logstd = self.multiply_gaussians_log_space(
+            mu_rna, logstd_rna, mu_atac, logstd_atac)
+
+        if only_active_gps:
+            active_gp_mask = self.get_active_gp_mask()
+            mu, logstd = mu[:, active_gp_mask], logstd[:, active_gp_mask]
+
+        if return_mu_std:
+            std = torch.exp(logstd)
+            return mu, std
+        z = self.reparameterize(mu, logstd)
+        return z
+
+
 class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
     """
     Project-specific dataset wrapper for NicheCompass.
@@ -897,7 +1212,7 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
                  adj_key: str="spatial_connectivities",
                  edge_label_adj_key: str="edge_label_spatial_connectivities",
                  self_loops: bool=True,
-                 cat_covariates_keys: Optional[str]=None):
+                 cat_covariates_keys: Optional[List[str]]=None):
         if counts_key is None:
             x_rna = adata.X
         else:
@@ -909,12 +1224,16 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
         else:
             self.x_rna = torch.tensor(x_rna)
 
-        # Concatenate ATAC feature vector in dense format if provided
+        # Store ATAC features in dense format if provided
         if adata_atac is not None:
-            if sp.issparse(adata_atac.X): 
+            if sp.issparse(adata_atac.X):
                 self.x_atac = torch.tensor(adata_atac.X.toarray())
             else:
                 self.x_atac = torch.tensor(adata_atac.X)
+            self.x = torch.cat((self.x_rna, self.x_atac), axis=1)
+        else:
+            self.x_atac = None
+            self.x = self.x_rna
 
         # Store adjacency matrix in torch_sparse SparseTensor format
         if sp.issparse(adata.obsp[adj_key]):
@@ -960,7 +1279,7 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
 
     def __len__(self):
         """Return the number of observations stored in SpatialAnnTorchDataset"""
-        return self.x_rna.size(0) + self.x_atac.size(0)
+        return self.x.size(0)
 
 
 def prepare_data(adata: AnnData,
@@ -987,21 +1306,18 @@ def prepare_data(adata: AnnData,
 
     # PyG Data object (has 2 edge index pairs for one edge because of symmetry;
     # one edge index pair will be removed in the edge-level split).
-    data_rna = Data(x=dataset.x_rna,
-                edge_index=dataset.edge_index,
-                edge_attr=dataset.edge_index.t()) # store index of edge nodes as
-                                                # edge attribute for
-                                                # aggregation weight retrieval
-                                                # in mini batches
-    data_atac = Data(x=dataset.x_atac,
-                    edge_index=dataset.edge_index,
-                    edge_attr=dataset.edge_index.t()) # store index of edge nodes as
-                                                    # edge attribute for
-                                                    # aggregation weight retrieval
-                                                    # in mini batches
+    data = Data(
+        x=dataset.x,
+        edge_index=dataset.edge_index,
+        edge_attr=dataset.edge_index.t()) # store index of edge nodes as
+                                          # edge attribute for
+                                          # aggregation weight retrieval
+                                          # in mini batches
 
-    # Concatenate rna and atac data
-    data = data_rna.cat([data_atac])
+    # Keep per-modality views for debugging / custom logic.
+    data.x_rna = dataset.x_rna
+    if dataset.x_atac is not None:
+        data.x_atac = dataset.x_atac
 
     if cat_covariates_keys is not None:
         data.cat_covariates_cats = dataset.cat_covariates_cats
@@ -1024,4 +1340,10 @@ def prepare_data(adata: AnnData,
     return data_dict
 
 
-__all__ = ["CustomVGPGAE", "CustomSpatialAnnTorchDataset"]
+__all__ = [
+    "CustomNicheCompass",
+    "CustomTrainer",
+    "CustomVGPGAE",
+    "CustomSpatialAnnTorchDataset",
+    "prepare_data",
+]

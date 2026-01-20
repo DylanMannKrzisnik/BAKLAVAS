@@ -1194,6 +1194,174 @@ class CustomVGPGAE(VGPGAE):
         return z
 
 
+    def get_omics_decoder_outputs(
+            self,
+            node_batch: Data,
+            only_active_gps: bool=True,
+            ) -> dict:
+        """
+        Decode using a combined RNA+ATAC latent (product-of-Gaussians).
+
+        Mirrors `nichecompass.modules.vgpgae.VGPGAE.get_omics_decoder_outputs`,
+        but uses `encoder_rna` / `encoder_atac` and combines their posteriors
+        before decoding.
+        """
+        if self.encoder_atac is None:
+            return super().get_omics_decoder_outputs(
+                node_batch=node_batch,
+                only_active_gps=only_active_gps)
+
+        x = node_batch.x  # dim: n_obs x n_omics_features
+        edge_index = node_batch.edge_index
+        batch_idx = slice(None, node_batch.batch_size)
+
+        # Logarithmitize omics feature vector if done during training
+        if self.log_variational_:
+            x_enc = torch.log(1 + x)
+        else:
+            x_enc = x
+
+        # Get categorical covariate embeddings
+        if len(self.cat_covariates_cats_) > 0:
+            cat_covariates_embeds = []
+            for i in range(len(self.cat_covariates_embedders)):
+                cat_covariates_embeds.append(self.cat_covariates_embedders[i](
+                    node_batch.cat_covariates_cats[:, i]))
+                cat_covariates_embed = torch.cat(
+                    cat_covariates_embeds,
+                    dim=1)
+        else:
+            cat_covariates_embed = None
+
+        # Split encoder inputs by modality
+        x_enc_rna = x_enc[:, :self.n_output_genes_]
+        x_enc_atac = x_enc[:, self.n_output_genes_:]
+
+        # Encode RNA + ATAC and combine posteriors
+        encoder_outputs_rna = self.encoder_rna(
+            x=x_enc_rna,
+            edge_index=edge_index,
+            cat_covariates_embed=(cat_covariates_embed if "encoder" in
+                                  self.cat_covariates_embeds_injection_ else
+                                  None))
+        mu_rna = encoder_outputs_rna[0][batch_idx, :]
+        logstd_rna = encoder_outputs_rna[1][batch_idx, :]
+
+        encoder_outputs_atac = self.encoder_atac(
+            x=x_enc_atac,
+            edge_index=edge_index,
+            cat_covariates_embed=(cat_covariates_embed if "encoder" in
+                                  self.cat_covariates_embeds_injection_ else
+                                  None))
+        mu_atac = encoder_outputs_atac[0][batch_idx, :]
+        logstd_atac = encoder_outputs_atac[1][batch_idx, :]
+
+        mu, logstd = self.multiply_gaussians_log_space(
+            mu_rna, logstd_rna, mu_atac, logstd_atac)
+        z = self.reparameterize(mu, logstd)
+
+        if only_active_gps:
+            active_gp_mask = self.get_active_gp_mask()
+            # Set gp scores of inactive gene programs to 0 to not affect decoders
+            z[:, ~active_gp_mask] = 0
+
+        output = {}
+        output["node_labels"] = {}
+
+        # Get rna and atac part from omics feature vector
+        x_atac = x[:, self.n_output_genes_:]
+        x = x[:, :self.n_output_genes_]
+
+        # Compute aggregated neighborhood rna feature vector
+        rna_node_label_aggregator_output = self.rna_node_label_aggregator(
+                x=x,
+                edge_index=edge_index,
+                return_agg_weights=False)
+        x_neighbors = rna_node_label_aggregator_output[0]
+
+        # Retrieve rna node labels and only keep nodes in current node batch
+        assert x.size(1) == self.n_output_genes_
+        assert x_neighbors.size(1) == self.n_output_genes_
+        output["node_labels"]["target_rna"] = x[batch_idx]
+        output["node_labels"]["source_rna"] = x_neighbors[batch_idx]
+
+        # Use observed library size as scaling factor for the NB means
+        target_rna_library_size = output["node_labels"]["target_rna"].sum(
+            1).unsqueeze(1)
+        source_rna_library_size = output["node_labels"]["source_rna"].sum(
+            1).unsqueeze(1)
+        target_rna_log_library_size = torch.log(target_rna_library_size)
+        source_rna_log_library_size = torch.log(source_rna_library_size)
+
+        output["target_rna_nb_means"] = self.target_rna_decoder(
+            z=z,
+            log_library_size=target_rna_log_library_size,
+            cat_covariates_embed=(
+                cat_covariates_embed[batch_idx] if
+                (cat_covariates_embed is not None) &
+                ("gene_expr_decoder" in
+                 self.cat_covariates_embeds_injection_)
+                 else None))
+        output["source_rna_nb_means"] = self.source_rna_decoder(
+            z=z,
+            log_library_size=source_rna_log_library_size,
+            cat_covariates_embed=(
+            cat_covariates_embed[batch_idx] if
+            (cat_covariates_embed is not None) &
+            ("gene_expr_decoder" in
+             self.cat_covariates_embeds_injection_)
+             else None))
+
+        if "atac" in self.modalities_:
+            # Compute aggregated neighborhood atac feature vector
+            atac_node_label_aggregator_output = (
+                self.atac_node_label_aggregator(
+                    x=x_atac,
+                    edge_index=edge_index,
+                    return_agg_weights=False))
+            x_neighbors_atac = atac_node_label_aggregator_output[0]
+
+            # Retrieve node labels and only keep nodes in current node batch
+            assert x_atac.size(1) == self.n_output_peaks_
+            assert x_neighbors_atac.size(1) == self.n_output_peaks_
+            output["node_labels"]["target_atac"] = x_atac[batch_idx][
+                :, self.features_idx_dict_["target_reconstructed_atac_idx"]]
+            output["node_labels"]["source_atac"] = x_neighbors_atac[batch_idx][
+                :, self.features_idx_dict_["source_reconstructed_atac_idx"]]
+
+            # Use observed library size as scaling factor for the NB means
+            target_atac_library_size = output["node_labels"][
+                "target_atac"].sum(1).unsqueeze(1)
+            source_atac_library_size = output["node_labels"][
+                "source_atac"].sum(1).unsqueeze(1)
+            target_atac_log_library_size = torch.log(target_atac_library_size)
+            source_atac_log_library_size = torch.log(source_atac_library_size)
+
+            output["target_atac_nb_means"] = self.target_atac_decoder(
+                z=z,
+                log_library_size=target_atac_log_library_size,
+                dynamic_mask=self.target_atac_dynamic_decoder_mask,
+                cat_covariates_embed=(
+                    cat_covariates_embed[batch_idx] if
+                    (cat_covariates_embed is not None) &
+                    ("chrom_access_decoder" in
+                     self.cat_covariates_embeds_injection_) else
+                    None))[
+                :, self.features_idx_dict_["target_reconstructed_atac_idx"]]
+            output["source_atac_nb_means"] = self.source_atac_decoder(
+                z=z,
+                log_library_size=source_atac_log_library_size,
+                dynamic_mask=self.source_atac_dynamic_decoder_mask,
+                cat_covariates_embed=(
+                    cat_covariates_embed[batch_idx] if
+                    (cat_covariates_embed is not None) &
+                    ("chrom_access_decoder" in
+                     self.cat_covariates_embeds_injection_) else
+                    None))[
+                :, self.features_idx_dict_["source_reconstructed_atac_idx"]]
+        return output
+
+
 class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
     """
     Project-specific dataset wrapper for NicheCompass.

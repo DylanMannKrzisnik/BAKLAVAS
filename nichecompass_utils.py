@@ -13,6 +13,7 @@ from torch_geometric.data import Data
 
 from nichecompass.data import SpatialAnnTorchDataset, dataprocessors
 from nichecompass.modules import VGPGAE
+from nichecompass.models import NicheCompass
 
 import torch
 import scipy as sp
@@ -24,8 +25,411 @@ from typing import List, Optional
 # Isolate functions from dataprocessors to avoid circular imports
 edge_level_split = dataprocessors.edge_level_split
 node_level_split_mask = dataprocessors.node_level_split_mask
-prepare_data = dataprocessors.prepare_data
 
+class CustomNicheCompass(NicheCompass):
+    """
+    Project-specific NicheCompass with custom behavior.
+    """
+    def __init__(self,
+                 adata: AnnData,
+                 adata_atac: Optional[AnnData]=None,
+                 counts_key: Optional[str]="counts",
+                 adj_key: str="spatial_connectivities",
+                 gp_names_key: str="nichecompass_gp_names",
+                 active_gp_names_key: str="nichecompass_active_gp_names",
+                 gp_targets_mask_key: str="nichecompass_gp_targets",
+                 gp_targets_categories_mask_key: str="nichecompass_gp_targets_categories",
+                 targets_categories_label_encoder_key: str="nichecompass_targets_categories_label_encoder",
+                 gp_sources_mask_key: str="nichecompass_gp_sources",
+                 gp_sources_categories_mask_key: str="nichecompass_gp_sources_categories",
+                 sources_categories_label_encoder_key: str="nichecompass_sources_categories_label_encoder",
+                 ca_targets_mask_key: Optional[str]="nichecompass_ca_targets",
+                 ca_sources_mask_key: Optional[str]="nichecompass_ca_sources",
+                 latent_key: str="nichecompass_latent",
+                 cat_covariates_embeds_keys: Optional[List[str]]=None,
+                 cat_covariates_embeds_injection: Optional[List[
+                     Literal["encoder",
+                             "gene_expr_decoder",
+                             "chrom_access_decoder"]]]=["gene_expr_decoder",
+                                                        "chrom_access_decoder"],
+                 cat_covariates_keys: Optional[List[str]]=None,
+                 cat_covariates_no_edges: Optional[List[bool]]=None,
+                 genes_idx_key: str="nichecompass_genes_idx",
+                 target_genes_idx_key: str="nichecompass_target_genes_idx",
+                 source_genes_idx_key: str="nichecompass_source_genes_idx",
+                 peaks_idx_key: str="nichecompass_peaks_idx",
+                 target_peaks_idx_key: str="nichecompass_target_peaks_idx",
+                 source_peaks_idx_key: str="nichecompass_source_peaks_idx",
+                 gene_peaks_mask_key: str="nichecompass_gene_peaks",
+                 recon_adj_key: Optional[str]="nichecompass_recon_connectivities",
+                 agg_weights_key: Optional[str]="nichecompass_agg_weights",
+                 include_edge_recon_loss: bool=True,
+                 include_gene_expr_recon_loss: bool=True,
+                 include_chrom_access_recon_loss: Optional[bool]=True,
+                 include_cat_covariates_contrastive_loss: bool=False,
+                 gene_expr_recon_dist: Literal["nb"]="nb",
+                 log_variational: bool=True,
+                 node_label_method: Literal[
+                    "one-hop-sum",
+                    "one-hop-norm",
+                    "one-hop-attention"]="one-hop-norm",
+                 active_gp_thresh_ratio: float=0.01,
+                 active_gp_type: Literal["mixed", "separate"]="separate",
+                 n_fc_layers_encoder: int=1,
+                 n_layers_encoder: int=1,
+                 n_hidden_encoder: Optional[int]=None,
+                 conv_layer_encoder: Literal["gcnconv", "gatv2conv"]="gatv2conv",
+                 encoder_n_attention_heads: Optional[int]=4,
+                 encoder_use_bn: bool=False,
+                 dropout_rate_encoder: float=0.,
+                 dropout_rate_graph_decoder: float=0.,
+                 cat_covariates_cats: Optional[List[List]]=None,
+                 n_addon_gp: int=100,
+                 cat_covariates_embeds_nums: Optional[List[int]]=None,
+                 include_edge_kl_loss: bool=True,
+                 use_cuda_if_available: bool=True,
+                 seed: int=0,
+                 **kwargs):
+        self.adata = adata
+        self.adata_atac = adata_atac
+        self.counts_key_ = counts_key
+        self.adj_key_ = adj_key
+        self.gp_names_key_ = gp_names_key
+        self.active_gp_names_key_ = active_gp_names_key
+        self.gp_targets_mask_key_ = gp_targets_mask_key
+        self.gp_targets_categories_mask_key_ = gp_targets_categories_mask_key
+        self.targets_categories_label_encoder_key_ = (
+            targets_categories_label_encoder_key)
+        self.gp_sources_mask_key_ = gp_sources_mask_key
+        self.gp_sources_categories_mask_key_ = gp_sources_categories_mask_key
+        self.sources_categories_label_encoder_key_ = (
+            sources_categories_label_encoder_key)
+        self.ca_targets_mask_key_ = ca_targets_mask_key
+        self.ca_sources_mask_key_ = ca_sources_mask_key
+        self.latent_key_ = latent_key
+        self.cat_covariates_embeds_keys_ = cat_covariates_embeds_keys
+        self.cat_covariates_embeds_injection_ = cat_covariates_embeds_injection
+        self.cat_covariates_keys_ = cat_covariates_keys
+        self.cat_covariates_embeds_keys_ = cat_covariates_embeds_keys
+        self.genes_idx_key_ = genes_idx_key
+        self.target_genes_idx_key_ = target_genes_idx_key
+        self.source_genes_idx_key_ = source_genes_idx_key
+        self.peaks_idx_key_ = peaks_idx_key
+        self.target_peaks_idx_key_ = target_peaks_idx_key
+        self.source_peaks_idx_key_ = source_peaks_idx_key
+        self.gene_peaks_mask_key_ = gene_peaks_mask_key
+        self.recon_adj_key_ = recon_adj_key
+        self.agg_weights_key_ = agg_weights_key
+        self.include_edge_recon_loss_ = include_edge_recon_loss
+        self.include_gene_expr_recon_loss_ = include_gene_expr_recon_loss
+        self.include_chrom_access_recon_loss_ = include_chrom_access_recon_loss
+        self.include_cat_covariates_contrastive_loss_ = (
+            include_cat_covariates_contrastive_loss)
+        self.gene_expr_recon_dist_ = gene_expr_recon_dist
+        self.log_variational_ = log_variational
+        self.node_label_method_ = node_label_method
+        self.active_gp_thresh_ratio_ = active_gp_thresh_ratio
+        self.active_gp_type_ = active_gp_type
+        self.include_edge_kl_loss_ = include_edge_kl_loss
+        self.seed_ = seed
+
+        # Set seed for reproducibility
+        np.random.seed(self.seed_)
+        if use_cuda_if_available & torch.cuda.is_available():
+            torch.cuda.manual_seed(self.seed_)
+            torch.manual_seed(self.seed_)
+        else:
+            torch.manual_seed(self.seed_)
+
+        # Retrieve gene program masks
+        if gp_targets_mask_key in adata.varm:
+            # NOTE: dtype can be changed to bool and should be able to handle sparse
+            # mask
+            self.gp_targets_mask_ = torch.tensor(
+                adata.varm[gp_targets_mask_key].T,
+                dtype=torch.bool)
+        else:
+            raise ValueError("Please specify an adequate ´gp_targets_mask_key´ "
+                             "for your adata object. The targets mask needs to "
+                             "be stored in ´adata.varm[gp_targets_mask_key]´. "
+                             " If you do not want to mask gene expression "
+                             "reconstruction, you can create a mask of 1s that"
+                             " allows all gene program latent nodes to "
+                             "reconstruct all genes.")
+
+        if gp_sources_mask_key in adata.varm:
+            # NOTE: dtype can be changed to bool and should be able to handle
+            # sparse mask
+            self.gp_sources_mask_ = torch.tensor(
+                adata.varm[gp_sources_mask_key].T,
+                dtype=torch.bool)
+                                           
+        else:
+            raise ValueError("Please specify an adequate "
+                             "´gp_sources_mask_key´ for your adata object. "
+                             "The sources mask needs to be stored in "
+                             "´adata.varm[gp_sources_mask_key]´. If you do "
+                             "not want to mask gene expression "
+                             "reconstruction, you can create a mask of 1s "
+                             " that allows all gene program latent nodes to"
+                             " reconstruct all genes.")
+            
+        # Determine features scale factors
+        self.features_scale_factors_ = torch.concat(
+            (torch.tensor(self.adata.X.sum(0))[0],
+             torch.tensor(self.adata.X.sum(0))[0]))
+    
+        # Retrieve chromatin accessibility masks
+        if adata_atac is None:
+            self.ca_targets_mask_ = None
+            self.ca_sources_mask_ = None
+            gene_peaks_mask = None
+        else:
+            gene_peaks_mask = adata.varm[gene_peaks_mask_key].tocoo()
+            gene_peaks_mask = torch.sparse_coo_tensor(
+                indices=[gene_peaks_mask.row, gene_peaks_mask.col],
+                values=gene_peaks_mask.data,
+                size=gene_peaks_mask.shape,
+                dtype=torch.bool) # bool does not work with torch.mm
+            if ca_targets_mask_key in adata_atac.varm:
+                ca_targets_mask = adata_atac.varm[ca_targets_mask_key].T.tocoo()
+            else:
+                raise ValueError("Please specify an adequate "
+                                 "´ca_targets_mask_key´ for your adata_atac "
+                                 "object. The targets mask needs to be stored "
+                                 "in ´adata_atac.varm[ca_targets_mask_key]´. If"
+                                 " you do not want to mask chromatin "
+                                 " accessibility reconstruction, you can create"
+                                 " a mask of 1s that allows all gene program "
+                                 "latent nodes to reconstruct all peaks.")
+            self.ca_targets_mask_ = torch.sparse_coo_tensor(
+                indices=[ca_targets_mask.row, ca_targets_mask.col],
+                values=ca_targets_mask.data,
+                size=ca_targets_mask.shape,
+                dtype=torch.bool).to_dense() # for now
+            if ca_sources_mask_key in adata_atac.varm:
+                ca_sources_mask = adata_atac.varm[
+                    ca_sources_mask_key].T.tocoo()
+                self.ca_sources_mask_ = torch.sparse_coo_tensor(
+                    indices=[ca_sources_mask.row, ca_sources_mask.col],
+                    values=ca_sources_mask.data,
+                    size=ca_sources_mask.shape,
+                    dtype=torch.bool).to_dense() # for now
+            else:
+                raise ValueError("Please specify an adequate "
+                                "´ca_sources_mask_key´ for your adata_atac "
+                                "object. The sources mask needs to be "
+                                "stored in "
+                                "´adata_atac.varm[ca_sources_mask_key]´. If"
+                                "you do not want to mask chromatin "
+                                " accessibility reconstruction, you can "
+                                "create a mask of 1s that allows all gene "
+                                "program latent nodes to reconstruct all "
+                                "peaks.")
+
+        # Retrieve index of genes in gp mask and index of genes not in gp mask
+        self.features_idx_dict_ = {}
+        self.features_idx_dict_["masked_rna_idx"] = adata.uns[
+            genes_idx_key]
+        self.features_idx_dict_["unmasked_rna_idx"] = [
+            i for i in range(len(adata.var_names))
+            if i not in self.features_idx_dict_["masked_rna_idx"]]
+        self.features_idx_dict_["target_masked_rna_idx"] = list(
+            adata.uns[target_genes_idx_key])
+        self.features_idx_dict_["target_unmasked_rna_idx"] = [
+            i for i in range(len(adata.var_names))
+            if i not in self.features_idx_dict_["target_masked_rna_idx"]]
+        self.features_idx_dict_["source_masked_rna_idx"] = list(
+            adata.uns[source_genes_idx_key])
+        self.features_idx_dict_["source_unmasked_rna_idx"] = [
+            i for i in range(len(adata.var_names))
+            if i not in self.features_idx_dict_["source_masked_rna_idx"]]
+        
+        # Retrieve index of peaks in ca mask and index of peaks not in ca mask
+        if adata_atac is not None:
+            self.peaks_idx_ = adata_atac.uns[peaks_idx_key]
+            self.target_peaks_idx_ = adata_atac.uns[target_peaks_idx_key]
+            self.source_peaks_idx_ = adata_atac.uns[source_peaks_idx_key]
+            
+            self.features_idx_dict_["masked_atac_idx"] = adata_atac.uns[
+                peaks_idx_key]
+            self.features_idx_dict_["unmasked_atac_idx"] = [
+                i for i in range(len(adata_atac.var_names))
+                if i not in self.features_idx_dict_["masked_atac_idx"]]
+            self.features_idx_dict_["target_masked_atac_idx"] = list(
+                adata_atac.uns[target_peaks_idx_key])
+            self.features_idx_dict_["target_unmasked_atac_idx"] = [
+                i for i in range(len(adata_atac.var_names))
+                if i not in self.features_idx_dict_["target_masked_atac_idx"]]
+            self.features_idx_dict_["source_masked_atac_idx"] = list(
+                adata_atac.uns[source_peaks_idx_key])
+            self.features_idx_dict_["source_unmasked_atac_idx"] = [
+                i for i in range(len(adata_atac.var_names))
+                if i not in self.features_idx_dict_["source_masked_atac_idx"]]
+
+        # Determine VGPGAE inputs
+        self.n_input_ = adata.n_vars
+        self.n_output_genes_ = adata.n_vars
+        if adata_atac is not None:
+            self.modalities_ = ["rna", "atac"]
+            if not np.all(adata.obs.index == adata_atac.obs.index):
+                raise ValueError("Please make sure that 'adata' and "
+                                 "'adata_atac' contain the same observations in"
+                                 " the same order.")
+            # Peaks are concatenated to genes in input
+            self.n_input_ += adata_atac.n_vars
+            self.n_output_peaks_ = adata_atac.n_vars
+        else:
+            self.modalities_ = ["rna"]
+            self.n_output_peaks_ = 0
+        self.n_fc_layers_encoder_ = n_fc_layers_encoder
+        self.n_layers_encoder_ = n_layers_encoder
+        self.conv_layer_encoder_ = conv_layer_encoder
+        if conv_layer_encoder == "gatv2conv":
+            self.encoder_n_attention_heads_ = encoder_n_attention_heads
+        else:
+            self.encoder_n_attention_heads_ = 0
+        self.encoder_use_bn_ = encoder_use_bn
+        self.dropout_rate_encoder_ = dropout_rate_encoder
+        self.dropout_rate_graph_decoder_ = dropout_rate_graph_decoder
+        self.n_prior_gp_ = len(self.gp_targets_mask_)
+        self.n_addon_gp_ = n_addon_gp
+        
+        if n_addon_gp > 0:
+            # Add add-on gps to adata
+            gp_list = list(self.adata.uns[self.gp_names_key_])
+            for i in range(n_addon_gp):
+                if f"Add-on_{i}_GP" not in gp_list:
+                    gp_list.append(f"Add-on_{i}_GP")
+            self.adata.uns[self.gp_names_key_] = np.array(gp_list)
+        else:
+            # Remove add-on gps from adata
+            for gp_name in list(adata.uns[gp_names_key]):
+                if "Add-on" in gp_name:
+                    self.adata.uns[gp_names_key] = np.delete(
+                        self.adata.uns[gp_names_key],
+                        list(self.adata.uns[gp_names_key]).index(gp_name))
+
+        # Retrieve categorical covariates categories
+        if cat_covariates_cats is None:
+            if cat_covariates_keys is not None:
+                self.cat_covariates_cats_ = [
+                    adata.obs[cat_covariate_key].unique().tolist() 
+                    for cat_covariate_key in cat_covariates_keys]
+            else:
+                self.cat_covariates_cats_ = []
+        else:
+            self.cat_covariates_cats_ = cat_covariates_cats
+        
+        # Define dimensionality of categorical covariates embeddings as
+        # number of categories of each categorical covariate respectively
+        # if not provided explicitly
+        if cat_covariates_embeds_nums is None:
+            cat_covariates_embeds_nums = []
+            for cat_covariate_cats in self.cat_covariates_cats_:
+                cat_covariates_embeds_nums.append(len(cat_covariate_cats))
+        self.cat_covariates_embeds_nums_ = cat_covariates_embeds_nums
+
+        # Determine dimensionality of hidden encoder layer if not provided
+        if n_hidden_encoder is None:
+            if len(adata.var) > (self.n_prior_gp_ + self.n_addon_gp_):
+                n_hidden_encoder = (self.n_prior_gp_ + self.n_addon_gp_)
+            else:
+                n_hidden_encoder = len(adata.var)
+        self.n_hidden_encoder_ = n_hidden_encoder
+            
+        # Define categorical covariates no edges as all 'True' if not
+        # explicitly provided, so that they are excluded from the edge
+        # reconstruction loss
+        if ((cat_covariates_no_edges is None) &
+            (len(self.cat_covariates_cats_) > 0)):
+            self.cat_covariates_no_edges_ = (
+                [True] * len(self.cat_covariates_cats_))
+        else:
+            self.cat_covariates_no_edges_ = cat_covariates_no_edges
+        
+        # Validate counts layer key and counts values
+        if counts_key is not None and counts_key not in adata.layers:
+            raise ValueError("Please specify an adequate ´counts_key´. By "
+                             "default the counts are assumed to be stored in "
+                             "data.layers['counts'].")
+        if include_gene_expr_recon_loss and log_variational:
+            if counts_key is None:
+                x = adata.X
+            else:
+                x = adata.layers[counts_key]
+            if (x < 0).sum() > 0:
+                raise ValueError("Please make sure that "
+                                 "´adata.layers[counts_key]´ contains the"
+                                 " raw counts (not log library size "
+                                 "normalized) if ´include_gene_expr_recon_loss´"
+                                 " is ´True´ and ´log_variational´ is ´True´. "
+                                 "If you want to use log library size "
+                                 " normalized counts, make sure that "
+                                 "´log_variational´ is ´False´.")
+
+        # Validate adjacency key
+        if adj_key not in adata.obsp:
+            raise ValueError("Please specify an adequate ´adj_key´. "
+                             "By default the adjacency matrix is assumed to be "
+                             "stored in adata.obsm['spatial_connectivities'].")
+
+        # Validate gp key
+        if gp_names_key not in adata.uns:
+            raise ValueError("Please specify an adequate ´gp_names_key´. "
+                             "By default the gene program names are assumed to "
+                             "be stored in adata.uns['nichecompass_gp_names'].")
+
+        # Validate categorical covariates keys
+        if cat_covariates_keys is not None:
+            for cat_covariate_key in cat_covariates_keys:
+                if cat_covariate_key not in adata.obs:
+                    raise ValueError(
+                        "Please specify adequate ´cat_covariates_keys´. "
+                        f"The key {cat_covariate_key} was not found in adata.")
+        
+        # Initialize model with Variational Gene Program Graph Autoencoder 
+        # neural network module
+        self.model = CustomVGPGAE(
+            n_input=self.n_input_,
+            n_fc_layers_encoder=self.n_fc_layers_encoder_,
+            n_layers_encoder=self.n_layers_encoder_,
+            n_hidden_encoder=self.n_hidden_encoder_,
+            n_prior_gp=self.n_prior_gp_,
+            n_addon_gp=self.n_addon_gp_,
+            cat_covariates_embeds_nums=self.cat_covariates_embeds_nums_,
+            n_output_genes=self.n_output_genes_,
+            n_output_peaks=self.n_output_peaks_,
+            target_rna_decoder_mask=self.gp_targets_mask_,
+            source_rna_decoder_mask=self.gp_sources_mask_,
+            target_atac_decoder_mask=self.ca_targets_mask_,
+            source_atac_decoder_mask=self.ca_sources_mask_,
+            features_idx_dict=self.features_idx_dict_,
+            features_scale_factors=self.features_scale_factors_,
+            gene_peaks_mask=gene_peaks_mask,
+            cat_covariates_cats=self.cat_covariates_cats_,
+            cat_covariates_no_edges=self.cat_covariates_no_edges_,
+            conv_layer_encoder=self.conv_layer_encoder_,
+            encoder_n_attention_heads=self.encoder_n_attention_heads_,
+            encoder_use_bn=self.encoder_use_bn_,
+            dropout_rate_encoder=self.dropout_rate_encoder_,
+            dropout_rate_graph_decoder=self.dropout_rate_graph_decoder_,
+            include_edge_recon_loss=self.include_edge_recon_loss_,
+            include_gene_expr_recon_loss=self.include_gene_expr_recon_loss_,
+            include_chrom_access_recon_loss=self.include_chrom_access_recon_loss_,
+            include_cat_covariates_contrastive_loss=self.include_cat_covariates_contrastive_loss_,
+            rna_recon_loss=self.gene_expr_recon_dist_,
+            node_label_method=self.node_label_method_,
+            active_gp_thresh_ratio=self.active_gp_thresh_ratio_,
+            active_gp_type=self.active_gp_type_,
+            log_variational=self.log_variational_,
+            cat_covariates_embeds_injection=self.cat_covariates_embeds_injection_,
+            include_edge_kl_loss=self.include_edge_kl_loss_)
+
+        self.is_trained_ = False
+
+        # Store init params for saving and loading
+        self.init_params_ = self._get_init_params(locals())
 
 class CustomVGPGAE(VGPGAE):
     """
@@ -34,6 +438,8 @@ class CustomVGPGAE(VGPGAE):
     Override methods as needed; this is a safe default that calls the parent
     implementation while giving you a single place to modify logic.
     """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
     def forward(self,
                 data_batch: Data,
@@ -522,46 +928,7 @@ def prepare_data(adata: AnnData,
                  node_val_ratio: float=0.1,
                  node_test_ratio: float=0.) -> dict:
     """
-    Prepare data for model training including edge-level and node-level train, 
-    validation, and test splits.
-
-    Parameters
-    ----------
-    adata:
-        AnnData object with counts stored in ´adata.layers[counts_key]´ or
-        ´adata.X´ depending on ´counts_key´, and sparse adjacency matrix stored
-        in ´adata.obsp[adj_key]´.
-    adata_atac:
-        Additional optional AnnData object with paired spatial ATAC data.
-    cat_covariates_label_encoders:
-        List of categorical covariates label encoders from the model (label
-        encoding indeces need to be aligned with the ones from the model to get
-        the correct categorical covariates embeddings).
-    counts_key:
-        Key under which the counts are stored in ´adata.layer´. If ´None´, uses
-        ´adata.X´ as counts.
-    adj_key:
-        Key under which the sparse adjacency matrix is stored in ´adata.obsp´.
-    cat_covariates_keys:
-        Keys under which the categorical covariates are stored in ´adata.obs´.
-    edge_val_ratio:
-        Fraction of the data that is used as validation set on edge-level.
-    edge_test_ratio:
-        Fraction of the data that is used as test set on edge-level.
-    node_val_ratio:
-        Fraction of the data that is used as validation set on node-level.
-    node_test_ratio:
-        Fraction of the data that is used as test set on node-level.
-
-    Returns
-    ----------
-    data_dict:
-        Dictionary containing edge-level training, validation and test PyG 
-        Data objects and node-level PyG Data object with split masks under keys 
-        ´edge_train_data´, ´edge_val_data´, ´edge_test_data´, and 
-        ´node_masked_data´ respectively. The edge-level PyG Data objects contain
-        edges in the ´edge_label_index´ attribute and edge labels in the 
-        ´edge_label´ attribute.
+    Project-specific prepare_data function imitating nichecompass.data.dataprocessors.prepare_data().
     """
     data_dict = {}
     dataset = CustomSpatialAnnTorchDataset(

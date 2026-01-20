@@ -11,7 +11,7 @@ from typing import Literal
 
 from torch_geometric.data import Data
 
-from nichecompass.data import SpatialAnnTorchDataset
+from nichecompass.data import SpatialAnnTorchDataset, dataprocessors
 from nichecompass.modules import VGPGAE
 
 import torch
@@ -20,6 +20,11 @@ from anndata import AnnData
 from torch_geometric.utils import add_self_loops, remove_self_loops
 from nichecompass.data.utils import encode_labels, sparse_mx_to_sparse_tensor
 from typing import List, Optional
+
+# Isolate functions from dataprocessors to avoid circular imports
+edge_level_split = dataprocessors.edge_level_split
+node_level_split_mask = dataprocessors.node_level_split_mask
+prepare_data = dataprocessors.prepare_data
 
 
 class CustomVGPGAE(VGPGAE):
@@ -504,6 +509,97 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
     def __len__(self):
         """Return the number of observations stored in SpatialAnnTorchDataset"""
         return self.x_rna.size(0) + self.x_atac.size(0)
+
+
+def prepare_data(adata: AnnData,
+                 cat_covariates_label_encoders: List[dict],
+                 adata_atac: Optional[AnnData]=None,
+                 counts_key: Optional[str]="counts",
+                 adj_key: str="spatial_connectivities",
+                 cat_covariates_keys: Optional[List[str]]=None,
+                 edge_val_ratio: float=0.1,
+                 edge_test_ratio: float=0.,
+                 node_val_ratio: float=0.1,
+                 node_test_ratio: float=0.) -> dict:
+    """
+    Prepare data for model training including edge-level and node-level train, 
+    validation, and test splits.
+
+    Parameters
+    ----------
+    adata:
+        AnnData object with counts stored in ´adata.layers[counts_key]´ or
+        ´adata.X´ depending on ´counts_key´, and sparse adjacency matrix stored
+        in ´adata.obsp[adj_key]´.
+    adata_atac:
+        Additional optional AnnData object with paired spatial ATAC data.
+    cat_covariates_label_encoders:
+        List of categorical covariates label encoders from the model (label
+        encoding indeces need to be aligned with the ones from the model to get
+        the correct categorical covariates embeddings).
+    counts_key:
+        Key under which the counts are stored in ´adata.layer´. If ´None´, uses
+        ´adata.X´ as counts.
+    adj_key:
+        Key under which the sparse adjacency matrix is stored in ´adata.obsp´.
+    cat_covariates_keys:
+        Keys under which the categorical covariates are stored in ´adata.obs´.
+    edge_val_ratio:
+        Fraction of the data that is used as validation set on edge-level.
+    edge_test_ratio:
+        Fraction of the data that is used as test set on edge-level.
+    node_val_ratio:
+        Fraction of the data that is used as validation set on node-level.
+    node_test_ratio:
+        Fraction of the data that is used as test set on node-level.
+
+    Returns
+    ----------
+    data_dict:
+        Dictionary containing edge-level training, validation and test PyG 
+        Data objects and node-level PyG Data object with split masks under keys 
+        ´edge_train_data´, ´edge_val_data´, ´edge_test_data´, and 
+        ´node_masked_data´ respectively. The edge-level PyG Data objects contain
+        edges in the ´edge_label_index´ attribute and edge labels in the 
+        ´edge_label´ attribute.
+    """
+    data_dict = {}
+    dataset = CustomSpatialAnnTorchDataset(
+        adata=adata,
+        adata_atac=adata_atac,
+        counts_key=counts_key,
+        adj_key=adj_key,
+        cat_covariates_keys=cat_covariates_keys,
+        cat_covariates_label_encoders=cat_covariates_label_encoders)
+
+    # PyG Data object (has 2 edge index pairs for one edge because of symmetry;
+    # one edge index pair will be removed in the edge-level split).
+    data = Data(x=dataset.x,
+                edge_index=dataset.edge_index,
+                edge_attr=dataset.edge_index.t()) # store index of edge nodes as
+                                                  # edge attribute for
+                                                  # aggregation weight retrieval
+                                                  # in mini batches
+
+    if cat_covariates_keys is not None:
+        data.cat_covariates_cats = dataset.cat_covariates_cats
+
+    # Edge-level split for edge reconstruction
+    edge_train_data, edge_val_data, edge_test_data = edge_level_split(
+        data=data,
+        edge_label_adj=dataset.edge_label_adj,
+        val_ratio=edge_val_ratio,
+        test_ratio=edge_test_ratio)
+    data_dict["edge_train_data"] = edge_train_data
+    data_dict["edge_val_data"] = edge_val_data
+    data_dict["edge_test_data"] = edge_test_data
+
+    # Node-level split for gene expression reconstruction
+    data_dict["node_masked_data"] = node_level_split_mask(
+        data=data,
+        val_ratio=node_val_ratio,
+        test_ratio=node_test_ratio)
+    return data_dict
 
 
 __all__ = ["CustomVGPGAE", "CustomSpatialAnnTorchDataset"]

@@ -574,12 +574,21 @@ def prepare_data(adata: AnnData,
 
     # PyG Data object (has 2 edge index pairs for one edge because of symmetry;
     # one edge index pair will be removed in the edge-level split).
-    data = Data(x=dataset.x,
+    data_rna = Data(x=dataset.x_rna,
                 edge_index=dataset.edge_index,
                 edge_attr=dataset.edge_index.t()) # store index of edge nodes as
-                                                  # edge attribute for
-                                                  # aggregation weight retrieval
-                                                  # in mini batches
+                                                # edge attribute for
+                                                # aggregation weight retrieval
+                                                # in mini batches
+    data_atac = Data(x=dataset.x_atac,
+                    edge_index=dataset.edge_index,
+                    edge_attr=dataset.edge_index.t()) # store index of edge nodes as
+                                                    # edge attribute for
+                                                    # aggregation weight retrieval
+                                                    # in mini batches
+
+    # Concatenate rna and atac data
+    data = data_rna.cat([data_atac])
 
     if cat_covariates_keys is not None:
         data.cat_covariates_cats = dataset.cat_covariates_cats

@@ -442,23 +442,22 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
                  self_loops: bool=True,
                  cat_covariates_keys: Optional[str]=None):
         if counts_key is None:
-            x = adata.X
+            x_rna = adata.X
         else:
-            x = adata.layers[counts_key]
+            x_rna = adata.layers[counts_key]
 
         # Store features in dense format
-        if sp.issparse(x): 
-            self.x = torch.tensor(x.toarray())
+        if sp.issparse(x_rna): 
+            self.x_rna = torch.tensor(x_rna.toarray())
         else:
-            self.x = torch.tensor(x)
+            self.x_rna = torch.tensor(x_rna)
 
         # Concatenate ATAC feature vector in dense format if provided
         if adata_atac is not None:
             if sp.issparse(adata_atac.X): 
-                self.x = torch.cat(
-                    (self.x, torch.tensor(adata_atac.X.toarray())), axis=1)
+                self.x_atac = torch.tensor(adata_atac.X.toarray())
             else:
-                self.x = torch.cat((self.x, torch.tensor(adata_atac.X)), axis=1)            
+                self.x_atac = torch.tensor(adata_atac.X)
 
         # Store adjacency matrix in torch_sparse SparseTensor format
         if sp.issparse(adata.obsp[adj_key]):
@@ -504,7 +503,7 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
 
     def __len__(self):
         """Return the number of observations stored in SpatialAnnTorchDataset"""
-        return self.x.size(0)
+        return self.x_rna.size(0) + self.x_atac.size(0)
 
 
 __all__ = ["CustomVGPGAE", "CustomSpatialAnnTorchDataset"]

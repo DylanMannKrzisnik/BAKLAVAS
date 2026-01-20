@@ -68,8 +68,7 @@ from pathlib import Path
 # Allow importing `nichecompass_utils.py` from repo root when running this script
 BAKLAVA_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(BAKLAVA_ROOT))
-
-from nichecompass_utils import CustomNicheCompass  # noqa: E402
+from nichecompass_utils import CustomNicheCompass
 
 #%% 1.2 Define Parameters
 
@@ -112,7 +111,7 @@ lambda_gene_expr_recon = 300.
 lambda_chrom_access_recon = 300.
 lambda_l1_masked = 0. # prior GP  regularization
 lambda_l1_addon = 30. # de novo GP regularization
-edge_batch_size = 256 # increase if more memory available or decrease to save memory
+edge_batch_size = 64 # increase if more memory available or decrease to save memory
 use_cuda_if_available = True
 
 ### Analysis ###
@@ -446,19 +445,21 @@ sc.pl.spatial(adata,
 
 #%% 3.1 Initialize Model
 
-model = NicheCompass(adata,
-                     adata_atac,
-                     counts_key=counts_key,
-                     adj_key=adj_key,
-                     gp_names_key=gp_names_key,
-                     active_gp_names_key=active_gp_names_key,
-                     gp_targets_mask_key=gp_targets_mask_key,
-                     gp_targets_categories_mask_key=gp_targets_categories_mask_key,
-                     gp_sources_mask_key=gp_sources_mask_key,
-                     gp_sources_categories_mask_key=gp_sources_categories_mask_key,
-                     latent_key=latent_key,
-                     conv_layer_encoder=conv_layer_encoder,
-                     active_gp_thresh_ratio=active_gp_thresh_ratio)
+model = CustomNicheCompass(
+    adata,
+    adata_atac,
+    counts_key=counts_key,
+    adj_key=adj_key,
+    gp_names_key=gp_names_key,
+    active_gp_names_key=active_gp_names_key,
+    gp_targets_mask_key=gp_targets_mask_key,
+    gp_targets_categories_mask_key=gp_targets_categories_mask_key,
+    gp_sources_mask_key=gp_sources_mask_key,
+    gp_sources_categories_mask_key=gp_sources_categories_mask_key,
+    latent_key=latent_key,
+    conv_layer_encoder=conv_layer_encoder,
+    active_gp_thresh_ratio=active_gp_thresh_ratio
+)
 
 
 #%% Train model

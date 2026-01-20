@@ -441,6 +441,27 @@ class CustomVGPGAE(VGPGAE):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+
+    def multiply_gaussians_log_space(self):
+        """
+        Combines two Gaussians using log-standard-deviations.
+        s1, s2: natural log of the standard deviation
+        """
+        # Calculate variances in log-space for stability
+        # var = exp(2*s)
+        v1 = torch.exp(2 * self.logstd_rna)
+        v2 = torch.exp(2 * self.logstd_atac)
+        denom = v1 + v2
+        
+        # New Mean
+        mu_new = (self.mu_rna * v2 + self.mu_atac * v1) / denom
+        
+        # New Log-Std: s_new = s1 + s2 - 0.5 * ln(exp(2*s1) + exp(2*s2))
+        # We use np.logaddexp for numerical stability
+        s_new = self.logstd_rna + self.logstd_atac - 0.5 * torch.logaddexp(2 * self.logstd_rna, 2 * self.logstd_atac)
+        
+        return mu_new, s_new
+
     def forward(self,
                 data_batch: Data,
                 decoder: Literal["graph", "omics"],
@@ -516,18 +537,43 @@ class CustomVGPGAE(VGPGAE):
             self.cat_covariates_embed = None         
 
         output = {}
+
+        # Separate rna and atac data
+        x_enc_rna = x_enc[:, :self.n_output_genes_]
+        x_enc_atac = x_enc[:, self.n_output_genes_:]
         
         # Use encoder to get latent distribution parameters for current batch
         # and reparameterization trick to get latent features (gp scores).
         # Filter for nodes in current batch
-        encoder_outputs = self.encoder(
-            x=x_enc,
+
+        # Encode rna data
+        encoder_outputs_rna = self.encoder(
+            x=x_enc_rna,
             edge_index=edge_index,
             cat_covariates_embed=(self.cat_covariates_embed if "encoder" in
                                   self.cat_covariates_embeds_injection_ else
                                   None))
-        self.mu = encoder_outputs[0][batch_idx, :]
-        self.logstd = encoder_outputs[1][batch_idx, :]
+        self.mu_rna = encoder_outputs_rna[0][batch_idx, :]
+        self.logstd_rna = encoder_outputs_rna[1][batch_idx, :]
+        output["mu_rna"] = self.mu_rna
+        output["logstd_rna"] = self.logstd_rna
+        z_rna = self.reparameterize(self.mu_rna, self.logstd_rna)
+
+        # Encode atac data
+        encoder_outputs_atac = self.encoder(
+            x=x_enc_atac,
+            edge_index=edge_index,
+            cat_covariates_embed=(self.cat_covariates_embed if "encoder" in
+                                  self.cat_covariates_embeds_injection_ else
+                                  None))
+        self.mu_atac = encoder_outputs_atac[0][batch_idx, :]
+        self.logstd_atac = encoder_outputs_atac[1][batch_idx, :]
+        output["mu_atac"] = self.mu_atac
+        output["logstd_atac"] = self.logstd_atac
+        z_atac = self.reparameterize(self.mu_atac, self.logstd_atac)
+
+        # Combine rna and atac latent distributions using product of Gaussians
+        self.mu, self.logstd = self.multiply_gaussians_log_space()
         output["mu"] = self.mu
         output["logstd"] = self.logstd
         z = self.reparameterize(self.mu, self.logstd)

@@ -670,12 +670,15 @@ class CustomTrainer(Trainer):
         self.node_train_loader = loader_dict["node_train_loader"]
         self.node_val_loader = loader_dict.pop("node_val_loader", None)
 
-    def _get_multimodal_contrastive_weight(self) -> float:
+    def _get_multimodal_contrastive_weight(self, increasing: bool=True) -> float:
         if (not self.multimodal_contrastive_anneal_) or self.n_epochs_ <= 1:
             return self.lambda_multimodal_contrastive_loss_
         progress = self.epoch / max(1, self.n_epochs_ - 1)
-        return self.lambda_multimodal_contrastive_loss_ * 0.5 * (
-            1.0 + math.cos(math.pi * progress))
+        k = 0.5 * (1.0 + math.cos(math.pi * progress))
+        if increasing:
+            return (1-k) * self.lambda_multimodal_contrastive_loss_
+        else:
+            return k * self.lambda_multimodal_contrastive_loss_
 
     def train(self,
               n_epochs: int=100,

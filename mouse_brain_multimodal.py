@@ -458,7 +458,7 @@ model = CustomNicheCompass(
     gp_sources_categories_mask_key=gp_sources_categories_mask_key,
     latent_key=latent_key,
     conv_layer_encoder=conv_layer_encoder,
-    active_gp_thresh_ratio=active_gp_thresh_ratio
+    active_gp_thresh_ratio=active_gp_thresh_ratio,
 )
 
 
@@ -493,6 +493,7 @@ with mlflow.start_run(run_name=current_timestamp):
                 edge_batch_size=edge_batch_size,
                 use_cuda_if_available=use_cuda_if_available,
                 n_sampled_neighbors=n_sampled_neighbors,
+                multimodal_contrastive_anneal=True,
                 verbose=False,
                 mlflow_experiment_id=mlflow_experiment_id)
 

@@ -10,10 +10,15 @@ from __future__ import annotations
 from typing import List, Literal, Optional
 
 import math
+import time
+import warnings
+from collections import defaultdict
+
 import mlflow
 import numpy as np
 import scipy.sparse as sp
 import torch
+import torch.nn.functional as F
 from anndata import AnnData
 from torch_geometric.data import Data
 from torch_geometric.utils import add_self_loops, remove_self_loops
@@ -26,6 +31,8 @@ from nichecompass.models import NicheCompass
 from nichecompass.modules import VGPGAE
 from nichecompass.nn import Encoder
 from nichecompass.train import Trainer
+from nichecompass.train.metrics import eval_metrics
+from nichecompass.train.utils import _cycle_iterable, print_progress
 
 # Isolate functions from dataprocessors to avoid circular imports
 edge_level_split = dataprocessors.edge_level_split
@@ -483,6 +490,9 @@ class CustomNicheCompass(NicheCompass):
               lambda_gene_expr_recon: float=300.,
               lambda_chrom_access_recon: float=100.,
               lambda_cat_covariates_contrastive: float=0.,
+              lambda_multimodal_contrastive_loss: float=0.,
+              multimodal_temperature: float=1.0,
+              multimodal_contrastive_anneal: bool=False,
               contrastive_logits_pos_ratio: float=0.,
               contrastive_logits_neg_ratio: float=0.,
               lambda_group_lasso: float=0.,
@@ -564,6 +574,9 @@ class CustomNicheCompass(NicheCompass):
             lambda_gene_expr_recon=lambda_gene_expr_recon,
             lambda_chrom_access_recon=lambda_chrom_access_recon,
             lambda_cat_covariates_contrastive=lambda_cat_covariates_contrastive,
+            lambda_multimodal_contrastive_loss=lambda_multimodal_contrastive_loss,
+            multimodal_temperature=multimodal_temperature,
+            multimodal_contrastive_anneal=multimodal_contrastive_anneal,
             contrastive_logits_pos_ratio=contrastive_logits_pos_ratio,
             contrastive_logits_neg_ratio=contrastive_logits_neg_ratio,
             lambda_group_lasso=lambda_group_lasso,
@@ -657,6 +670,297 @@ class CustomTrainer(Trainer):
         self.node_train_loader = loader_dict["node_train_loader"]
         self.node_val_loader = loader_dict.pop("node_val_loader", None)
 
+    def _get_multimodal_contrastive_weight(self) -> float:
+        if (not self.multimodal_contrastive_anneal_) or self.n_epochs_ <= 1:
+            return self.lambda_multimodal_contrastive_loss_
+        progress = self.epoch / max(1, self.n_epochs_ - 1)
+        return self.lambda_multimodal_contrastive_loss_ * 0.5 * (
+            1.0 + math.cos(math.pi * progress))
+
+    def train(self,
+              n_epochs: int=100,
+              n_epochs_all_gps: int=25,
+              n_epochs_no_edge_recon: int=0,
+              n_epochs_no_cat_covariates_contrastive: int=5,
+              lr: float=0.001,
+              weight_decay: float=0.,
+              lambda_edge_recon: Optional[float]=500000.,
+              lambda_cat_covariates_contrastive: Optional[float]=0.,
+              lambda_multimodal_contrastive_loss: float=0.,
+              multimodal_temperature: float=1.0,
+              multimodal_contrastive_anneal: bool=False,
+              contrastive_logits_pos_ratio: Optional[float]=0.125,
+              contrastive_logits_neg_ratio: Optional[float]=0.125,
+              lambda_gene_expr_recon: float=100.,
+              lambda_chrom_access_recon: float=10.,
+              lambda_group_lasso: float=0.,
+              lambda_l1_masked: float=0.,
+              l1_targets_mask: Optional[torch.Tensor]=None,
+              l1_sources_mask: Optional[torch.Tensor]=None,
+              lambda_l1_addon: float=0.,
+              mlflow_experiment_id: Optional[str]=None):
+        """
+        Train the CustomNicheCompass model.
+        """
+        self.n_epochs_ = n_epochs
+        self.n_epochs_all_gps_ = n_epochs_all_gps
+        self.n_epochs_no_edge_recon_ = n_epochs_no_edge_recon
+        self.n_epochs_no_cat_covariates_contrastive_ = (
+            n_epochs_no_cat_covariates_contrastive)
+        self.lr_ = lr
+        self.weight_decay_ = weight_decay
+        self.lambda_edge_recon_ = lambda_edge_recon
+        self.lambda_gene_expr_recon_ = lambda_gene_expr_recon
+        self.lambda_chrom_access_recon_ = lambda_chrom_access_recon
+        self.lambda_cat_covariates_contrastive_ = (
+            lambda_cat_covariates_contrastive)
+        self.lambda_multimodal_contrastive_loss_ = (
+            lambda_multimodal_contrastive_loss)
+        self.multimodal_temperature_ = multimodal_temperature
+        self.multimodal_contrastive_anneal_ = multimodal_contrastive_anneal
+        self.contrastive_logits_pos_ratio_ = contrastive_logits_pos_ratio
+        self.contrastive_logits_neg_ratio_ = contrastive_logits_neg_ratio
+        self.lambda_group_lasso_ = lambda_group_lasso
+        self.lambda_l1_masked_ = lambda_l1_masked
+        self.l1_targets_mask = l1_targets_mask
+        self.l1_sources_mask = l1_sources_mask
+        self.lambda_l1_addon_ = lambda_l1_addon
+        self.mlflow_experiment_id = mlflow_experiment_id
+
+        print("\n--- MODEL TRAINING ---")
+
+        if self.mlflow_experiment_id is not None:
+            for attr, attr_value in self._get_public_attributes().items():
+                mlflow.log_param(attr, attr_value)
+            self.model.log_module_hyperparams_to_mlflow()
+
+        start_time = time.time()
+        self.epoch_logs = defaultdict(list)
+        self.model.train()
+        params = filter(lambda p: p.requires_grad, self.model.parameters())
+        self.optimizer = torch.optim.Adam(params,
+                                          lr=lr,
+                                          weight_decay=weight_decay)
+
+        for self.epoch in range(n_epochs):
+            if self.epoch < self.n_epochs_no_edge_recon_:
+                self.edge_recon_active = False
+            else:
+                self.edge_recon_active = True
+            if self.epoch < self.n_epochs_all_gps_:
+                self.use_only_active_gps = False
+            else:
+                self.use_only_active_gps = True
+            if self.epoch < self.n_epochs_no_cat_covariates_contrastive_:
+                self.cat_covariates_contrastive_active = False
+            else:
+                self.cat_covariates_contrastive_active = True
+
+            self.multimodal_contrastive_weight_ = (
+                self._get_multimodal_contrastive_weight())
+
+            self.iter_logs = defaultdict(list)
+            self.iter_logs["n_train_iter"] = 0
+            self.iter_logs["n_val_iter"] = 0
+
+            for edge_train_data_batch, node_train_data_batch in zip(
+                    self.edge_train_loader,
+                    _cycle_iterable(self.node_train_loader)):
+                node_train_data_batch = node_train_data_batch.to(self.device)
+                node_train_model_output = self.model(
+                    data_batch=node_train_data_batch,
+                    decoder="omics",
+                    use_only_active_gps=self.use_only_active_gps)
+
+                edge_train_data_batch = edge_train_data_batch.to(self.device)
+                edge_train_model_output = self.model(
+                    data_batch=edge_train_data_batch,
+                    decoder="graph",
+                    use_only_active_gps=self.use_only_active_gps)
+
+                train_loss_dict = self.model.loss(
+                    edge_model_output=edge_train_model_output,
+                    node_model_output=node_train_model_output,
+                    lambda_edge_recon=self.lambda_edge_recon_,
+                    lambda_gene_expr_recon=self.lambda_gene_expr_recon_,
+                    lambda_chrom_access_recon=self.lambda_chrom_access_recon_,
+                    lambda_cat_covariates_contrastive=self.lambda_cat_covariates_contrastive_,
+                    lambda_multimodal_contrastive_loss=self.multimodal_contrastive_weight_,
+                    multimodal_temperature=self.multimodal_temperature_,
+                    multimodal_contrastive_active=(
+                        self.multimodal_contrastive_weight_ > 0),
+                    contrastive_logits_pos_ratio=self.contrastive_logits_pos_ratio_,
+                    contrastive_logits_neg_ratio=self.contrastive_logits_neg_ratio_,
+                    lambda_group_lasso=self.lambda_group_lasso_,
+                    lambda_l1_masked=self.lambda_l1_masked_,
+                    l1_targets_mask=self.l1_targets_mask,
+                    l1_sources_mask=self.l1_sources_mask,
+                    lambda_l1_addon=self.lambda_l1_addon_,
+                    edge_recon_active=self.edge_recon_active,
+                    cat_covariates_contrastive_active=self.cat_covariates_contrastive_active)
+
+                train_global_loss = train_loss_dict["global_loss"]
+                train_optim_loss = train_loss_dict["optim_loss"]
+
+                if self.verbose_:
+                    for key, value in train_loss_dict.items():
+                        self.iter_logs[f"train_{key}"].append(value.item())
+                else:
+                    self.iter_logs["train_global_loss"].append(
+                        train_global_loss.item())
+                    self.iter_logs["train_optim_loss"].append(
+                        train_optim_loss.item())
+                self.iter_logs["n_train_iter"] += 1
+
+                self.optimizer.zero_grad()
+                train_optim_loss.backward()
+                if self.grad_clip_value_ > 0:
+                    torch.nn.utils.clip_grad_value_(self.model.parameters(),
+                                                    self.grad_clip_value_)
+                self.optimizer.step()
+
+            if (self.edge_val_loader is not None and
+                self.node_val_loader is not None):
+                self.eval_epoch()
+            elif (self.edge_val_loader is None and
+            self.node_val_loader is not None):
+                warnings.warn("You have specified a node validation set but no "
+                              "edge validation set. Skipping validation...")
+            elif (self.edge_val_loader is not None and
+            self.node_val_loader is None):
+                warnings.warn("You have specified an edge validation set but no"
+                              " node validation set. Skipping validation...")
+
+            for key in self.iter_logs:
+                if key.startswith("train"):
+                    self.epoch_logs[key].append(
+                        np.array(self.iter_logs[key]).sum() /
+                        self.iter_logs["n_train_iter"])
+                if key.startswith("val"):
+                    self.epoch_logs[key].append(
+                        np.array(self.iter_logs[key]).sum() /
+                        self.iter_logs["n_val_iter"])
+
+            if self.monitor_:
+                print_progress(self.epoch, self.epoch_logs, self.n_epochs_)
+
+            if self.use_early_stopping_:
+                if self.is_early_stopping():
+                    break
+
+        self.training_time += (time.time() - start_time)
+        minutes, seconds = divmod(self.training_time, 60)
+        print(f"Model training finished after {int(minutes)} min {int(seconds)}"
+              " sec.")
+        if self.best_model_state_dict is not None and self.reload_best_model_:
+            print("Using best model state, which was in epoch "
+                  f"{self.best_epoch + 1}.")
+            self.model.load_state_dict(self.best_model_state_dict)
+
+        self.model.eval()
+
+        if self.edge_val_loader is not None:
+            self.eval_end()
+
+    @torch.no_grad()
+    def eval_epoch(self):
+        """
+        Epoch evaluation logic of CustomNicheCompass model used during training.
+        """
+        self.model.eval()
+
+        edge_recon_probs_val_accumulated = np.array([])
+        edge_recon_labels_val_accumulated = np.array([])
+        edge_same_cat_covariates_cat_val_accumulated = [
+            np.array([]) for _ in range(self.n_cat_covariates)]
+        edge_incl_val_accumulated = np.array([])
+
+        multimodal_contrastive_weight = self._get_multimodal_contrastive_weight()
+
+        for edge_val_data_batch, node_val_data_batch in zip(
+                self.edge_val_loader, _cycle_iterable(self.node_val_loader)):
+            node_val_data_batch = node_val_data_batch.to(self.device)
+            node_val_model_output = self.model(
+                data_batch=node_val_data_batch,
+                decoder="omics",
+                use_only_active_gps=self.use_only_active_gps)
+
+            edge_val_data_batch = edge_val_data_batch.to(self.device)
+            edge_val_model_output = self.model(
+                data_batch=edge_val_data_batch,
+                decoder="graph",
+                use_only_active_gps=self.use_only_active_gps)
+
+            val_loss_dict = self.model.loss(
+                edge_model_output=edge_val_model_output,
+                node_model_output=node_val_model_output,
+                lambda_edge_recon=self.lambda_edge_recon_,
+                lambda_gene_expr_recon=self.lambda_gene_expr_recon_,
+                lambda_chrom_access_recon=self.lambda_chrom_access_recon_,
+                lambda_cat_covariates_contrastive=self.lambda_cat_covariates_contrastive_,
+                lambda_multimodal_contrastive_loss=multimodal_contrastive_weight,
+                multimodal_temperature=self.multimodal_temperature_,
+                multimodal_contrastive_active=(multimodal_contrastive_weight > 0),
+                contrastive_logits_pos_ratio=self.contrastive_logits_pos_ratio_,
+                contrastive_logits_neg_ratio=self.contrastive_logits_neg_ratio_,
+                lambda_group_lasso=self.lambda_group_lasso_,
+                lambda_l1_masked=self.lambda_l1_masked_,
+                l1_targets_mask=self.l1_targets_mask,
+                l1_sources_mask=self.l1_sources_mask,
+                lambda_l1_addon=self.lambda_l1_addon_,
+                edge_recon_active=True)
+
+            val_global_loss = val_loss_dict["global_loss"]
+            val_optim_loss = val_loss_dict["optim_loss"]
+            if self.verbose_:
+                for key, value in val_loss_dict.items():
+                    self.iter_logs[f"val_{key}"].append(value.item())
+            else:
+                self.iter_logs["val_global_loss"].append(val_global_loss.item())
+                self.iter_logs["val_optim_loss"].append(val_optim_loss.item())
+            self.iter_logs["n_val_iter"] += 1
+
+            edge_recon_probs_val = torch.sigmoid(
+                edge_val_model_output["edge_recon_logits"])
+            edge_recon_labels_val = edge_val_model_output["edge_recon_labels"]
+            edge_same_cat_covariates_cat_val = (
+                edge_val_model_output["edge_same_cat_covariates_cat"])
+            edge_incl_val = edge_val_model_output["edge_incl"]
+            edge_recon_probs_val_accumulated = np.append(
+                edge_recon_probs_val_accumulated,
+                edge_recon_probs_val.detach().cpu().numpy())
+            edge_recon_labels_val_accumulated = np.append(
+                edge_recon_labels_val_accumulated,
+                edge_recon_labels_val.detach().cpu().numpy())
+            if edge_same_cat_covariates_cat_val is not None:
+                for i, edge_same_cat_covariate_cat_val in enumerate(
+                        edge_same_cat_covariates_cat_val):
+                    edge_same_cat_covariates_cat_val_accumulated[i] = np.append(
+                        edge_same_cat_covariates_cat_val_accumulated[i],
+                        edge_same_cat_covariate_cat_val.detach().cpu().numpy())
+            if edge_incl_val is not None:
+                edge_incl_val_accumulated = np.append(
+                    edge_incl_val_accumulated,
+                    edge_incl_val.detach().cpu().numpy())
+            else:
+                edge_same_cat_covariates_cat_val_accumulated = None
+                edge_incl_val_accumulated = None
+        val_eval_dict = eval_metrics(
+            edge_recon_probs=edge_recon_probs_val_accumulated,
+            edge_labels=edge_recon_labels_val_accumulated,
+            edge_same_cat_covariates_cat=edge_same_cat_covariates_cat_val_accumulated,
+            edge_incl=edge_incl_val_accumulated)
+        if self.verbose_:
+            self.epoch_logs["val_auroc_score"].append(
+                val_eval_dict["auroc_score"])
+            self.epoch_logs["val_auprc_score"].append(
+                val_eval_dict["auprc_score"])
+            self.epoch_logs["val_best_acc_score"].append(
+                val_eval_dict["best_acc_score"])
+            self.epoch_logs["val_best_f1_score"].append(
+                val_eval_dict["best_f1_score"])
+
+        self.model.train()
 
 class CustomVGPGAE(VGPGAE):
     """
@@ -1401,20 +1705,100 @@ class CustomVGPGAE(VGPGAE):
                 :, self.features_idx_dict_["source_reconstructed_atac_idx"]]
         return output
 
-    def get_multimodal_similarity(self):
+    def loss(self,
+             edge_model_output: dict,
+             node_model_output: dict,
+             lambda_l1_masked: float,
+             l1_targets_mask: torch.Tensor,
+             l1_sources_mask: torch.Tensor,
+             lambda_l1_addon: float,
+             lambda_group_lasso: float,
+             lambda_gene_expr_recon: float=300.,
+             lambda_chrom_access_recon: float=100.,
+             lambda_edge_recon: Optional[float]=500000.,
+             lambda_cat_covariates_contrastive: Optional[float]=100000.,
+             contrastive_logits_pos_ratio: float=0.125,
+             contrastive_logits_neg_ratio: float=0.,
+             edge_recon_active: bool=True,
+             cat_covariates_contrastive_active: bool=True,
+             lambda_multimodal_contrastive_loss: float=0.,
+             multimodal_temperature: float=1.0,
+             multimodal_contrastive_active: bool=True) -> dict:
+        loss_dict = super().loss(
+            edge_model_output=edge_model_output,
+            node_model_output=node_model_output,
+            lambda_l1_masked=lambda_l1_masked,
+            l1_targets_mask=l1_targets_mask,
+            l1_sources_mask=l1_sources_mask,
+            lambda_l1_addon=lambda_l1_addon,
+            lambda_group_lasso=lambda_group_lasso,
+            lambda_gene_expr_recon=lambda_gene_expr_recon,
+            lambda_chrom_access_recon=lambda_chrom_access_recon,
+            lambda_edge_recon=lambda_edge_recon,
+            lambda_cat_covariates_contrastive=lambda_cat_covariates_contrastive,
+            contrastive_logits_pos_ratio=contrastive_logits_pos_ratio,
+            contrastive_logits_neg_ratio=contrastive_logits_neg_ratio,
+            edge_recon_active=edge_recon_active,
+            cat_covariates_contrastive_active=cat_covariates_contrastive_active)
 
-        mu_rna = self.multimodal_layer(self.mu_rna)
-        mu_atac = self.multimodal_layer(self.mu_atac)
+        if ("atac" in self.modalities_ and
+                lambda_multimodal_contrastive_loss > 0 and
+                multimodal_contrastive_active and
+                "mu_rna" in node_model_output and
+                "mu_atac" in node_model_output):
+            similarity_matrix = self.get_multimodal_similarity(
+                mu_rna=node_model_output["mu_rna"],
+                mu_atac=node_model_output["mu_atac"])
+            loss_dict["multimodal_contrastive_loss"] = (
+                lambda_multimodal_contrastive_loss *
+                self.compute_multimodal_contrastive_loss(
+                    similarity_matrix,
+                    temperature=multimodal_temperature))
+            loss_dict["global_loss"] += loss_dict[
+                "multimodal_contrastive_loss"]
+            loss_dict["optim_loss"] += loss_dict[
+                "multimodal_contrastive_loss"]
 
-        mu_rna_normed = torch.nn.functional.normalize(mu_rna, p=2, dim=1)
-        mu_atac_normed = torch.nn.functional.normalize(mu_atac, p=2, dim=1)
+        return loss_dict
+
+    def get_multimodal_similarity(self,
+                                  mu_rna: Optional[torch.Tensor]=None,
+                                  mu_atac: Optional[torch.Tensor]=None
+                                  ) -> torch.Tensor:
+        mu_rna = self.mu_rna if mu_rna is None else mu_rna
+        mu_atac = self.mu_atac if mu_atac is None else mu_atac
+
+        mu_rna = self.multimodal_layer(mu_rna)
+        mu_atac = self.multimodal_layer(mu_atac)
+
+        mu_rna_normed = F.normalize(mu_rna, p=2, dim=1)
+        mu_atac_normed = F.normalize(mu_atac, p=2, dim=1)
 
         similarity_matrix = torch.matmul(mu_rna_normed, mu_atac_normed.t())
         return similarity_matrix
 
-    def add_multimodal_contrastive_loss(self, similarity_matrix: torch.Tensor):
-        similarity_matrix = self.get_multimodal_similarity()
-        # would need to compute InfoNCE loss in self.loss() and add to loss dict for optimization. should also weigh InfoNCE loss with lambda_multimodal_contrastive_loss, with possibility to anneal it over training epochs..
+    def compute_multimodal_contrastive_loss(
+            self,
+            similarity_matrix: torch.Tensor,
+            temperature: float=1.0) -> torch.Tensor:
+        temperature = max(temperature, 1e-8)
+        logits = similarity_matrix / temperature
+        labels = torch.arange(logits.size(0), device=logits.device)
+        loss_rna = F.cross_entropy(logits, labels)
+        loss_atac = F.cross_entropy(logits.t(), labels)
+        return 0.5 * (loss_rna + loss_atac)
+
+    def add_multimodal_contrastive_loss(
+            self,
+            mu_rna: Optional[torch.Tensor]=None,
+            mu_atac: Optional[torch.Tensor]=None,
+            temperature: float=1.0) -> torch.Tensor:
+        similarity_matrix = self.get_multimodal_similarity(
+            mu_rna=mu_rna,
+            mu_atac=mu_atac)
+        return self.compute_multimodal_contrastive_loss(
+            similarity_matrix,
+            temperature=temperature)
 
 
 class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):

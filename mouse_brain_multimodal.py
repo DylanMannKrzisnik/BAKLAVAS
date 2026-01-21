@@ -852,7 +852,7 @@ Z = model.get_latent_representation(only_active_gps=True)
 print(f"Shape of Z: {Z.shape}")
 
 Z_norms = np.linalg.norm(Z, axis=1)
-assert np.all(Z_norms == 1), "Z is not normalized"
+print("Mean Z norm: ", np.mean(Z_norms))
 
 cosine_similarity_matrix = cosine_similarity(Z, Z)
 

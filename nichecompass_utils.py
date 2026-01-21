@@ -90,6 +90,7 @@ class CustomNicheCompass(NicheCompass):
                  dropout_rate_graph_decoder: float=0.,
                  cat_covariates_cats: Optional[List[List]]=None,
                  n_addon_gp: int=100,
+                 multimodal_embedding_size: int=128,
                  cat_covariates_embeds_nums: Optional[List[int]]=None,
                  include_edge_kl_loss: bool=True,
                  use_cuda_if_available: bool=True,
@@ -299,6 +300,7 @@ class CustomNicheCompass(NicheCompass):
         self.dropout_rate_graph_decoder_ = dropout_rate_graph_decoder
         self.n_prior_gp_ = len(self.gp_targets_mask_)
         self.n_addon_gp_ = n_addon_gp
+        self.multimodal_embedding_size_ = multimodal_embedding_size
         
         if n_addon_gp > 0:
             # Add add-on gps to adata
@@ -402,6 +404,7 @@ class CustomNicheCompass(NicheCompass):
             n_hidden_encoder=self.n_hidden_encoder_,
             n_prior_gp=self.n_prior_gp_,
             n_addon_gp=self.n_addon_gp_,
+            multimodal_embedding_size=self.multimodal_embedding_size_,
             cat_covariates_embeds_nums=self.cat_covariates_embeds_nums_,
             n_output_genes=self.n_output_genes_,
             n_output_peaks=self.n_output_peaks_,
@@ -703,6 +706,10 @@ class CustomVGPGAE(VGPGAE):
                 use_bn=self.encoder_use_bn_)
         else:
             self.encoder_atac = None
+
+        # Multimodal layer
+        gp_embedding_size = self.n_prior_gp_ + self.n_addon_gp_
+        self.multimodal_layer = torch.nn.Linear(gp_embedding_size, self.multimodal_embedding_size)
 
 
     def multiply_gaussians_log_space(self,
@@ -1393,6 +1400,21 @@ class CustomVGPGAE(VGPGAE):
                     None))[
                 :, self.features_idx_dict_["source_reconstructed_atac_idx"]]
         return output
+
+    def get_multimodal_similarity(self):
+
+        mu_rna = self.multimodal_layer(self.mu_rna)
+        mu_atac = self.multimodal_layer(self.mu_atac)
+
+        mu_rna_normed = torch.nn.functional.normalize(mu_rna, p=2, dim=1)
+        mu_atac_normed = torch.nn.functional.normalize(mu_atac, p=2, dim=1)
+
+        similarity_matrix = torch.matmul(mu_rna_normed, mu_atac_normed.t())
+        return similarity_matrix
+
+    def add_multimodal_contrastive_loss(self, similarity_matrix: torch.Tensor):
+        similarity_matrix = self.get_multimodal_similarity()
+        # would need to compute InfoNCE loss in self.loss() and add to loss dict for optimization. should also weigh InfoNCE loss with lambda_multimodal_contrastive_loss, with possibility to anneal it over training epochs..
 
 
 class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):

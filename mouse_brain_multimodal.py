@@ -493,7 +493,8 @@ with mlflow.start_run(run_name=current_timestamp):
                 edge_batch_size=edge_batch_size,
                 use_cuda_if_available=use_cuda_if_available,
                 n_sampled_neighbors=n_sampled_neighbors,
-                multimodal_contrastive_anneal=True,
+                lambda_multimodal_contrastive_loss=100.0,
+                multimodal_contrastive_anneal=False,
                 verbose=False,
                 mlflow_experiment_id=mlflow_experiment_id)
 

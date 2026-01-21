@@ -813,6 +813,10 @@ class CustomTrainer(Trainer):
                         train_global_loss.item())
                     self.iter_logs["train_optim_loss"].append(
                         train_optim_loss.item())
+                    # Always log multimodal_contrastive_loss if present
+                    if "multimodal_contrastive_loss" in train_loss_dict:
+                        self.iter_logs["train_multimodal_contrastive_loss"].append(
+                            train_loss_dict["multimodal_contrastive_loss"].item())
                 self.iter_logs["n_train_iter"] += 1
 
                 self.optimizer.zero_grad()
@@ -929,6 +933,10 @@ class CustomTrainer(Trainer):
             else:
                 self.iter_logs["val_global_loss"].append(val_global_loss.item())
                 self.iter_logs["val_optim_loss"].append(val_optim_loss.item())
+                # Always log multimodal_contrastive_loss if present
+                if "multimodal_contrastive_loss" in val_loss_dict:
+                    self.iter_logs["val_multimodal_contrastive_loss"].append(
+                        val_loss_dict["multimodal_contrastive_loss"].item())
             self.iter_logs["n_val_iter"] += 1
 
             edge_recon_probs_val = torch.sigmoid(
@@ -974,7 +982,7 @@ class CustomTrainer(Trainer):
         # Log evaluation metrics to MLflow during training
         if self.mlflow_experiment_id is not None:
             for key, value in val_eval_dict.items():
-                mlflow.log_metric(f"val_{key}", value, step=self.epoch)
+                mlflow.log_metric(f"val_iters_{key}", value, step=self.epoch)
 
         self.model.train()
 

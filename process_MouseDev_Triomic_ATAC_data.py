@@ -46,6 +46,14 @@ os.environ["RUST_BACKTRACE"] = "1"
 #%% main function
 def main() -> None:
     #datapath = os.path.abspath("../data/MouseDev_Spatial_Triomic")
+
+    scratch_base = os.environ["SLURM_TMPDIR"]  # fail fast if not set
+    os.makedirs(scratch_base, exist_ok=True)
+
+    # Make *everything* use node-local temp, even if tempdir= is ignored (tl.macs3 bug #232)
+    os.environ["TMPDIR"] = scratch_base
+    tempfile.tempdir = scratch_base
+
     datapath = "/home/dmannk/links/projects/ctb-liyue/dmannk/BAKLAVAS_base/data/MouseDev_Spatial_Triomic"
     scratch_base = os.environ.get("SLURM_TMPDIR", "/home/dmannk/links/scratch")
     tarpath = os.path.join(datapath, "GSE308623.tar")
@@ -209,7 +217,14 @@ def main() -> None:
 
     # Peak calling
     print(f"[PROGRESS] Peak calling...", flush=True)
-    snap.tl.macs3(data, groupby='leiden', replicate='sample', n_jobs=min(_infer_n_jobs(default=8), 1))
+
+    snap.tl.macs3(
+        data,
+        groupby='leiden',
+        replicate='sample',
+        n_jobs=8,
+        tempdir=scratch_base)
+
     print(f"[PROGRESS] Merging peaks...", flush=True)
     merged_peaks = snap.tl.merge_peaks(data.uns['macs3'], chrom_sizes=snap.genome.mm10)
     print(f"Number of merged peaks: {merged_peaks.shape[0]}", flush=True)

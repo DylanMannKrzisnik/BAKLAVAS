@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=MouseDevTriomicATAC
 #SBATCH --account=def-liyue
-#SBATCH --time=04:00:00
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
 #SBATCH --nodes=1
-#SBATCH --mem=128G
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=8:00:00
+#SBATCH --mem=180G
+#SBATCH --tmp=150G
 #SBATCH --output=/home/dmannk/links/scratch/%x-%j.out
 #SBATCH --error=/home/dmannk/links/scratch/%x-%j.err
 #SBATCH --mail-user=dylan.mann-krzisnik@mail.mcgill.ca

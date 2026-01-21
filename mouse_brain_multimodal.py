@@ -480,8 +480,8 @@ else:
 # Set the active experiment
 mlflow.set_experiment(experiment_name=mlflow_experiment_name)
 
-# Start MLflow run
-with mlflow.start_run():
+# Start MLflow run with timestamp-based name
+with mlflow.start_run(run_name=current_timestamp):
     model.train(n_epochs=n_epochs,
                 n_epochs_all_gps=n_epochs_all_gps,
                 lr=lr,
@@ -493,7 +493,7 @@ with mlflow.start_run():
                 edge_batch_size=edge_batch_size,
                 use_cuda_if_available=use_cuda_if_available,
                 n_sampled_neighbors=n_sampled_neighbors,
-                verbose=True,
+                verbose=False,
                 mlflow_experiment_id=mlflow_experiment_id)
 
 

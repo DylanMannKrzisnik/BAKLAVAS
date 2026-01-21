@@ -833,13 +833,21 @@ class CustomTrainer(Trainer):
 
             for key in self.iter_logs:
                 if key.startswith("train"):
-                    self.epoch_logs[key].append(
+                    epoch_avg_loss = (
                         np.array(self.iter_logs[key]).sum() /
                         self.iter_logs["n_train_iter"])
+                    self.epoch_logs[key].append(epoch_avg_loss)
+                    # Log training losses to MLflow
+                    if self.mlflow_experiment_id is not None:
+                        mlflow.log_metric(key, epoch_avg_loss, step=self.epoch)
                 if key.startswith("val"):
-                    self.epoch_logs[key].append(
+                    epoch_avg_loss = (
                         np.array(self.iter_logs[key]).sum() /
                         self.iter_logs["n_val_iter"])
+                    self.epoch_logs[key].append(epoch_avg_loss)
+                    # Log validation losses to MLflow
+                    if self.mlflow_experiment_id is not None:
+                        mlflow.log_metric(key, epoch_avg_loss, step=self.epoch)
 
             if self.monitor_:
                 print_progress(self.epoch, self.epoch_logs, self.n_epochs_)
@@ -959,6 +967,11 @@ class CustomTrainer(Trainer):
                 val_eval_dict["best_acc_score"])
             self.epoch_logs["val_best_f1_score"].append(
                 val_eval_dict["best_f1_score"])
+
+        # Log evaluation metrics to MLflow during training
+        if self.mlflow_experiment_id is not None:
+            for key, value in val_eval_dict.items():
+                mlflow.log_metric(f"val_{key}", value, step=self.epoch)
 
         self.model.train()
 

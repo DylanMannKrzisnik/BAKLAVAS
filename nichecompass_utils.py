@@ -970,7 +970,13 @@ class CustomVGPGAE(VGPGAE):
     implementation while giving you a single place to modify logic.
     """
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+
+        # Remove 'multimodal_embedding_size' from kwargs before passing to super().__init__
+        kwargs_no_mme = dict(kwargs)
+        kwargs_no_mme.pop("multimodal_embedding_size", None)
+        super().__init__(*args, **kwargs_no_mme)
+
+        self.multimodal_embedding_size_ = kwargs.get("multimodal_embedding_size")
 
         n_cat_covariates_embed_input = (
             sum(self.cat_covariates_embeds_nums_)
@@ -1013,7 +1019,7 @@ class CustomVGPGAE(VGPGAE):
 
         # Multimodal layer
         gp_embedding_size = self.n_prior_gp_ + self.n_addon_gp_
-        self.multimodal_layer = torch.nn.Linear(gp_embedding_size, self.multimodal_embedding_size)
+        self.multimodal_layer = torch.nn.Linear(gp_embedding_size, self.multimodal_embedding_size_)
 
 
     def multiply_gaussians_log_space(self,

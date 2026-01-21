@@ -43,6 +43,7 @@ import seaborn as sns
 import squidpy as sq
 from matplotlib import gridspec
 from sklearn.preprocessing import MinMaxScaler
+import mlflow
 
 from nichecompass.models import NicheCompass
 from nichecompass.utils import (add_gps_from_gp_dict_to_adata,
@@ -463,18 +464,37 @@ model = CustomNicheCompass(
 
 #%% Train model
 
-model.train(n_epochs=n_epochs,
-            n_epochs_all_gps=n_epochs_all_gps,
-            lr=lr,
-            lambda_edge_recon=lambda_edge_recon,
-            lambda_gene_expr_recon=lambda_gene_expr_recon,
-            lambda_chrom_access_recon=lambda_chrom_access_recon,
-            lambda_l1_masked=lambda_l1_masked,
-            lambda_l1_addon=lambda_l1_addon,
-            edge_batch_size=edge_batch_size,
-            use_cuda_if_available=use_cuda_if_available,
-            n_sampled_neighbors=n_sampled_neighbors,
-            verbose=True)
+# Set up MLflow experiment for logging
+mlflow_experiment_name = f"nichecompass_mouse_brain_multimodal"
+
+# Get or create experiment
+mlflow_experiment = mlflow.get_experiment_by_name(mlflow_experiment_name)
+if mlflow_experiment is None:
+    # Create new experiment
+    mlflow_experiment_id = mlflow.create_experiment(mlflow_experiment_name)
+    print(f"Created new MLflow experiment: {mlflow_experiment_name} (ID: {mlflow_experiment_id})")
+else:
+    mlflow_experiment_id = mlflow_experiment.experiment_id
+    print(f"Using existing MLflow experiment: {mlflow_experiment_name} (ID: {mlflow_experiment_id})")
+
+# Set the active experiment
+mlflow.set_experiment(experiment_name=mlflow_experiment_name)
+
+# Start MLflow run
+with mlflow.start_run():
+    model.train(n_epochs=n_epochs,
+                n_epochs_all_gps=n_epochs_all_gps,
+                lr=lr,
+                lambda_edge_recon=lambda_edge_recon,
+                lambda_gene_expr_recon=lambda_gene_expr_recon,
+                lambda_chrom_access_recon=lambda_chrom_access_recon,
+                lambda_l1_masked=lambda_l1_masked,
+                lambda_l1_addon=lambda_l1_addon,
+                edge_batch_size=edge_batch_size,
+                use_cuda_if_available=use_cuda_if_available,
+                n_sampled_neighbors=n_sampled_neighbors,
+                verbose=True,
+                mlflow_experiment_id=mlflow_experiment_id)
 
 
 #%% Compute latent neighbor graph

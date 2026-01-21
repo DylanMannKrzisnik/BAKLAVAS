@@ -511,12 +511,14 @@ os.makedirs(figure_folder_path, exist_ok=True)
 
 #%% Load trained model
 
-model = NicheCompass.load(dir_path=model_folder_path,
-                          adata=None,
-                          adata_file_name="adata.h5ad",
-                          adata_atac=None,
-                          adata_atac_file_name="adata_atac.h5ad",
-                          gp_names_key=gp_names_key)
+model = CustomNicheCompass.load(
+    dir_path=model_folder_path,
+    adata=None,
+    adata_file_name="adata.h5ad",
+    adata_atac=None,
+    adata_atac_file_name="adata_atac.h5ad",
+    gp_names_key=gp_names_key
+)
 
 samples = model.adata.obs[sample_key].unique().tolist()
 
@@ -858,3 +860,5 @@ fig, ax = plt.subplots(figsize=(10, 10))
 im = ax.matshow(cosine_similarity_matrix, cmap='coolwarm', vmin=-1, vmax=1)
 plt.colorbar(im, ax=ax)
 plt.show()
+
+# %%

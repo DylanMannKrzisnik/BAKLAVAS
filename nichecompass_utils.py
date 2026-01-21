@@ -436,6 +436,39 @@ class CustomNicheCompass(NicheCompass):
         # Store init params for saving and loading
         self.init_params_ = self._get_init_params(locals())
 
+    @classmethod
+    def load(cls,
+             dir_path: str,
+             adata: Optional[AnnData]=None,
+             adata_atac: Optional[AnnData]=None,
+             adata_file_name: str="adata.h5ad",
+             adata_atac_file_name: Optional[str]="adata_atac.h5ad",
+             use_cuda: bool=False,
+             n_addon_gps: int=0,
+             gp_names_key: Optional[str]=None,
+             genes_idx_key: Optional[str]=None,
+             unfreeze_all_weights: bool=False,
+             unfreeze_addon_gp_weights: bool=False,
+             unfreeze_cat_covariates_embedder_weights: bool=False
+             ) -> torch.nn.Module:
+        """
+        Load a saved CustomNicheCompass model with ATAC defaults.
+        """
+        return super().load(
+            dir_path=dir_path,
+            adata=adata,
+            adata_atac=adata_atac,
+            adata_file_name=adata_file_name,
+            adata_atac_file_name=adata_atac_file_name,
+            use_cuda=use_cuda,
+            n_addon_gps=n_addon_gps,
+            gp_names_key=gp_names_key,
+            genes_idx_key=genes_idx_key,
+            unfreeze_all_weights=unfreeze_all_weights,
+            unfreeze_addon_gp_weights=unfreeze_addon_gp_weights,
+            unfreeze_cat_covariates_embedder_weights=(
+                unfreeze_cat_covariates_embedder_weights))
+
     def train(self,
               n_epochs: int=100,
               n_epochs_all_gps: int=25,

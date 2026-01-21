@@ -63,10 +63,9 @@ from nichecompass.utils import (add_gps_from_gp_dict_to_adata,
 #%% Import custom NicheCompass class
 
 import sys
-from pathlib import Path
 
 # Allow importing `nichecompass_utils.py` from repo root when running this script
-BAKLAVA_ROOT = Path(__file__).resolve().parents[1]
+BAKLAVA_ROOT = "/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA"
 sys.path.append(str(BAKLAVA_ROOT))
 from nichecompass_utils import CustomNicheCompass
 

@@ -138,7 +138,9 @@ current_timestamp = now.strftime("%d%m%Y_%H%M%S")
 
 # Define paths
 datapath = "/home/mcb/users/dmannk/BAKLAVA_base/data/Spatial_ATAC_RNA/mouse"
+outpath = "/home/mcb/users/dmannk/BAKLAVA_base/outputs/nichecompass_mouse_brain_multimodal"
 os.makedirs(datapath, exist_ok=True)
+os.makedirs(outpath, exist_ok=True)
 
 ga_data_folder_path = f"{datapath}/gene_annotations"
 gp_data_folder_path = f"{datapath}/gene_programs"
@@ -151,7 +153,7 @@ collectri_tf_network_file_path = f"{gp_data_folder_path}/collectri_tf_network_{s
 marker_gp_folder_path = f"{gp_data_folder_path}/marker_gps"
 gene_orthologs_mapping_file_path = f"{ga_data_folder_path}/human_mouse_gene_orthologs.csv"
 gtf_file_path = f"{ga_data_folder_path}/gencode.vM25.chr_patch_hapl_scaff.annotation.gtf.gz"
-artifacts_folder_path = f"{datapath}/artifacts"
+artifacts_folder_path = f"{outpath}/artifacts"
 model_folder_path = f"{artifacts_folder_path}/multimodal/{current_timestamp}/model"
 figure_folder_path = f"{artifacts_folder_path}/multimodal/{current_timestamp}/figures"
 
@@ -525,8 +527,8 @@ model.save(dir_path=model_folder_path,
 #load_timestamp = "22082024_142839"
 load_timestamp = current_timestamp # uncomment if you trained the model in this notebook
 
-figure_folder_path = f"{artifacts_folder_path}/multimodal/{load_timestamp}/figures"
-model_folder_path = f"{artifacts_folder_path}/multimodal/{load_timestamp}/model"
+figure_folder_path = f"{outpath}/multimodal/{load_timestamp}/figures"
+model_folder_path = f"{outpath}/multimodal/{load_timestamp}/model"
 
 os.makedirs(figure_folder_path, exist_ok=True)
 

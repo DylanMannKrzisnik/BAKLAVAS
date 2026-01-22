@@ -294,11 +294,11 @@ def main() -> None:
     print(f"[PROGRESS] AnnDataSet created successfully.", flush=True)
 
     # Redo TSS enrichment scores on AnnDataSet
-    print(f"[PROGRESS] Redoing TSS enrichment scores on AnnDataSet...", flush=True)
-    snap.metrics.tsse(data, gene_anno if gene_anno_exists else snap.genome.mm10)
+    #print(f"[PROGRESS] Redoing TSS enrichment scores on AnnDataSet...", flush=True)
+    #snap.metrics.tsse(data, gene_anno if gene_anno_exists else snap.genome.mm10)
     
     # Generate plots
-    snap.pl.tsse(data, interactive=False, out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_tsse.png"))
+    #snap.pl.tsse(data, interactive=False, out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_tsse.png")) # RuntimeError: not found: n_fragment
     snap.pl.frag_size_distr(data, interactive=False, out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_frag_size_distr.png"))
 
     '''

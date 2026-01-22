@@ -345,10 +345,11 @@ def main() -> None:
         out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_UMAP.png"))
 
     # filter leiden clusters used for peak calling by number of cells
+    leiden_stage_counts_threshold = 500
     data.obs["leiden_stage"] = data.obs["leiden"].astype(str) + "_" + data.obs["stage"]
     counts = data.obs["leiden_stage"].value_counts()
-    selected_leiden_stages = set(counts[counts >= 500].index)
-    print(f"Number of leiden clusters used for peak calling (n>=500): {len(selected_leiden_stages)} out of {len(data.obs['leiden_stage'].unique())}", flush=True)
+    selected_leiden_stages = set(counts[counts >= leiden_stage_counts_threshold].index)
+    print(f"Number of leiden clusters used for peak calling (n>={leiden_stage_counts_threshold}): {len(selected_leiden_stages)} out of {len(data.obs['leiden_stage'].unique())}", flush=True)
 
     # Peak calling
     print(f"[PROGRESS] Peak calling...", flush=True)
@@ -357,9 +358,9 @@ def main() -> None:
         data,
         groupby='leiden_stage',
         selections=selected_leiden_stages,
-        replicate=None,
         qvalue=0.05,
-        replicate_qvalue=0.2,
+        replicate=None, # 'None' means no replicates (only one group) - more akin to a union set of peaks
+        replicate_qvalue=None, # only relevant if replicates are provided
         max_frag_size=200, # optional ATAC setting (keep nucleosome-free-ish)
         n_jobs=min(_infer_n_jobs(default=8), 8),
         tempdir=scratch_base

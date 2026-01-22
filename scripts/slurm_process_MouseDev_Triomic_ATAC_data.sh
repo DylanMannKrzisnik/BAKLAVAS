@@ -26,6 +26,7 @@ echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-}"
 python -c "import os; print('affinity_cpus=', len(os.sched_getaffinity(0)))"
 
 echo "SLURM_TMPDIR=${SLURM_TMPDIR:-}"
+echo "WARNING: sourcing H5AD files from scratch directory"
 rsync -av /home/dmannk/links/scratch/GSM*h5ad "${SLURM_TMPDIR}/"
 ls -lhtr "${SLURM_TMPDIR}/"
 

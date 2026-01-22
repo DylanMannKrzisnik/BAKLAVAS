@@ -43,11 +43,137 @@ def _infer_n_jobs(default: int = 8) -> int:
 
 os.environ["RUST_BACKTRACE"] = "1"
 
+def save_ann_dataset(
+    data: snap.AnnDataSet,
+    sample_names: list,
+    out_h5ad_paths: list,
+    scratch_base: str,
+    update_individual_files: bool = True,
+    save_consolidated: bool = False,
+) -> None:
+    """
+    Save AnnDataSet to disk with memory-efficient options.
+    
+    The .h5ads file is automatically saved and contains all modifications.
+    This function optionally:
+    1. Updates individual h5ad files with latest annotations (recommended)
+    2. Saves a single consolidated file (memory-intensive)
+    
+    Parameters
+    ----------
+    data : snap.AnnDataSet
+        The AnnDataSet to save
+    sample_names : list
+        List of sample names corresponding to individual AnnData objects
+    out_h5ad_paths : list
+        List of paths where individual h5ad files should be saved
+    scratch_base : str
+        Base directory for saving files
+    update_individual_files : bool, default=True
+        If True, update individual h5ad files with latest annotations from AnnDataSet.
+        This ensures individual files have leiden clusters, UMAP coordinates, etc.
+    save_consolidated : bool, default=False
+        If True, save a single consolidated .zarr or .h5ad file (memory-intensive).
+        Set via SAVE_CONSOLIDATED_FILE environment variable.
+    """
+    print(f"[INFO] AnnDataSet is already saved to: {data.filename}", flush=True)
+    print(f"[INFO] This file contains all modifications and can be loaded without memory overhead.", flush=True)
+    
+    # Update individual h5ad files with latest annotations
+    if update_individual_files:
+        print(f"[PROGRESS] Updating individual h5ad files with latest annotations...", flush=True)
+        import gc
+        updated_count = 0
+        failed_count = 0
+        
+        for name, out_path in _tqdm(zip(sample_names, out_h5ad_paths), 
+                                      desc="Updating individual files", 
+                                      total=len(sample_names)):
+            try:
+                # Extract sample-specific data from AnnDataSet
+                # This loads only one sample's data at a time (memory-efficient)
+                sample_mask = data.obs['sample'] == name
+                if sample_mask.sum() == 0:
+                    print(f"[WARNING] No cells found for sample {name}, skipping", flush=True)
+                    failed_count += 1
+                    continue
+                
+                # Create a view/copy of the sample data with all annotations
+                # Note: This requires memory for one sample, but processes them sequentially
+                sample_adata = data[sample_mask].to_adata()
+                
+                # Write the updated file
+                sample_adata.write_h5ad(out_path, compression='gzip')
+                updated_count += 1
+                
+                # Clean up to free memory before next iteration
+                del sample_adata
+                gc.collect()
+                
+            except MemoryError as e:
+                print(f"[ERROR] Out of memory while processing sample {name}: {e}", flush=True)
+                failed_count += 1
+                gc.collect()
+            except Exception as e:
+                print(f"[WARNING] Error updating {name}: {e}", flush=True)
+                failed_count += 1
+                gc.collect()
+        
+        print(f"[PROGRESS] Updated {updated_count}/{len(sample_names)} individual h5ad files.", flush=True)
+        if failed_count > 0:
+            print(f"[WARNING] Failed to update {failed_count} files. The .h5ads file at {data.filename} still contains all data.", flush=True)
+    else:
+        print(f"[INFO] Skipping individual file updates (set update_individual_files=True to enable)", flush=True)
+    
+    # Optionally save consolidated file
+    if save_consolidated:
+        print(f"[PROGRESS] Converting AnnDataSet to single consolidated file (memory-intensive)...", flush=True)
+        try:
+            # Convert to AnnData (this loads data into memory)
+            print(f"[INFO] Converting to AnnData (this may use significant memory)...", flush=True)
+            adata = data.to_adata()
+            
+            # Drop large arrays that can be recomputed if needed
+            # This reduces memory usage for the write operation
+            if 'X_spectral' in adata.obsm:
+                print(f"[INFO] Dropping X_spectral to save memory (can be recomputed)", flush=True)
+                del adata.obsm['X_spectral']
+            
+            if 'count' in adata.var.columns:
+                print(f"[INFO] Dropping 'count' column from var", flush=True)
+                adata.var = adata.var.drop(columns=['count'])
+            
+            # Write as Zarr (better for large datasets, supports chunked access)
+            zarr_path = os.path.join(scratch_base, "MouseDev_Triomic_ATAC.zarr")
+            print(f"[INFO] Writing to Zarr format (chunked, memory-efficient)...", flush=True)
+            adata.write_zarr(zarr_path, chunks=(10000, None))
+            print(f"[PROGRESS] Saved as Zarr: {zarr_path}", flush=True)
+            
+            # Optionally also save as h5ad (uncomment if needed)
+            # h5ad_path = os.path.join(scratch_base, "MouseDev_Triomic_ATAC.h5ad")
+            # adata.write_h5ad(h5ad_path, compression='gzip')
+            # print(f"[PROGRESS] Saved as H5AD: {h5ad_path}", flush=True)
+            
+            # Clean up
+            del adata
+            import gc
+            gc.collect()
+            print(f"[INFO] Note: Large arrays (like X_spectral) remain in the .h5ads file", flush=True)
+            
+        except MemoryError as e:
+            print(f"[WARNING] Not enough memory to create consolidated file: {e}", flush=True)
+            print(f"[INFO] The .h5ads file at {data.filename} is sufficient for most use cases.", flush=True)
+            print(f"[INFO] You can load it later with: snap.read_dataset('{data.filename}')", flush=True)
+    else:
+        print(f"[INFO] Skipping consolidated file conversion (set SAVE_CONSOLIDATED_FILE=true to enable)", flush=True)
+        print(f"[INFO] The .h5ads file format is memory-efficient and recommended for large datasets.", flush=True)
+
 #%% main function
 def main() -> None:
-    #datapath = os.path.abspath("../data/MouseDev_Spatial_Triomic")
 
-    scratch_base = os.environ["SLURM_TMPDIR"]  # fail fast if not set
+    outpath = os.path.join("/home/dmannk/links/scratch", f"MouseDev_Triomic_ATAC_{os.environ.get('SLURM_JOB_ID', 'local')}")
+    scratch_base = os.environ.get("SLURM_TMPDIR", outpath)
+    os.makedirs(outpath, exist_ok=True)
     os.makedirs(scratch_base, exist_ok=True)
 
     # Make *everything* use node-local temp, even if tempdir= is ignored (tl.macs3 bug #232)
@@ -55,8 +181,8 @@ def main() -> None:
     tempfile.tempdir = scratch_base
 
     datapath = "/home/dmannk/links/projects/ctb-liyue/dmannk/BAKLAVAS_base/data/MouseDev_Spatial_Triomic"
-    scratch_base = os.environ.get("SLURM_TMPDIR", "/home/dmannk/links/scratch")
     tarpath = os.path.join(datapath, "GSE308623.tar")
+    gene_anno = '/home/dmannk/.cache/snapatac2/gencode.vM25.basic.annotation.gff3.gz'
 
     developmental_atac_pattern = r"_P\d+S\d+_atac_fragments\.tsv\.gz$"
     BIN_SIZE = 5000
@@ -146,7 +272,6 @@ def main() -> None:
     #data = snap.AnnDataSet(adatas=list(zip(sample_names, adatas)), filename=os.path.join(datapath, "MouseDev_Triomic_ATAC.h5ads"))
 
     # 4) Tutorial-style: these accept a list of AnnData
-    gene_anno = '/home/dmannk/.cache/snapatac2/gencode.vM25.basic.annotation.gff3.gz'
     gene_anno_exists = os.path.exists(gene_anno)
 
     print(f"[PROGRESS] Computing TSS enrichment scores...", flush=True)
@@ -184,46 +309,61 @@ def main() -> None:
     data.obs_names = unique_cell_ids
     assert data.n_obs == np.unique(data.obs_names).size
 
+    # add obs metadata
+    data.obs['stage'] = data.obs['sample'].str.extract(r"_(P\d+)")
+    data.obs['rep'] = data.obs['sample'].str.extract(r"(S\d+)")
+
     # spectral representation
     print(f"[PROGRESS] Selecting features...", flush=True)
     snap.pp.select_features(data, n_features=50000)
     print(f"[PROGRESS] Computing spectral representation...", flush=True)
     snap.tl.spectral(data)
 
-    # UMAP
-    #snap.tl.umap(data)
-    #snap.pl.umap(data, color="sample", interactive=False)
-
     # Batch correction
-    #snap.pp.mnc_correct(data, batch="sample")
-    #snap.pp.harmony(data, batch="sample", max_iter_harmony=20)
+    #snap.pp.mnc_correct(data, batch="stage")
 
-    # UMAP after batch correction
-    #snap.tl.umap(data, use_rep="X_spectral_mnn")
-    #snap.pl.umap(data, color="sample", interactive=False)
-
-    # UMAP after Harmony batch correction
-    #snap.tl.umap(data, use_rep="X_spectral_harmony")
-    #snap.pl.umap(data, color="sample", interactive=False)
+    snap.pp.harmony(
+        data,
+        batch="sample",
+        groupby="stage",
+        use_rep="X_spectral",
+        max_iter_harmony=20,
+        theta=3,
+    )
 
     # Clustering
     #snap.pp.knn(data, use_rep="X_spectral_harmony")
     print(f"[PROGRESS] KNN...", flush=True)
-    snap.pp.knn(data, use_rep="X_spectral")
+    snap.pp.knn(data, use_rep="X_spectral_harmony")
     print(f"[PROGRESS] Leiden clustering...", flush=True)
     snap.tl.leiden(data)
     print(f"[PROGRESS] Leiden clustering completed.", flush=True)
-    #snap.pl.umap(data, color="leiden", interactive=False)
+
+    # UMAP
+    snap.tl.umap(data, use_rep="X_spectral_harmony")
+    snap.pl.umap(data, color=["leiden", "sample", "stage", "rep"], wspace=0.4, interactive=False,
+        out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_UMAP.png"))
+
+    # filter leiden clusters used for peak calling by number of cells
+    data.obs["leiden_stage"] = data.obs["leiden"].astype(str) + "_" + data.obs["stage"]
+    counts = data.obs["leiden_stage"].value_counts()
+    selected_leiden_stages = set(counts[counts >= 500].index)
+    print(f"Number of leiden clusters used for peak calling (n>=500): {len(selected_leiden_stages)} out of {len(data.obs['leiden_stage'].unique())}", flush=True)
 
     # Peak calling
     print(f"[PROGRESS] Peak calling...", flush=True)
 
     snap.tl.macs3(
         data,
-        groupby='leiden',
-        replicate='sample',
-        n_jobs=8,
-        tempdir=scratch_base)
+        groupby='leiden_stage',
+        selections=selected_leiden_stages,
+        replicate=None,
+        qvalue=0.05,
+        replicate_qvalue=0.2,
+        max_frag_size=200, # optional ATAC setting (keep nucleosome-free-ish)
+        n_jobs=min(_infer_n_jobs(default=8), 8),
+        tempdir=scratch_base
+        )
 
     print(f"[PROGRESS] Merging peaks...", flush=True)
     merged_peaks = snap.tl.merge_peaks(data.uns['macs3'], chrom_sizes=snap.genome.mm10)
@@ -239,17 +379,20 @@ def main() -> None:
     peak_mat.write_h5ad(os.path.join(datapath, "MouseDev_Triomic_ATAC_peak_matrix.h5ad"))
     print(f"[PROGRESS] Peak matrix saved successfully.", flush=True)
 
-    # Save AnnDataSet to disk (writes the .h5ads file with all modifications)
-    #print(f"[PROGRESS] Saving AnnDataSet to disk...")
-    #adata = data.to_adata()
-
-    # interferes with writing to disk, probably not enough memory to store all the data
-    #adata.var = adata.var.drop(columns=['count'])
-    #del adata.obsm['X_spectral']
-
-    #adata.write_h5ad(os.path.join(scratch_base, "MouseDev_Triomic_ATAC.h5ad"))
-    #adata.write_zarr(os.path.join(scratch_base, "MouseDev_Triomic_ATAC.zarr"))
-    #print(f"[PROGRESS] AnnDataSet saved successfully.")
+    # Save AnnDataSet to disk (memory-efficient approach)
+    '''
+    save_consolidated = os.environ.get("SAVE_CONSOLIDATED_FILE", "false").lower() == "true"
+    update_individual = os.environ.get("UPDATE_INDIVIDUAL_FILES", "true").lower() == "true"
+    
+    save_ann_dataset(
+        data=data,
+        sample_names=sample_names,
+        out_h5ad_paths=out_h5ad_paths,
+        scratch_base=scratch_base,
+        update_individual_files=update_individual,
+        save_consolidated=save_consolidated,
+    )
+    '''
 
     # 6) Cleanup temp directory when you're done with everything (only if we created one)
     if workdir_ctx is not None:

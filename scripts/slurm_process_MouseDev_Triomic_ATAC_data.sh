@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=24:00:00
-#SBATCH --mem=128G
+#SBATCH --time=14:00:00
+#SBATCH --mem=75G
 #SBATCH --tmp=150G
 #SBATCH --output=/home/dmannk/links/scratch/%x-%j.out
 #SBATCH --error=/home/dmannk/links/scratch/%x-%j.err

@@ -31,3 +31,7 @@ atac_adata = ad.AnnData(
     obs=atac_cell_anno,
     var=atac_gene_anno,
 )
+
+# save AnnData objects
+rna_adata.write_h5ad(os.path.join(mouse_rna_path, "mouse_rna.h5ad"))
+atac_adata.write_h5ad(os.path.join(mouse_atac_path, "mouse_atac.h5ad"))

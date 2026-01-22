@@ -3,9 +3,9 @@
 #SBATCH --account=def-liyue
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --time=8:00:00
-#SBATCH --mem=180G
+#SBATCH --cpus-per-task=16
+#SBATCH --time=24:00:00
+#SBATCH --mem=128G
 #SBATCH --tmp=150G
 #SBATCH --output=/home/dmannk/links/scratch/%x-%j.out
 #SBATCH --error=/home/dmannk/links/scratch/%x-%j.err

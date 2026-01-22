@@ -293,6 +293,10 @@ def main() -> None:
     )
     print(f"[PROGRESS] AnnDataSet created successfully.", flush=True)
 
+    # Generate plots
+    snap.pl.frag_size_distr(data, interactive=False, out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_frag_size_distr.png"))
+    snap.pl.tsse(data, interactive=False, out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_tsse.png"))
+
     '''
     if os.path.exists(os.path.join(datapath, "MouseDev_Triomic_ATAC.h5ads")):
         data = snap.read_dataset(

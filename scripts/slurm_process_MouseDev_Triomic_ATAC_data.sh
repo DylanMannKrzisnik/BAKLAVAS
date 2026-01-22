@@ -7,12 +7,18 @@
 #SBATCH --time=14:00:00
 #SBATCH --mem=75G
 #SBATCH --tmp=150G
-#SBATCH --output=/home/dmannk/links/scratch/%x-%j.out
-#SBATCH --error=/home/dmannk/links/scratch/%x-%j.err
+#SBATCH --output=/home/dmannk/links/scratch/MouseDev_Triomic_ATAC_%j/%x-%j.out
+#SBATCH --error=/home/dmannk/links/scratch/MouseDev_Triomic_ATAC_%j/%x-%j.err
 #SBATCH --mail-user=dylan.mann-krzisnik@mail.mcgill.ca
 #SBATCH --mail-type=BEGIN,END,FAIL
 
 set -euo pipefail
+
+# Ensure outpath directory exists (matches Python script's outpath pattern)
+# This ensures SLURM output files can be written even if parent dir creation fails
+OUTPATH="/home/dmannk/links/scratch/MouseDev_Triomic_ATAC_${SLURM_JOB_ID:-local}"
+mkdir -p "${OUTPATH}"
+echo "Output directory: ${OUTPATH}"
 
 # Ensure relative paths in the Python script resolve correctly
 cd /home/dmannk/links/projects/ctb-liyue/dmannk/BAKLAVAS_base/BAKLAVAS

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from tqdm import tqdm
 import polars as pl
+import multiprocessing as mp
 
 import snapatac2 as snap
 
@@ -343,7 +344,7 @@ def main() -> None:
         n_jobs=_infer_n_jobs(default=8),
         inplace=False, # if True: adata.obsm[use_rep + "_harmony"] = mat ~~~~ RuntimeError: dimension cannot be changed from 37221 to 30
     )
-    data.obsm["X_spectral_harmony"] = np.ascontiguousarray(X_spectral_harmony.T, dtype=np.float64)
+    data.obsm["X_spectral_harmony"] = np.ascontiguousarray(X_spectral_harmony, dtype=np.float64)
 
     # Clustering
     #snap.pp.knn(data, use_rep="X_spectral_harmony")
@@ -354,7 +355,7 @@ def main() -> None:
     print(f"[PROGRESS] Leiden clustering completed.", flush=True)
 
     # UMAP
-    snap.tl.umap(data, use_rep="X_spectral_harmony", random_state=None if os.environ.get("SLURM_CPUS_PER_TASK", 1) > 1 else 42) # random_state seed removes parallelization
+    snap.tl.umap(data, use_rep="X_spectral_harmony", random_state=None if int(os.environ.get("SLURM_CPUS_PER_TASK", 1)) > 1 else 42) # random_state seed removes parallelization
     #snap.pl.umap(data, color=["leiden", "sample", "stage", "rep"], interactive=False,
     snap.pl.umap(data, color=["leiden"], interactive=False,
         out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_UMAP.png"))
@@ -418,4 +419,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)   # or "forkserver"
+    import harmony_patch
+    harmony_patch.apply()
     main()

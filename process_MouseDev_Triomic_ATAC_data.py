@@ -7,6 +7,7 @@ import tempfile
 import sys
 from pathlib import Path
 from tqdm import tqdm
+import polars as pl
 
 import snapatac2 as snap
 
@@ -330,14 +331,19 @@ def main() -> None:
     # Batch correction
     #snap.pp.mnc_correct(data, batch="stage")
 
-    snap.pp.harmony(
+    X_spectral_harmony = snap.pp.harmony(
         data,
         batch="sample",
         groupby="stage",
         use_rep="X_spectral",
-        max_iter_harmony=20,
+        max_iter_harmony=10,
+        max_iter_kmeans=10, # reduced for speed
+        nclust=30, # reduced for speed
         theta=3,
+        n_jobs=_infer_n_jobs(default=8),
+        inplace=False, # if True: adata.obsm[use_rep + "_harmony"] = mat ~~~~ RuntimeError: dimension cannot be changed from 37221 to 30
     )
+    data.obsm["X_spectral_harmony"] = np.ascontiguousarray(X_spectral_harmony.T, dtype=np.float64)
 
     # Clustering
     #snap.pp.knn(data, use_rep="X_spectral_harmony")
@@ -348,15 +354,18 @@ def main() -> None:
     print(f"[PROGRESS] Leiden clustering completed.", flush=True)
 
     # UMAP
-    snap.tl.umap(data, use_rep="X_spectral_harmony")
-    snap.pl.umap(data, color=["leiden", "sample", "stage", "rep"], wspace=0.4, interactive=False,
+    snap.tl.umap(data, use_rep="X_spectral_harmony", random_state=None if os.environ.get("SLURM_CPUS_PER_TASK", 1) > 1 else 42) # random_state seed removes parallelization
+    #snap.pl.umap(data, color=["leiden", "sample", "stage", "rep"], interactive=False,
+    snap.pl.umap(data, color=["leiden"], interactive=False,
         out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_UMAP.png"))
 
     # filter leiden clusters used for peak calling by number of cells
     leiden_stage_counts_threshold = 500
-    data.obs["leiden_stage"] = data.obs["leiden"].astype(str) + "_" + data.obs["stage"]
+    data.obs["leiden_stage"] = data.obs["leiden"] + "_" + data.obs["stage"]
     counts = data.obs["leiden_stage"].value_counts()
-    selected_leiden_stages = set(counts[counts >= leiden_stage_counts_threshold].index)
+    selected_leiden_stages = set(
+        counts.filter(pl.col("count") >= leiden_stage_counts_threshold)["leiden_stage"].to_list()
+    )
     print(f"Number of leiden clusters used for peak calling (n>={leiden_stage_counts_threshold}): {len(selected_leiden_stages)} out of {len(data.obs['leiden_stage'].unique())}", flush=True)
 
     # Peak calling

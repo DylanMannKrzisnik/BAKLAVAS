@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 import anndata as ad
-import scanpy as sc
+import scipy.io as sio
 
 datapath = "/home/dmannk/links/projects/def-liyue/dmannk/BAKLAVAS_base/data/EasySci_SLL"
 mouse_rna_path = os.path.join(datapath, "mouse", "RNA")
@@ -10,8 +10,8 @@ mouse_atac_path = os.path.join(datapath, "mouse", "ATAC")
 # load RNA-seq data and metadata
 #rna_gene_count = pd.read_csv(os.path.join(mouse_rna_path, "GSM6538356_RNA_gene_count.txt.gz"), compression="gzip", sep="\t")
 #rna_exon_count = pd.read_csv(os.path.join(mouse_rna_path, "GSM6538356_RNA_exon_count.txt.gz"), compression="gzip", sep="\t")
-rna_gene_count_adata = sc.read_mtx(os.path.join(mouse_rna_path, "GSM6538356_RNA_gene_count.txt.gz"))
-#rna_exon_count_adata = sc.read_mtx(os.path.join(mouse_rna_path, "GSM6538356_RNA_exon_count.txt.gz"))
+rna_gene_count = sio.mmread(os.path.join(mouse_rna_path, "GSM6538356_RNA_gene_count.txt.gz")).tocsr()
+#rna_exon_count_adata = sio.mmread(os.path.join(mouse_rna_path, "GSM6538356_RNA_exon_count.txt.gz")).tocsr()
 rna_cell_anno = pd.read_csv(os.path.join(mouse_rna_path, "GSM6538356_RNA_cell_annotation.csv.gz"), compression="gzip")
 rna_exon_anno = pd.read_csv(os.path.join(mouse_rna_path, "GSM6538356_RNA_exon_annotation.csv.gz"), compression="gzip")
 rna_gene_anno = pd.read_csv(os.path.join(mouse_rna_path, "GSM6538356_RNA_gene_annotation.csv.gz"), compression="gzip")
@@ -19,26 +19,23 @@ rna_gene_anno = pd.read_csv(os.path.join(mouse_rna_path, "GSM6538356_RNA_gene_an
 # load ATAC-seq data and metadata
 #atac_gene_activity = pd.read_csv(os.path.join(mouse_atac_path, "GSM6538357_ATAC_gene_activity.txt.gz"), compression="gzip", sep="\t")
 #atac_peak_count = pd.read_csv(os.path.join(mouse_atac_path, "GSM6538357_ATAC_peak_count.txt.gz"), compression="gzip", sep="\t")
-#atac_gene_activity = sc.read_mtx(os.path.join(mouse_atac_path, "GSM6538357_ATAC_gene_activity.txt.gz"))
-atac_peak_count_adata = sc.read_mtx(os.path.join(mouse_atac_path, "GSM6538357_ATAC_peak_count.txt.gz"))
+#atac_gene_activity = sio.mmread(os.path.join(mouse_atac_path, "GSM6538357_ATAC_gene_activity.txt.gz")).tocsr()
+atac_peak_count = sio.mmread(os.path.join(mouse_atac_path, "GSM6538357_ATAC_peak_count.txt.gz")).tocsr()
 atac_gene_anno = pd.read_csv(os.path.join(mouse_atac_path, "GSM6538357_ATAC_gene_annotation.csv.gz"), compression="gzip")
 atac_peak_anno = pd.read_csv(os.path.join(mouse_atac_path, "GSM6538357_ATAC_peak_annotation.csv.gz"), compression="gzip")
 atac_cell_anno = pd.read_csv(os.path.join(mouse_atac_path, "GSM6538357_ATAC_cell_annotation.csv.gz"), compression="gzip")
 
 # create AnnData objects
 rna_adata = ad.AnnData(
-    X=rna_gene_count.values,
+    X=rna_gene_count,
     obs=rna_cell_anno,
     var=rna_gene_anno,
 )
 atac_adata = ad.AnnData(
-    X=atac_gene_activity.values,
+    X=atac_peak_count,
     obs=atac_cell_anno,
     var=atac_gene_anno,
 )
-
-atac_peak_count_adata.obs = atac_cell_anno
-atac_peak_count_adata.var = atac_peak_anno
 
 # save AnnData objects
 rna_adata.write_h5ad(os.path.join(mouse_rna_path, "mouse_rna.h5ad"))

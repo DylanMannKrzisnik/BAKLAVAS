@@ -7,8 +7,8 @@
 #SBATCH --time=24:00:00
 #SBATCH --mem=100G
 #SBATCH --tmp=150G
-#SBATCH --output=/home/dmannk/links/scratch/MouseDev_Triomic_ATAC_%j/%x-%j.out
-#SBATCH --error=/home/dmannk/links/scratch/MouseDev_Triomic_ATAC_%j/%x-%j.err
+#SBATCH --output=/home/dmannk/links/scratch/MouseDev_Triomic_ATAC_%j/%x-%j.log
+#SBATCH --error=/home/dmannk/links/scratch/MouseDev_Triomic_ATAC_%j/%x-%j.log
 #SBATCH --mail-user=dylan.mann-krzisnik@mail.mcgill.ca
 #SBATCH --mail-type=BEGIN,END,FAIL
 

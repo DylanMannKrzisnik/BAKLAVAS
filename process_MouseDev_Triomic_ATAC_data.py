@@ -78,7 +78,7 @@ def save_ann_dataset(
         If True, save a single consolidated .zarr or .h5ad file (memory-intensive).
         Set via SAVE_CONSOLIDATED_FILE environment variable.
     """
-    print(f"[INFO] AnnDataSet is already saved to: {data.filename}", flush=True)
+    #print(f"[INFO] AnnDataSet is already saved to: {data.filename}", flush=True)
     print(f"[INFO] This file contains all modifications and can be loaded without memory overhead.", flush=True)
     
     # Update individual h5ad files with latest annotations
@@ -141,9 +141,9 @@ def save_ann_dataset(
                 print(f"[INFO] Dropping X_spectral to save memory (can be recomputed)", flush=True)
                 del adata.obsm['X_spectral']
             
-            if 'count' in adata.var.columns:
-                print(f"[INFO] Dropping 'count' column from var", flush=True)
-                adata.var = adata.var.drop(columns=['count'])
+            #if 'count' in adata.var.columns:
+            #    print(f"[INFO] Dropping 'count' column from var", flush=True)
+            #    adata.var = adata.var.drop(columns=['count'])
             
             # Optionally also save as h5ad (uncomment if needed)
             h5ad_path = os.path.join(outpath, "MouseDev_Triomic_ATAC.h5ad")
@@ -151,10 +151,10 @@ def save_ann_dataset(
             print(f"[PROGRESS] Saved as H5AD: {h5ad_path}", flush=True)
 
             # Write as Zarr (better for large datasets, supports chunked access)
-            zarr_path = os.path.join(outpath, "MouseDev_Triomic_ATAC.zarr")
-            print(f"[INFO] Writing to Zarr format (chunked, memory-efficient)...", flush=True)
-            adata.write_zarr(zarr_path, chunks=(10000, None))
-            print(f"[PROGRESS] Saved as Zarr: {zarr_path}", flush=True)
+            #zarr_path = os.path.join(outpath, "MouseDev_Triomic_ATAC.zarr")
+            #print(f"[INFO] Writing to Zarr format (chunked, memory-efficient)...", flush=True)
+            #adata.write_zarr(zarr_path, chunks=(10000, None))
+            #print(f"[PROGRESS] Saved as Zarr: {zarr_path}", flush=True)
             
             
             # Clean up
@@ -175,7 +175,9 @@ def save_ann_dataset(
 def main() -> None:
 
     outpath = os.path.join("/home/dmannk/links/scratch", f"MouseDev_Triomic_ATAC_{os.environ.get('SLURM_JOB_ID', 'local')}")
-    scratch_base = os.environ.get("SLURM_TMPDIR", outpath)
+    scratch_login = "/home/dmannk/links/scratch"
+    scratch_base = os.environ.get("SLURM_TMPDIR", scratch_login)
+    print(f"[INFO] Scratch base: {scratch_base}", flush=True)
     os.makedirs(outpath, exist_ok=True)
     os.makedirs(scratch_base, exist_ok=True)
 
@@ -358,7 +360,7 @@ def main() -> None:
     # UMAP
     snap.tl.umap(data, use_rep="X_spectral_harmony", random_state=None if int(os.environ.get("SLURM_CPUS_PER_TASK", 1)) > 1 else 42) # random_state seed removes parallelization
     #snap.pl.umap(data, color=["leiden", "sample", "stage", "rep"], interactive=False,
-    snap.pl.umap(data, color=["leiden"], interactive=False,
+    snap.pl.umap(data, interactive=False, # using the color argument results in uninformative plots
         out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_UMAP.png"))
 
     # filter leiden clusters used for peak calling by number of cells
@@ -390,7 +392,20 @@ def main() -> None:
     print(f"Number of merged peaks: {merged_peaks.shape[0]}", flush=True)
 
     ## TMP: save data and merged peaks to disk
-    merged_peaks.to_csv(os.path.join(outpath, "MouseDev_Triomic_ATAC_merged_peaks.csv"))
+    merged_peaks.write_csv(os.path.join(outpath, "MouseDev_Triomic_ATAC_merged_peaks.csv"))
+
+    macs3 = dict(data.uns["macs3"])
+    fp = os.path.join(outpath, "macs3_uns.pkl")
+
+    import pickle as pkl
+    with open(fp, "wb") as f:
+        pkl.dump(macs3, f)
+
+    data.uns["macs3_pickle"] = fp
+
+    uns = dict(data.uns)          # materialize as a plain dict
+    uns.pop("macs3", None)
+    data.uns = uns
 
     save_ann_dataset(
         data=data,
@@ -404,7 +419,7 @@ def main() -> None:
     ## create peak matrix from merged peaks
     print(f"[PROGRESS] Creating peak matrix...", flush=True)
     peak_mat = snap.pp.make_peak_matrix(data, use_rep=merged_peaks['Peaks'])
-    print(f"[PROGRESS] Peak matrix created successfully.", flush=True)
+    print(f"[PROGRESS] Peak matrix created successfully. Number of peaks: {peak_mat.n_vars}", flush=True)
 
     ## save peak matrix to disk
     print(f"[PROGRESS] Saving peak matrix to disk...", flush=True)

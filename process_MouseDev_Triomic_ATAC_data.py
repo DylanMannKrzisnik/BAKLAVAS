@@ -49,7 +49,7 @@ def save_ann_dataset(
     data: snap.AnnDataSet,
     sample_names: list,
     out_h5ad_paths: list,
-    scratch_base: str,
+    outpath: str,
     update_individual_files: bool = True,
     save_consolidated: bool = False,
 ) -> None:
@@ -69,7 +69,7 @@ def save_ann_dataset(
         List of sample names corresponding to individual AnnData objects
     out_h5ad_paths : list
         List of paths where individual h5ad files should be saved
-    scratch_base : str
+    outpath : str
         Base directory for saving files
     update_individual_files : bool, default=True
         If True, update individual h5ad files with latest annotations from AnnDataSet.
@@ -145,16 +145,17 @@ def save_ann_dataset(
                 print(f"[INFO] Dropping 'count' column from var", flush=True)
                 adata.var = adata.var.drop(columns=['count'])
             
+            # Optionally also save as h5ad (uncomment if needed)
+            h5ad_path = os.path.join(outpath, "MouseDev_Triomic_ATAC.h5ad")
+            adata.write_h5ad(h5ad_path, compression='gzip')
+            print(f"[PROGRESS] Saved as H5AD: {h5ad_path}", flush=True)
+
             # Write as Zarr (better for large datasets, supports chunked access)
-            zarr_path = os.path.join(scratch_base, "MouseDev_Triomic_ATAC.zarr")
+            zarr_path = os.path.join(outpath, "MouseDev_Triomic_ATAC.zarr")
             print(f"[INFO] Writing to Zarr format (chunked, memory-efficient)...", flush=True)
             adata.write_zarr(zarr_path, chunks=(10000, None))
             print(f"[PROGRESS] Saved as Zarr: {zarr_path}", flush=True)
             
-            # Optionally also save as h5ad (uncomment if needed)
-            # h5ad_path = os.path.join(scratch_base, "MouseDev_Triomic_ATAC.h5ad")
-            # adata.write_h5ad(h5ad_path, compression='gzip')
-            # print(f"[PROGRESS] Saved as H5AD: {h5ad_path}", flush=True)
             
             # Clean up
             del adata
@@ -388,6 +389,18 @@ def main() -> None:
     merged_peaks = snap.tl.merge_peaks(data.uns['macs3'], chrom_sizes=snap.genome.mm10)
     print(f"Number of merged peaks: {merged_peaks.shape[0]}", flush=True)
 
+    ## TMP: save data and merged peaks to disk
+    merged_peaks.to_csv(os.path.join(outpath, "MouseDev_Triomic_ATAC_merged_peaks.csv"))
+
+    save_ann_dataset(
+        data=data,
+        sample_names=sample_names,
+        out_h5ad_paths=out_h5ad_paths,
+        outpath=outpath,
+        update_individual_files=False,
+        save_consolidated=True,
+    )
+
     ## create peak matrix from merged peaks
     print(f"[PROGRESS] Creating peak matrix...", flush=True)
     peak_mat = snap.pp.make_peak_matrix(data, use_rep=merged_peaks['Peaks'])
@@ -402,15 +415,6 @@ def main() -> None:
     '''
     save_consolidated = os.environ.get("SAVE_CONSOLIDATED_FILE", "false").lower() == "true"
     update_individual = os.environ.get("UPDATE_INDIVIDUAL_FILES", "true").lower() == "true"
-    
-    save_ann_dataset(
-        data=data,
-        sample_names=sample_names,
-        out_h5ad_paths=out_h5ad_paths,
-        scratch_base=scratch_base,
-        update_individual_files=update_individual,
-        save_consolidated=save_consolidated,
-    )
     '''
 
     # 6) Cleanup temp directory when you're done with everything (only if we created one)

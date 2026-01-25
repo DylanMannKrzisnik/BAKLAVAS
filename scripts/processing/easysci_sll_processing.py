@@ -1,45 +1,84 @@
+# %% load libraries
 import os
 import anndata as ad
 import scanpy as sc
 from muon import atac as ac
 import mudata
+import mygene
 
-
+# %% load data
 datapath = "/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL"
 mouse_rna_path = os.path.join(datapath, "mouse", "RNA", "mouse_rna.h5ad")
 mouse_atac_path = os.path.join(datapath, "mouse", "ATAC", "mouse_atac.h5ad")
 
-#%% load data
 mouse_rna = ad.read_h5ad(mouse_rna_path)
 mouse_atac = ad.read_h5ad(mouse_atac_path)
 
-mouse_rna.layers["counts"] = mouse_rna.X.copy()
-mouse_atac.layers["counts"] = mouse_atac.X.copy()
+if "counts" not in mouse_rna.layers:
+    mouse_rna.layers["counts"] = mouse_rna.X.copy()
+if "counts" not in mouse_atac.layers:
+    mouse_atac.layers["counts"] = mouse_atac.X.copy()
 
 mdata = mudata.MuData({"rna": mouse_rna, "atac": mouse_atac})
 
 print(mouse_rna.shape)
 print(mouse_atac.shape)
 
-#%% get genomic position of a gene
-import mygene
+# %% add genomic intervals for genes (needed for Muon ATAC gene annotation)
+#
+# Notes from the interactive session:
+# - `mouse_rna.var['gene_id']` contains Ensembl IDs with version (e.g. ENSMUSG...1)
+# - Muon expects an `interval` column like "chr8:222-333" for genes
+# - MyGene's `genomic_pos` is assembly-dependent; if you need mm10 specifically,
+#   switch to `genomic_pos_mm10` instead.
 
 mg = mygene.MyGeneInfo()
 
-# Your list of genes
-genes = mouse_rna.var['gene_id'].str.split('.').str[0].tolist()
+if "gene_id" in mouse_rna.var.columns:
+    gene_ids = mouse_rna.var["gene_id"].astype(str)
+elif "gene_ids" in mouse_rna.var.columns:
+    gene_ids = mouse_rna.var["gene_ids"].astype(str)
+else:
+    raise KeyError("Expected `mouse_rna.var['gene_id']` or `mouse_rna.var['gene_ids']`.")
 
-# 1. Bulk query for mm10 positions
-# We specifically request 'genomic_pos_mm10' to avoid the newer mm39
-results = mg.querymany(genes, 
-                       scopes='symbol,ensembl.gene', 
-                       species='mouse',
-                       fields='genomic_pos',
-                       as_dataframe=True)
+mouse_rna.var["gene_id_no_version"] = gene_ids.str.split(".").str[0]
+genes = mouse_rna.var["gene_id_no_version"].tolist()
 
-results.dropna(subset=['genomic_pos.chr', 'genomic_pos.start', 'genomic_pos.end'], inplace=True)
-intervals = results.apply(lambda x: f"chr{x['genomic_pos.chr']}:{int(x['genomic_pos.start'])}-{int(x['genomic_pos.end'])}", axis=1)
-print("WARNING: mouse genome assembly not specified")
+genome_field = "genomic_pos"  # mm39 by default; use "genomic_pos_mm10" if needed
+results = mg.querymany(
+    genes,
+    scopes="ensembl.gene",
+    species="mouse",
+    fields=genome_field,
+    as_dataframe=True,
+)
+
+results.dropna(
+    subset=[f"{genome_field}.chr", f"{genome_field}.start", f"{genome_field}.end"],
+    inplace=True,
+)
+intervals = (
+    results.apply(
+        lambda x: (
+            f"chr{x[f'{genome_field}.chr']}:{int(x[f'{genome_field}.start'])}-{int(x[f'{genome_field}.end'])}"
+        ),
+        axis=1,
+    )
+    .rename("interval")
+    .drop_duplicates()
+)
+
+mouse_rna.var = mouse_rna.var.merge(
+    intervals.to_frame(),
+    left_on="gene_id_no_version",
+    right_index=True,
+    how="left",
+)
+mouse_rna.var["interval"] = mouse_rna.var["interval"].fillna("chrNaN:0-1")
+
+if "gene_id" in mouse_rna.var.columns and "gene_ids" not in mouse_rna.var.columns:
+    # Keep original `gene_id` but also provide the `gene_ids` alias used by some tooling.
+    mouse_rna.var["gene_ids"] = mouse_rna.var["gene_id"]
 
 # %% process RNA data
 mouse_rna.var['mt'] = mouse_rna.var_names.str.startswith('MT-')  # annotate the group of mitochondrial genes as 'mt'
@@ -69,18 +108,39 @@ sc.pl.violin(mouse_atac, ['total_counts', 'n_genes_by_counts'], jitter=0.4, mult
 sc.pp.filter_cells(mouse_atac, min_genes=100)
 sc.pp.filter_genes(mouse_atac, min_cells=10)
 
-#mouse_atac.obs['NS']=1
-#ac.pl.fragment_histogram(mouse_atac, region='chr1:1-2000000')
-#ac.tl.nucleosome_signal(mouse_atac, n=1e6)
+# Derive gene annotations and compute TSS enrichment (from the interactive session).
+_orig_var_names = mouse_rna.var_names.copy()
+try:
+    if "gene_short_name" in mouse_rna.var.columns:
+        # Muon is happiest when genes are indexed by gene symbol/name.
+        mouse_rna.var_names = mouse_rna.var["gene_short_name"].astype(str).values
+        mouse_rna.var_names_make_unique()
+    features = ac.tl.get_gene_annotation_from_rna(mouse_rna)
+finally:
+    mouse_rna.var_names = _orig_var_names
 
-#features = ac.tl.get_gene_annotation_from_rna(mdata)
-#tss = ac.tl.tss_enrichment(mdata, n_tss=1000)  # by default, features=ac.tl.get_gene_annotation_from_rna(mdata)
-#ac.pl.tss_enrichment(tss)
+#tss = ac.tl.tss_enrichment(mouse_atac, n_tss=1000, features=features)
+# ac.pl.tss_enrichment(tss)
 
-ac.pp.tfidf(mouse_atac, scale_factor=1e4)
-
+# Optional: HV peak selection/plotting on raw counts (kept from the interactive session)
 sc.pp.normalize_per_cell(mouse_atac, counts_per_cell_after=1e4)
 sc.pp.log1p(mouse_atac)
-
-sc.pp.highly_variable_genes(mouse_atac, min_mean=0.05, max_mean=1.5, min_disp=.5)
+sc.pp.highly_variable_genes(mouse_atac, min_mean=0.05, max_mean=1.5, min_disp=0.5)
 sc.pl.highly_variable_genes(mouse_atac)
+
+# LSI pipeline (from the interactive session)
+ac.pp.tfidf(mouse_atac, scale_factor=1e4)
+ac.tl.lsi(mouse_atac)
+
+# Drop the first LSI component (often correlated with sequencing depth)
+mouse_atac.obsm["X_lsi"] = mouse_atac.obsm["X_lsi"][:, 1:]
+mouse_atac.varm["LSI"] = mouse_atac.varm["LSI"][:, 1:]
+mouse_atac.uns["lsi"]["stdev"] = mouse_atac.uns["lsi"]["stdev"][1:]
+
+sc.pp.neighbors(mouse_atac, use_rep="X_lsi")
+
+# %% save outputs
+mouse_rna.write_h5ad(os.path.join(datapath, "mouse", "RNA", "mouse_rna_processed.h5ad"))
+mouse_atac.write_h5ad(os.path.join(datapath, "mouse", "ATAC", "mouse_atac_processed.h5ad"))
+mdata = mudata.MuData({"rna": mouse_rna, "atac": mouse_atac})
+mdata.write_h5mu(os.path.join(datapath, "mouse", "mouse_mudata_processed.h5mu"))

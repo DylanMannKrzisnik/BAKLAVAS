@@ -126,7 +126,7 @@ finally:
 # ac.pl.tss_enrichment(tss)
 
 # Optional: HV peak selection/plotting on raw counts (kept from the interactive session)
-sc.pp.normalize_per_cell(mouse_atac, counts_per_cell_after=1e4)
+sc.pp.normalize_total(mouse_atac, target_sum=1e4)
 sc.pp.log1p(mouse_atac)
 sc.pp.highly_variable_genes(mouse_atac, min_mean=0.05, max_mean=1.5, min_disp=0.5)
 sc.pl.highly_variable_genes(mouse_atac)
@@ -143,122 +143,8 @@ mouse_atac.uns["lsi"]["stdev"] = mouse_atac.uns["lsi"]["stdev"][1:]
 sc.pp.neighbors(mouse_atac, use_rep="X_lsi")
 
 # %% save outputs
-# Configuration for remote saving (set to None to save locally)
-# Format: "user@hostname:/path/to/destination"
-# Example: "dmannk@remote-server:/data/processed"
-REMOTE_SAVE_PATH = os.environ.get("REMOTE_SAVE_PATH", f"dmannk@rorqual.alliancecan.ca:{datapath}")  # Set via env var or modify here
-# Alternative: uncomment and set directly:
-# REMOTE_SAVE_PATH = "user@hostname:/path/to/destination"
-
-def save_to_remote_or_local(data_obj, local_path, remote_path=None, temp_dir=None):
-    """
-    Save data object to local path, or if remote_path is specified, 
-    save to temp location and transfer via scp.
-    
-    Parameters:
-    -----------
-    data_obj : anndata.AnnData or mudata.MuData
-        The data object to save
-    local_path : str
-        Local file path (used for temp if remote_path is set)
-    remote_path : str, optional
-        Remote path in format "user@hostname:/path/to/destination"
-    temp_dir : str, optional
-        Temporary directory for intermediate files (default: system temp)
-    """
-    if remote_path is None:
-        # Save locally as normal
-        if isinstance(data_obj, mudata.MuData):
-            data_obj.write_h5mu(local_path)
-        else:
-            data_obj.write_h5ad(local_path)
-        print(f"Saved to local path: {local_path}")
-    else:
-        # Save to temp location first
-        if temp_dir is None:
-            temp_dir = tempfile.gettempdir()
-        
-        # Create temp file path
-        filename = os.path.basename(local_path)
-        temp_path = os.path.join(temp_dir, filename)
-        
-        # Ensure temp directory exists
-        os.makedirs(os.path.dirname(temp_path), exist_ok=True)
-        
-        # Save to temp location
-        print(f"Saving to temporary location: {temp_path}")
-        if isinstance(data_obj, mudata.MuData):
-            data_obj.write_h5mu(temp_path)
-        else:
-            data_obj.write_h5ad(temp_path)
-        
-        # Transfer to remote server
-        remote_dir = os.path.dirname(remote_path)
-        remote_file = os.path.join(remote_dir, filename) if remote_dir != "/" else f"/{filename}"
-        
-        print(f"Transferring {temp_path} to {remote_path}...")
-        try:
-            # Use scp to transfer
-            # Parse remote_path: "user@host:/path" -> user, host, path
-            if ":" in remote_path:
-                user_host, base_path = remote_path.rsplit(":", 1)
-                remote_dest = f"{user_host}:{os.path.join(base_path, filename)}"
-            else:
-                remote_dest = remote_path
-            
-            # Run scp command
-            scp_cmd = ["scp", temp_path, remote_dest]
-            result = subprocess.run(scp_cmd, check=True, capture_output=True, text=True)
-            print(f"Successfully transferred to {remote_dest}")
-            
-            # Clean up temp file
-            os.remove(temp_path)
-            print(f"Cleaned up temporary file: {temp_path}")
-            
-        except subprocess.CalledProcessError as e:
-            print(f"Error transferring file: {e}")
-            print(f"stderr: {e.stderr}")
-            print(f"File saved to temp location: {temp_path}")
-            print("You can manually transfer it using:")
-            print(f"  scp {temp_path} {remote_path}")
-            raise
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            print(f"File saved to temp location: {temp_path}")
-            raise
-
-# Determine remote path if configured
-remote_base_path = None
-if REMOTE_SAVE_PATH:
-    # Extract base path and construct full remote paths
-    if ":" in REMOTE_SAVE_PATH:
-        user_host, base_path = REMOTE_SAVE_PATH.rsplit(":", 1)
-        remote_base_path = f"{user_host}:{base_path}"
-    else:
-        remote_base_path = REMOTE_SAVE_PATH
-
-# Save files
-if remote_base_path:
-    # Save to remote server
-    save_to_remote_or_local(
-        mouse_rna, 
-        os.path.join(datapath, "mouse", "RNA", "mouse_rna_processed.h5ad"),
-        remote_path=os.path.join(remote_base_path, "mouse", "RNA", "mouse_rna_processed.h5ad")
-    )
-    save_to_remote_or_local(
-        mouse_atac,
-        os.path.join(datapath, "mouse", "ATAC", "mouse_atac_processed.h5ad"),
-        remote_path=os.path.join(remote_base_path, "mouse", "ATAC", "mouse_atac_processed.h5ad")
-    )
-    mdata = mudata.MuData({"rna": mouse_rna, "atac": mouse_atac})
-    save_to_remote_or_local(
-        mdata,
-        os.path.join(datapath, "mouse", "mouse_mudata_processed.h5mu"),
-        remote_path=os.path.join(remote_base_path, "mouse", "mouse_mudata_processed.h5mu")
-    )
-else:
-    # Save locally as before
-    mouse_rna.write_h5ad(os.path.join(datapath, "mouse", "RNA", "mouse_rna_processed.h5ad"))
-    mouse_atac.write_h5ad(os.path.join(datapath, "mouse", "ATAC", "mouse_atac_processed.h5ad"))
-    mdata = mudata.MuData({"rna": mouse_rna, "atac": mouse_atac})
-    mdata.write_h5mu(os.path.join(datapath, "mouse", "mouse_mudata_processed.h5mu"))
+compression_opts = 4    # the higher the value, the more compression: default is 4, max is 9
+mouse_rna.write_h5ad(os.path.join(datapath, "mouse", "RNA", "mouse_rna_processed.h5ad"), compression="gzip", compression_opts=compression_opts)
+mouse_atac.write_h5ad(os.path.join(datapath, "mouse", "ATAC", "mouse_atac_processed.h5ad"), compression="gzip", compression_opts=compression_opts)
+#mdata = mudata.MuData({"rna": mouse_rna, "atac": mouse_atac})
+#mdata.write_h5mu(os.path.join(datapath, "mouse", "mouse_mudata_processed.h5mu"), compression="gzip", compression_opts=compression_opts)

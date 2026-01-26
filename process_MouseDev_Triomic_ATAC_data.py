@@ -318,9 +318,9 @@ def main() -> None:
     print(f"Number of cells: {data.n_obs}", flush=True)
     print(f"Number of unique barcodes: {np.unique(data.obs_names).size}", flush=True)
 
-    unique_cell_ids = [sa + ":" + bc for sa, bc in zip(data.obs["sample"], data.obs_names)]
-    data.obs_names = unique_cell_ids
-    assert data.n_obs == np.unique(data.obs_names).size
+    #unique_cell_ids = [sa + ":" + bc for sa, bc in zip(data.obs["sample"], data.obs_names)]
+    #data.obs_names = unique_cell_ids
+    #assert data.n_obs == np.unique(data.obs_names).size
 
     # add obs metadata
     data.obs['stage'] = data.obs['sample'].str.extract(r"_(P\d+)")

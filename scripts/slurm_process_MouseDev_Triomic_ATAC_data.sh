@@ -4,9 +4,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=12:00:00
-#SBATCH --mem=128G
-#SBATCH --tmp=150G
+#SBATCH --time=10:00:00
+#SBATCH --mem=70G
+#SBATCH --tmp=110G
 #SBATCH --output=/home/dmannk/links/scratch/MouseDev_Triomic_ATAC_%j/%x-%j.log
 #SBATCH --error=/home/dmannk/links/scratch/MouseDev_Triomic_ATAC_%j/%x-%j.log
 #SBATCH --mail-user=dylan.mann-krzisnik@mail.mcgill.ca

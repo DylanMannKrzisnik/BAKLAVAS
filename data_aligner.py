@@ -220,8 +220,22 @@ class DataAligner:
         print('Proportion of overlapping peak names: ', (source_atac.var_names == target_atac.var_names).mean())
         assert (source_atac.var_names == target_atac.var_names).all(), "Source and target ATAC data must have the same peak names"
 
+        # Preserve obs columns (e.g., 'assembly', 'dataset_name') when creating new MuData objects
+        # MuData.obs is derived from modalities, so we need to explicitly preserve columns
+        source_obs = self.source_data.obs.copy()  # Use RNA obs as reference (should match ATAC obs)
+        target_obs = self.target_data.obs.copy()
+        
+        # Verify that RNA and ATAC obs indices match (they should for multimodal data)
+        assert source_rna.obs_names.equals(source_atac.obs_names), "Source RNA and ATAC must have matching obs_names"
+        
         self.source_data = MuData({"rna": source_rna, "atac": source_atac})
         self.target_data = MuData({"rna": target_rna, "atac": target_atac})
+        
+        # Explicitly set obs to preserve all columns (indices should match)
+        assert self.source_data.obs_names.equals(source_obs.index), "MuData obs_names must match preserved obs index"
+        assert self.target_data.obs_names.equals(target_obs.index), "MuData obs_names must match preserved obs index"
+        self.source_data.obs = source_obs
+        self.target_data.obs = target_obs
 
     def do_liftOver(self):
         print(f"Lifting over source data to target assembly: {self.source_data.obs['assembly'].unique()[0]} to {self.target_data.obs['assembly'].unique()[0]}")
@@ -339,7 +353,8 @@ data_aligner = DataAligner(
     target_name="EasySci_SLL"
 )
 
-
 data_aligner.find_gene_overlap()
 data_aligner.find_peak_overlap()
 data_aligner.align_features_by_overlap()
+
+# %%

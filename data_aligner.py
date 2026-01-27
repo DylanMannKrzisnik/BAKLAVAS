@@ -3,8 +3,9 @@ import anndata as ad
 from muon import MuData
 from pybedtools import BedTool
 import numpy as np
-from nichecompass_utils import CustomNicheCompass
 import pandas as pd
+from pyliftover import LiftOver
+from nichecompass_utils import CustomNicheCompass
 
 '''
 import mygene as mg
@@ -57,11 +58,29 @@ class DataAligner:
     def __init__(
         self,
         source_data: ad.AnnData | MuData,
-        target_data: ad.AnnData | MuData
+        target_data: ad.AnnData | MuData,
+        source_assembly: str,
+        target_assembly: str,
+        source_name: str = "source",
+        target_name: str = "target",
     ):
 
+        ## set metadata
+        source_data.obs["dataset_name"] = source_name
+        target_data.obs["dataset_name"] = target_name
+        source_data.obs["assembly"] = source_assembly
+        target_data.obs["assembly"] = target_assembly
+
+        ## assign data to self
         self.source_data = source_data
         self.target_data = target_data
+
+        ## check that data are from the same assembly
+        if self.source_data.obs["assembly"].equals(self.target_data.obs["assembly"]):
+            print(f"Source and target data are from the same assembly: {self.source_data.obs['assembly'].unique()[0]}")
+        else:
+            print(f"Source and target data are from different assemblies: {self.source_data.obs['assembly'].unique()[0]} and {self.target_data.obs['assembly'].unique()[0]}")
+            self.do_liftOver()
 
         ## check that all gene names are unique
         assert self.source_data['rna'].var_names.is_unique, "Source RNA data must have unique gene names"
@@ -204,9 +223,123 @@ class DataAligner:
         self.source_data = MuData({"rna": source_rna, "atac": source_atac})
         self.target_data = MuData({"rna": target_rna, "atac": target_atac})
 
+    def do_liftOver(self):
+        print(f"Lifting over source data to target assembly: {self.source_data.obs['assembly'].unique()[0]} to {self.target_data.obs['assembly'].unique()[0]}")
+
+        lo = LiftOver(self.source_data.obs['assembly'].unique()[0], self.target_data.obs['assembly'].unique()[0])
+        
+        ## lift over whole intervals from source to target assembly
+        # NOTE: pyliftover maps single coordinates. For BED-like half-open intervals [start, end),
+        # we map start and (end-1), then set new_end = mapped_end + 1.
+
+        # Fetch source ATAC modality
+        if hasattr(self.source_data, "mod") and ("atac" in self.source_data.mod):
+            source_atac = self.source_data.mod["atac"]
+        else:
+            try:
+                source_atac = self.source_data["atac"]
+            except Exception as e:
+                raise ValueError("Source data must contain an 'atac' modality to liftOver.") from e
+
+        required_cols = {"chrom", "chromStart", "chromEnd"}
+        missing = required_cols - set(source_atac.var.columns)
+        if missing:
+            raise ValueError(f"Source ATAC .var is missing required columns: {sorted(missing)}")
+
+        var = source_atac.var.copy()
+        var["chrom"] = var["chrom"].astype(str)
+        var["chromStart"] = pd.to_numeric(var["chromStart"], errors="raise").astype(int)
+        var["chromEnd"] = pd.to_numeric(var["chromEnd"], errors="raise").astype(int)
+
+        def _normalize_chr(chrom: str) -> str:
+            c = str(chrom)
+            if c in {"M", "MT"}:
+                c = "chrM"
+            if not c.startswith("chr"):
+                c = f"chr{c}"
+            if c == "chrMT":
+                c = "chrM"
+            return c
+
+        def _lift_interval(chrom: str, start: int, end: int):
+            if end <= start:
+                return None
+            c = _normalize_chr(chrom)
+
+            start_hits = lo.convert_coordinate(c, int(start))
+            end_hits = lo.convert_coordinate(c, int(end) - 1)
+            if not start_hits or not end_hits:
+                return None
+
+            # Prefer hits on the same target chrom and strand
+            best = None
+            for (c1, p1, s1, _sc1) in start_hits:
+                for (c2, p2, s2, _sc2) in end_hits:
+                    if (c1 == c2) and (s1 == s2):
+                        best = (c1, int(p1), int(p2), s1)
+                        break
+                if best is not None:
+                    break
+            if best is None:
+                return None
+
+            new_chrom, p_start, p_end_last, _strand = best
+            new_start = min(p_start, p_end_last)
+            new_end = max(p_start, p_end_last) + 1  # convert back to half-open
+            return new_chrom, new_start, new_end
+
+        lifted = var.apply(
+            lambda r: _lift_interval(r["chrom"], r["chromStart"], r["chromEnd"]),
+            axis=1,
+        )
+
+        keep_mask = lifted.notna().to_numpy()
+        n_total = int(var.shape[0])
+        n_kept = int(keep_mask.sum())
+        print(f"liftOver mapped {n_kept}/{n_total} source peaks ({(n_kept / max(n_total, 1)):.2%}). Dropping {n_total - n_kept}.")
+        if n_kept == 0:
+            raise RuntimeError(
+                "liftOver produced 0 mapped peaks. Likely causes: chromosome naming mismatch (chr1 vs 1) "
+                "or missing chain file for the requested assemblies."
+            )
+
+        # Subset ATAC to successfully lifted peaks
+        source_atac = source_atac[:, keep_mask].copy()
+        lifted_kept = pd.DataFrame(
+            lifted[keep_mask].tolist(),
+            index=source_atac.var.index,
+            columns=["chrom", "chromStart", "chromEnd"],
+        )
+
+        # Keep originals for auditing
+        source_atac.var["chrom_original"] = source_atac.var["chrom"].astype(str)
+        source_atac.var["chromStart_original"] = pd.to_numeric(source_atac.var["chromStart"], errors="coerce")
+        source_atac.var["chromEnd_original"] = pd.to_numeric(source_atac.var["chromEnd"], errors="coerce")
+
+        source_atac.var["chrom"] = lifted_kept["chrom"].astype(str)
+        source_atac.var["chromStart"] = lifted_kept["chromStart"].astype(int)
+        source_atac.var["chromEnd"] = lifted_kept["chromEnd"].astype(int)
+
+        # Update source assembly metadata now that intervals are in target assembly coordinates
+        self.source_data.obs["assembly"] = self.target_data.obs["assembly"].unique()[0]
+
+        # Write back updated ATAC modality
+        if hasattr(self.source_data, "mod") and ("atac" in self.source_data.mod):
+            self.source_data.mod["atac"] = source_atac
+        else:
+            self.source_data["atac"] = source_atac
 
 #%%
-data_aligner = DataAligner(source_data, target_data)
+data_aligner = DataAligner(
+    source_data,
+    target_data,
+    source_assembly="mm10",
+    target_assembly="mm39",
+    source_name="Spatial_ATAC_RNA",
+    target_name="EasySci_SLL"
+)
+
+
 data_aligner.find_gene_overlap()
 data_aligner.find_peak_overlap()
 data_aligner.align_features_by_overlap()

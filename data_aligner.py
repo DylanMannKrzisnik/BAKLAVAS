@@ -328,43 +328,66 @@ class DataAligner:
 
             ## TSS distance
             if do_tss_diagnostics:
-                source_tss_pr = _get_reference_tss(self.source_data.obs['assembly'].unique()[0])
-                target_tss_pr = _get_reference_tss(self.target_data.obs['assembly'].unique()[0])
+                print("[PROGRESS] Performing TSS diagnostics...")
+                # IMPORTANT:
+                # - Parse original peaks from the *index* (original coordinates) and normalize chr naming
+                # - Use lifted coordinates from columns
+                # - Ensure Start/End are ints (PyRanges expects integer coordinates)
+                source_assembly = self.source_data.obs["assembly"].unique()[0]
+                target_assembly = self.target_data.obs["assembly"].unique()[0]
+                source_tss_pr = _get_reference_tss(source_assembly)
+                target_tss_pr = _get_reference_tss(target_assembly)
 
-                original_pr = PyRanges(pd.DataFrame(lifted_kept.index.str.split(':|-').tolist(), columns=["Chromosome", "Start", "End"]))
-                lifted_pr = PyRanges(lifted_kept.rename(columns={"chrom": "Chromosome", "chromStart": "Start", "chromEnd": "End"}))
+                orig_df = lifted_kept.index.to_series().str.extract(
+                    r"^(?P<Chromosome>[^:]+):(?P<Start>\d+)-(?P<End>\d+)$"
+                )
+                orig_df["Chromosome"] = orig_df["Chromosome"].map(_normalize_chr)
+                orig_df[["Start", "End"]] = orig_df[["Start", "End"]].astype(int)
+                # Use stable original peak name as peak_id (robust to reindexing/sorting)
+                peak_id = lifted_kept.index.astype(str)
+                orig_df["peak_id"] = peak_id.values
 
-                original_pr = PyRanges(original_pr.df.assign(peak_id=['original_'+str(i) for i in np.arange(original_pr.df.shape[0])]))
-                lifted_pr = PyRanges(lifted_pr.df.assign(peak_id=['lifted_'+str(i) for i in np.arange(lifted_pr.df.shape[0])]))
+                lifted_df = lifted_kept.rename(
+                    columns={"chrom": "Chromosome", "chromStart": "Start", "chromEnd": "End"}
+                ).copy()
+                lifted_df["Chromosome"] = lifted_df["Chromosome"].astype(str).map(_normalize_chr)
+                lifted_df[["Start", "End"]] = lifted_df[["Start", "End"]].astype(int)
+                lifted_df["peak_id"] = peak_id.values
 
-                source_tss_dist_df = original_pr.nearest(source_tss_pr)
-                source_peak_ids = source_tss_dist_df.df.loc[:, 'peak_id'].str.replace('original_','').astype(int)
-                source_tss_dist_df = source_tss_dist_df.df.loc[source_peak_ids.argsort()]
-                source_tss_dist = source_tss_dist_df['Distance'].values
-                assert (source_peak_ids.loc[source_peak_ids.argsort()] == np.arange(source_peak_ids.shape[0])).all(), "Source peak ids are not sorted"
+                # Nearest TSS in each assembly; some peaks on contigs without TSS annotations can be dropped,
+                # so we merge on peak_id to compare only peaks present in both results.
+                src_near = PyRanges(orig_df).nearest(source_tss_pr).df
+                tgt_near = PyRanges(lifted_df).nearest(target_tss_pr).df
 
-                lifted_tss_dist_df = lifted_pr.nearest(target_tss_pr)
-                lifted_peak_ids = lifted_tss_dist_df.df.loc[:, 'peak_id'].str.replace('lifted_','').astype(int)
-                lifted_tss_dist_df = lifted_tss_dist_df.df.loc[lifted_peak_ids.argsort()]
-                lifted_tss_dist = lifted_tss_dist_df['Distance'].values
-                assert (lifted_peak_ids.loc[lifted_peak_ids.argsort()] == np.arange(lifted_peak_ids.shape[0])).all(), "Lifted peak ids are not sorted"
+                # Keep minimal columns for comparison (gene_name comes from the TSS annotation)
+                src_near = src_near.loc[:, ["peak_id", "Distance", "gene_name"]].rename(
+                    columns={"Distance": "Distance_source", "gene_name": "gene_name_source"}
+                )
+                tgt_near = tgt_near.loc[:, ["peak_id", "Distance", "gene_name"]].rename(
+                    columns={"Distance": "Distance_target", "gene_name": "gene_name_target"}
+                )
 
-                prop_same_gene = (source_tss_dist_df['gene_name'].values == lifted_tss_dist_df['gene_name'].values).mean()
-                print(f"[Dx] Proportion of same gene name: {prop_same_gene:.2%}")
+                merged = src_near.merge(tgt_near, on="peak_id", how="inner")
+                print(f"[Dx] TSS diagnostic comparable peaks: {merged.shape[0]}/{lifted_kept.shape[0]} ({(merged.shape[0]/max(lifted_kept.shape[0],1)):.2%})")
 
-                delta = np.abs(source_tss_dist - lifted_tss_dist)
+                prop_same_gene = (merged["gene_name_source"].values == merged["gene_name_target"].values).mean()
+                print(f"[Dx] Proportion of same nearest gene name: {prop_same_gene:.2%}")
+
+                delta = np.abs(merged["Distance_source"].to_numpy() - merged["Distance_target"].to_numpy())
                 med = np.median(delta)
                 p95 = np.percentile(delta, 95)
 
                 from scipy.stats import wasserstein_distance
-                wd = wasserstein_distance(source_tss_dist, lifted_tss_dist)
+                wd = wasserstein_distance(merged["Distance_source"].to_numpy(), merged["Distance_target"].to_numpy())
 
                 print(f"[Dx] |Δ| median={med:.1f}bp, P95={p95:.1f}bp; Wasserstein={wd:.1f}bp")
 
 
         def _get_reference_tss(assembly: str):
+
             annot_path = "/home/mcb/users/dmannk/BAKLAVA_base/data/reference_tss"
             os.makedirs(annot_path, exist_ok=True)
+            
             if assembly == "mm10":
                 try:
                     info = read_gtf(os.path.join(annot_path, "mm10_gencode.gtf.gz"))
@@ -393,6 +416,7 @@ class DataAligner:
             )
             return tss_pr
 
+        ## perform liftOver
         lifted = var.apply(
             lambda r: _lift_interval(r["chrom"], r["chromStart"], r["chromEnd"]),
             axis=1,
@@ -400,25 +424,18 @@ class DataAligner:
         keep_mask = lifted.notna().to_numpy()
 
         # Subset ATAC to successfully lifted peaks
+        kept_index = var.index[keep_mask]
         source_atac = source_atac[:, keep_mask].copy()
         lifted_kept = pd.DataFrame(
             lifted[keep_mask].tolist(),
-            index=source_atac.var.index,
+            index=kept_index,
             columns=["chrom", "chromStart", "chromEnd"],
         )
+        # Defensive: ensure we didn't lose alignment when subsetting
+        assert source_atac.var.index.equals(kept_index), "liftOver: source_atac.var.index no longer matches kept_index"
 
         ## perform liftOver diagnostics
-        if 'TSS' in self.source_data['rna'].var.columns:
-            source_rna_var = self.source_data['rna'].var.copy()
-            source_tss = source_rna_var[['chrom', 'TSS']].assign(
-                        TSSp1 = source_rna_var['TSS']+1
-                    ).reset_index().rename(
-                        columns={"index": "gene_name", "chrom": "Chromosome", "TSS": "Start", "TSSp1": "End"}
-                    )
-        else:
-            source_tss = None
-
-        _liftOver_diagnostics(lifted_kept, int(var.shape[0]), source_tss)
+        _liftOver_diagnostics(lifted_kept, int(var.shape[0]), do_tss_diagnostics=True)
 
         # Keep originals for auditing
         source_atac.var["chrom_original"] = source_atac.var["chrom"].astype(str)

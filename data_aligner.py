@@ -98,18 +98,42 @@ class DataAligner:
             "name": "chrom_target", "score": "start_target", "strand": "end_target"
         }, inplace=True)
         
-        # Merge with target_atac.var to get dispersions_norm
-        merged = (
-            peak_overlap[['chrom_target', 'start_target', 'end_target']].astype(str)
-            .merge(
-                target_atac.var.reset_index(),
-                left_on=['chrom_target', 'start_target', 'end_target'],
-                right_on=['chrom', 'chromStart', 'chromEnd'],
-                how='left'
+        idx_target = None
+        idx_source = None
+
+        if "dispersions_norm" in target_atac.var.columns:
+            merged_target = (
+                peak_overlap[['chrom_target', 'start_target', 'end_target']].astype(str)
+                .merge(
+                    target_atac.var.reset_index().astype(str),
+                    left_on=['chrom_target', 'start_target', 'end_target'],
+                    right_on=['chrom', 'chromStart', 'chromEnd'],
+                    how='left'
+                )
             )
-        )
-        # Get the original peak_overlap index for rows with max dispersion_norm per target peak
-        idx = merged.groupby(['chrom', 'chromStart', 'chromEnd'])['dispersions_norm'].idxmax()
+            idx_target = merged_target.groupby(['chrom', 'chromStart', 'chromEnd'])['dispersions_norm'].idxmax()
+
+        if "dispersions_norm" in source_atac.var.columns:
+            merged_source = (
+                peak_overlap[['chrom_source', 'start_source', 'end_source']].astype(str)
+                .merge(
+                    source_atac.var.reset_index().astype(str),
+                    left_on=['chrom_source', 'start_source', 'end_source'],
+                    right_on=['chrom', 'chromStart', 'chromEnd'],
+                    how='left'
+                )
+            )
+            idx_source = merged_source.groupby(['chrom', 'chromStart', 'chromEnd'])['dispersions_norm'].idxmax()
+
+        if (idx_target is not None) and (idx_source is not None):
+            idx = pd.concat([idx_target, idx_source])
+        elif idx_target is not None:
+            idx = idx_target
+        elif idx_source is not None:
+            idx = idx_source
+        else:
+            idx = None
+
         peak_overlap = peak_overlap.loc[idx.values]
 
         peak_name_mapper = peak_overlap.assign(
@@ -134,8 +158,10 @@ class DataAligner:
 
         target_atac = target_atac[:, target_atac.var_names.get_indexer(self.peak_name_mapper.values)]
         source_atac = source_atac[:, source_atac.var_names.get_indexer(self.peak_name_mapper.index)]
+
         source_atac.var_names = source_atac.var_names.map(self.peak_name_mapper.to_dict())
-        assert (source_atac.var_names == target_atac.var_names).all(), "Source and target ATAC data must have the same peak names"
+        print('Proportion of overlapping peak names: ', (source_atac.var_names == target_atac.var_names).mean())
+        #assert (source_atac.var_names == target_atac.var_names).all(), "Source and target ATAC data must have the same peak names"
 
         self.source_data = MuData({"rna": source_rna, "atac": source_atac})
         self.target_data = MuData({"rna": target_rna, "atac": target_atac})

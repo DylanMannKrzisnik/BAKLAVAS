@@ -3,8 +3,12 @@ import anndata as ad
 from muon import MuData
 from pybedtools import BedTool
 import numpy as np
+from scipy.stats import pearsonr
 import pandas as pd
 from pyliftover import LiftOver
+from pyranges import PyRanges, read_gtf
+import os
+import subprocess
 from nichecompass_utils import CustomNicheCompass
 
 '''
@@ -70,6 +74,12 @@ class DataAligner:
         target_data.obs["dataset_name"] = target_name
         source_data.obs["assembly"] = source_assembly
         target_data.obs["assembly"] = target_assembly
+
+        ## set TSS if 'rna:strand' is present
+        if 'strand' in source_data['rna'].var.columns:
+            source_data['rna'].var['TSS'] = source_data['rna'].var.apply(lambda x: x['chromStart'] if x['strand'] == '+' else x['chromEnd'] if x['strand'] == '-' else np.nan, axis=1)
+        if 'strand' in target_data['rna'].var.columns:
+            target_data['rna'].var['TSS'] = target_data['rna'].var.apply(lambda x: x['chromStart'] if x['strand'] == '+' else x['chromEnd'] if x['strand'] == '-' else np.nan, axis=1)
 
         ## assign data to self
         self.source_data = source_data
@@ -164,6 +174,7 @@ class DataAligner:
             idx = idx.dropna().astype(int)
             peak_overlap = peak_overlap.loc[idx.values]
 
+        ## could also use mmn.atac.pp.add_positions(mdata['atac'])
         peak_overlap = peak_overlap.assign(
             peak_name_source = peak_overlap.apply(lambda x: f"{x['chrom_source']}:{x['start_source']}-{x['end_source']}", axis=1),
             peak_name_target = peak_overlap.apply(lambda x: f"{x['chrom_target']}:{x['start_target']}-{x['end_target']}", axis=1)
@@ -302,20 +313,91 @@ class DataAligner:
             new_end = max(p_start, p_end_last) + 1  # convert back to half-open
             return new_chrom, new_start, new_end
 
+        def _liftOver_diagnostics(lifted_kept: pd.DataFrame, n_total: int, do_tss_diagnostics: bool = False):
+
+            ## number of mapped peaks
+            n_kept = int(lifted_kept.shape[0])
+            print(f"[Dx] liftOver mapped {n_kept}/{n_total} source peaks ({(n_kept / max(n_total, 1)):.2%}). Dropping {n_total - n_kept}.")
+
+            ## width correlation
+            orig_width = lifted_kept.index.str.split(':').str[1].str.split('-').to_series().apply(
+                lambda x: int(x[1]) - int(x[0])).values
+            lifted_width = (lifted_kept["chromEnd"] - lifted_kept["chromStart"]).values
+            corr, _ = pearsonr(orig_width, lifted_width)
+            print(f"[Dx] Correlation between original and lifted width: {corr:.2f}")
+
+            ## TSS distance
+            if do_tss_diagnostics:
+                source_tss_pr = _get_reference_tss(self.source_data.obs['assembly'].unique()[0])
+                target_tss_pr = _get_reference_tss(self.target_data.obs['assembly'].unique()[0])
+
+                original_pr = PyRanges(pd.DataFrame(lifted_kept.index.str.split(':|-').tolist(), columns=["Chromosome", "Start", "End"]))
+                lifted_pr = PyRanges(lifted_kept.rename(columns={"chrom": "Chromosome", "chromStart": "Start", "chromEnd": "End"}))
+
+                original_pr = PyRanges(original_pr.df.assign(peak_id=['original_'+str(i) for i in np.arange(original_pr.df.shape[0])]))
+                lifted_pr = PyRanges(lifted_pr.df.assign(peak_id=['lifted_'+str(i) for i in np.arange(lifted_pr.df.shape[0])]))
+
+                source_tss_dist_df = original_pr.nearest(source_tss_pr)
+                source_peak_ids = source_tss_dist_df.df.loc[:, 'peak_id'].str.replace('original_','').astype(int)
+                source_tss_dist_df = source_tss_dist_df.df.loc[source_peak_ids.argsort()]
+                source_tss_dist = source_tss_dist_df['Distance'].values
+                assert (source_peak_ids.loc[source_peak_ids.argsort()] == np.arange(source_peak_ids.shape[0])).all(), "Source peak ids are not sorted"
+
+                lifted_tss_dist_df = lifted_pr.nearest(target_tss_pr)
+                lifted_peak_ids = lifted_tss_dist_df.df.loc[:, 'peak_id'].str.replace('lifted_','').astype(int)
+                lifted_tss_dist_df = lifted_tss_dist_df.df.loc[lifted_peak_ids.argsort()]
+                lifted_tss_dist = lifted_tss_dist_df['Distance'].values
+                assert (lifted_peak_ids.loc[lifted_peak_ids.argsort()] == np.arange(lifted_peak_ids.shape[0])).all(), "Lifted peak ids are not sorted"
+
+                prop_same_gene = (source_tss_dist_df['gene_name'].values == lifted_tss_dist_df['gene_name'].values).mean()
+                print(f"[Dx] Proportion of same gene name: {prop_same_gene:.2%}")
+
+                delta = np.abs(source_tss_dist - lifted_tss_dist)
+                med = np.median(delta)
+                p95 = np.percentile(delta, 95)
+
+                from scipy.stats import wasserstein_distance
+                wd = wasserstein_distance(source_tss_dist, lifted_tss_dist)
+
+                print(f"[Dx] |Δ| median={med:.1f}bp, P95={p95:.1f}bp; Wasserstein={wd:.1f}bp")
+
+
+        def _get_reference_tss(assembly: str):
+            annot_path = "/home/mcb/users/dmannk/BAKLAVA_base/data/reference_tss"
+            os.makedirs(annot_path, exist_ok=True)
+            if assembly == "mm10":
+                try:
+                    info = read_gtf(os.path.join(annot_path, "mm10_gencode.gtf.gz"))
+                except:
+                    annot_url = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M25/gencode.vM25.annotation.gtf.gz"
+                    subprocess.run(["wget", annot_url, "-O", os.path.join(annot_path, "mm10_gencode.gtf.gz")])
+                    info = read_gtf(os.path.join(annot_path, "mm10_gencode.gtf.gz"))
+
+            elif assembly == "mm39":
+                try:
+                    info = read_gtf(os.path.join(annot_path, "mm39_gencode.gtf.gz"))
+                except:
+                    annot_url = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M38/gencode.vM38.annotation.gtf.gz"
+                    subprocess.run(["wget", annot_url, "-O", os.path.join(annot_path, "mm39_gencode.gtf.gz")])
+                    info = read_gtf(os.path.join(annot_path, "mm39_gencode.gtf.gz"))
+
+            else:
+                raise ValueError(f"Assembly {assembly} not supported")
+
+            info = info[info.df['Feature'] == 'transcript'].df
+            info['tss'] = info.apply(lambda x: x['Start'] if x['Strand'] == '+' else x['End'], axis=1)
+            tss_pr = PyRanges(
+                info[['gene_name', 'Chromosome', 'tss']].assign(
+                    tssp1 = info['tss']+1
+                ).rename(columns={"tss": "Start", "tssp1": "End"})
+            )
+            return tss_pr
+
         lifted = var.apply(
             lambda r: _lift_interval(r["chrom"], r["chromStart"], r["chromEnd"]),
             axis=1,
         )
-
         keep_mask = lifted.notna().to_numpy()
-        n_total = int(var.shape[0])
-        n_kept = int(keep_mask.sum())
-        print(f"liftOver mapped {n_kept}/{n_total} source peaks ({(n_kept / max(n_total, 1)):.2%}). Dropping {n_total - n_kept}.")
-        if n_kept == 0:
-            raise RuntimeError(
-                "liftOver produced 0 mapped peaks. Likely causes: chromosome naming mismatch (chr1 vs 1) "
-                "or missing chain file for the requested assemblies."
-            )
 
         # Subset ATAC to successfully lifted peaks
         source_atac = source_atac[:, keep_mask].copy()
@@ -324,6 +406,19 @@ class DataAligner:
             index=source_atac.var.index,
             columns=["chrom", "chromStart", "chromEnd"],
         )
+
+        ## perform liftOver diagnostics
+        if 'TSS' in self.source_data['rna'].var.columns:
+            source_rna_var = self.source_data['rna'].var.copy()
+            source_tss = source_rna_var[['chrom', 'TSS']].assign(
+                        TSSp1 = source_rna_var['TSS']+1
+                    ).reset_index().rename(
+                        columns={"index": "gene_name", "chrom": "Chromosome", "TSS": "Start", "TSSp1": "End"}
+                    )
+        else:
+            source_tss = None
+
+        _liftOver_diagnostics(lifted_kept, int(var.shape[0]), source_tss)
 
         # Keep originals for auditing
         source_atac.var["chrom_original"] = source_atac.var["chrom"].astype(str)

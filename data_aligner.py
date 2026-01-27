@@ -479,3 +479,55 @@ data_aligner.find_peak_overlap()
 data_aligner.align_features_by_overlap()
 
 # %%
+from scipy.sparse import csr_matrix
+
+target_data = data_aligner.target_data
+
+# 2. Create a dummy AnnData with 0 observations and the target genes
+missing_genes = set(source_rna.var_names) - set(target_data['rna'].var_names)
+
+dummy = ad.AnnData(
+    X=csr_matrix((0, len(missing_genes))), 
+    var=pd.DataFrame(index=list(missing_genes))
+)
+
+target_rna_with_missing = ad.concat([target_data['rna'], dummy], join="outer") # about 5.5 minutes
+var_sort_idxs = target_rna_with_missing.var_names.get_indexer(source_rna.var_names)
+target_rna_with_missing = target_rna_with_missing[:, var_sort_idxs]
+assert target_rna_with_missing.var_names.equals(source_rna.var_names), "Target RNA data must have the same gene names"
+
+# ensure GP names exist and reflect the model’s GP count/order
+gp_names = source_rna.uns["nichecompass_active_gp_names"]
+n_gps = len(gp_names)
+target_rna_with_missing.varm["nichecompass_gp_targets"] = np.ones((target_rna_with_missing.n_vars, n_gps), dtype=bool)
+target_rna_with_missing.varm["nichecompass_gp_sources"] = np.ones((target_rna_with_missing.n_vars, n_gps), dtype=bool)
+
+target_rna_with_missing.varm['nichecompass_gene_peaks'] = source_rna.varm['nichecompass_gene_peaks'].copy()
+target_rna_with_missing.uns['nichecompass_genes_idx'] = source_rna.uns['nichecompass_genes_idx'].copy()
+target_rna_with_missing.uns['nichecompass_target_genes_idx'] = source_rna.uns['nichecompass_target_genes_idx'].copy()
+target_rna_with_missing.uns['nichecompass_source_genes_idx'] = source_rna.uns['nichecompass_source_genes_idx'].copy()
+
+'''
+model = CustomNicheCompass.load(
+    dir_path=model_folder_path,
+    adata=target_rna_with_missing,
+    gp_names_key=gp_names_key
+)
+'''
+model = CustomNicheCompass.load(
+    dir_path=model_folder_path,
+    adata=data_aligner.target_data['rna'],
+    adata_atac=data_aligner.target_data['atac'],
+    gp_names_key=gp_names_key
+)
+
+z, _ = model.get_latent_representation(
+    adata=model.adata,
+    counts_key=counts_key,
+    adj_key=adj_key,
+    cat_covariates_keys=cat_covariates_keys,
+    only_active_gps=True,
+    return_mu_std=True,
+    node_batch_size=model.node_batch_size_,
+)
+

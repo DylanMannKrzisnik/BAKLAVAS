@@ -75,6 +75,13 @@ class DataAligner:
         assert np.isin(['chrom', 'chromStart', 'chromEnd'], self.source_data['atac'].var.columns).all(), "ATAC data must have chrom, chromStart, and chromEnd columns"
         assert np.isin(['chrom', 'chromStart', 'chromEnd'], self.target_data['atac'].var.columns).all(), "ATAC data must have chrom, chromStart, and chromEnd columns"
 
+        # Normalize ATAC interval dtypes to avoid string/float formatting mismatches
+        for mdata in (self.source_data, self.target_data):
+            atac_var = mdata["atac"].var
+            atac_var["chrom"] = atac_var["chrom"].astype(str)
+            atac_var["chromStart"] = pd.to_numeric(atac_var["chromStart"], errors="raise").astype(int)
+            atac_var["chromEnd"] = pd.to_numeric(atac_var["chromEnd"], errors="raise").astype(int)
+
         ## set var_names to BED format for ATAC data
         self.source_data['atac'].var_names = self.source_data['atac'].var.apply(lambda x: f"{x['chrom']}:{x['chromStart']}-{x['chromEnd']}", axis=1)
         self.target_data['atac'].var_names = self.target_data['atac'].var.apply(lambda x: f"{x['chrom']}:{x['chromStart']}-{x['chromEnd']}", axis=1)
@@ -134,12 +141,25 @@ class DataAligner:
         else:
             idx = None
 
-        peak_overlap = peak_overlap.loc[idx.values]
+        if idx is not None:
+            idx = idx.dropna().astype(int)
+            peak_overlap = peak_overlap.loc[idx.values]
 
-        peak_name_mapper = peak_overlap.assign(
+        peak_overlap = peak_overlap.assign(
             peak_name_source = peak_overlap.apply(lambda x: f"{x['chrom_source']}:{x['start_source']}-{x['end_source']}", axis=1),
             peak_name_target = peak_overlap.apply(lambda x: f"{x['chrom_target']}:{x['start_target']}-{x['end_target']}", axis=1)
-        ).set_index('peak_name_source').loc[:,'peak_name_target']
+        )
+
+        # Enforce a one-to-one mapping (greedy) to avoid duplicates causing silent drops later
+        peak_overlap["overlap_len"] = (
+            np.minimum(peak_overlap["end_source"].astype(int), peak_overlap["end_target"].astype(int))
+            - np.maximum(peak_overlap["start_source"].astype(int), peak_overlap["start_target"].astype(int))
+        )
+        peak_overlap = peak_overlap.sort_values("overlap_len", ascending=False)
+        peak_overlap = peak_overlap.drop_duplicates(subset=["peak_name_source"], keep="first")
+        peak_overlap = peak_overlap.drop_duplicates(subset=["peak_name_target"], keep="first")
+
+        peak_name_mapper = peak_overlap.set_index("peak_name_source").loc[:, "peak_name_target"]
 
         print(f"Number of duplicate peak name mappings: {peak_name_mapper.index.value_counts().ge(2).sum()}")
         self.peak_overlap_df = peak_overlap
@@ -152,16 +172,34 @@ class DataAligner:
         source_atac = self.source_data['atac']
         target_atac = self.target_data['atac']
 
-        source_rna = source_rna[:, source_rna.var_names.get_indexer(self.gene_overlap)]
-        target_rna = target_rna[:, target_rna.var_names.get_indexer(self.gene_overlap)]
+        # IMPORTANT: avoid get_indexer() here; -1 values silently select the last column and misalign features
+        gene_overlap = [g for g in self.gene_overlap if (g in source_rna.var_names) and (g in target_rna.var_names)]
+        source_rna = source_rna[:, gene_overlap].copy()
+        target_rna = target_rna[:, gene_overlap].copy()
         assert (source_rna.var_names == target_rna.var_names).all(), "Source and target RNA data must have the same gene names"
 
-        target_atac = target_atac[:, target_atac.var_names.get_indexer(self.peak_name_mapper.values)]
-        source_atac = source_atac[:, source_atac.var_names.get_indexer(self.peak_name_mapper.index)]
+        peak_name_mapper = self.peak_name_mapper
+        if isinstance(peak_name_mapper, dict):
+            peak_name_mapper = pd.Series(peak_name_mapper)
 
-        source_atac.var_names = source_atac.var_names.map(self.peak_name_mapper.to_dict())
+        # Filter to mappings that exist in both objects
+        peak_name_mapper = peak_name_mapper.loc[
+            peak_name_mapper.index.isin(source_atac.var_names)
+            & peak_name_mapper.isin(target_atac.var_names)
+        ]
+        # Ensure uniqueness on both sides (defensive; find_peak_overlap tries to enforce this)
+        peak_name_mapper = peak_name_mapper[~peak_name_mapper.index.duplicated(keep="first")]
+        peak_name_mapper = peak_name_mapper[~peak_name_mapper.duplicated(keep="first")]
+
+        # Subset by names (not integer positions) so we cannot accidentally select "-1" columns
+        source_atac = source_atac[:, peak_name_mapper.index.tolist()].copy()
+        target_atac = target_atac[:, peak_name_mapper.values.tolist()].copy()
+
+        # Rename source peaks to the chosen target peak names (so names must match exactly)
+        source_atac.var_names = pd.Index(peak_name_mapper.values.tolist())
+
         print('Proportion of overlapping peak names: ', (source_atac.var_names == target_atac.var_names).mean())
-        #assert (source_atac.var_names == target_atac.var_names).all(), "Source and target ATAC data must have the same peak names"
+        assert (source_atac.var_names == target_atac.var_names).all(), "Source and target ATAC data must have the same peak names"
 
         self.source_data = MuData({"rna": source_rna, "atac": source_atac})
         self.target_data = MuData({"rna": target_rna, "atac": target_atac})

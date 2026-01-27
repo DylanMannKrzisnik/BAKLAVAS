@@ -384,31 +384,40 @@ class DataAligner:
 
 
         def _get_reference_tss(assembly: str):
-
             annot_path = "/home/mcb/users/dmannk/BAKLAVA_base/data/reference_tss"
             os.makedirs(annot_path, exist_ok=True)
-            
-            if assembly == "mm10":
-                try:
-                    info = read_gtf(os.path.join(annot_path, "mm10_gencode.gtf.gz"))
-                except:
-                    annot_url = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M25/gencode.vM25.annotation.gtf.gz"
-                    subprocess.run(["wget", annot_url, "-O", os.path.join(annot_path, "mm10_gencode.gtf.gz")])
-                    info = read_gtf(os.path.join(annot_path, "mm10_gencode.gtf.gz"))
+            parquet_path = os.path.join(annot_path, f"{assembly}_tss.parquet")
 
-            elif assembly == "mm39":
-                try:
-                    info = read_gtf(os.path.join(annot_path, "mm39_gencode.gtf.gz"))
-                except:
-                    annot_url = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M38/gencode.vM38.annotation.gtf.gz"
-                    subprocess.run(["wget", annot_url, "-O", os.path.join(annot_path, "mm39_gencode.gtf.gz")])
-                    info = read_gtf(os.path.join(annot_path, "mm39_gencode.gtf.gz"))
-
+            # Check if parquet file already exists
+            if os.path.exists(parquet_path):
+                info = pd.read_parquet(parquet_path)
             else:
-                raise ValueError(f"Assembly {assembly} not supported")
+                # Download and process GTF only if parquet doesn't exist
+                if assembly == "mm10":
+                    gtf_path = os.path.join(annot_path, "mm10_gencode.gtf.gz")
+                    if not os.path.exists(gtf_path):
+                        annot_url = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M25/gencode.vM25.annotation.gtf.gz"
+                        subprocess.run(["wget", annot_url, "-O", gtf_path], check=True)
+                    info = read_gtf(gtf_path)
 
-            info = info[info.df['Feature'] == 'transcript'].df
-            info['tss'] = info.apply(lambda x: x['Start'] if x['Strand'] == '+' else x['End'], axis=1)
+                elif assembly == "mm39":
+                    gtf_path = os.path.join(annot_path, "mm39_gencode.gtf.gz")
+                    if not os.path.exists(gtf_path):
+                        annot_url = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M38/gencode.vM38.annotation.gtf.gz"
+                        subprocess.run(["wget", annot_url, "-O", gtf_path], check=True)
+                    info = read_gtf(gtf_path)
+
+                else:
+                    raise ValueError(f"Assembly {assembly} not supported")
+
+                # Process GTF to extract TSS
+                info = info[info.df['Feature'] == 'gene'].df
+                info["tss"] = info["Start"].where(info["Strand"] == "+", info["End"])
+                
+                # Save to parquet for future use
+                info.to_parquet(parquet_path)
+
+            # Convert to PyRanges format
             tss_pr = PyRanges(
                 info[['gene_name', 'Chromosome', 'tss']].assign(
                     tssp1 = info['tss']+1

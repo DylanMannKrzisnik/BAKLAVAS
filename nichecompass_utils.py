@@ -636,9 +636,17 @@ class CustomNicheCompass(NicheCompass):
             return_mu_std: bool=False,
             node_batch_size: int=64,
             dtype: type=np.float64,
+            separate_modalities: bool=False,
             ) -> np.ndarray:
         """
         Get the latent representation / gene program scores from a trained model.
+        
+        Parameters
+        ----------
+        separate_modalities : bool
+            If True, returns separate RNA and ATAC latents instead of combined.
+            When True and return_mu_std=True, returns (mu_rna, std_rna, mu_atac, std_atac).
+            When True and return_mu_std=False, returns (z_rna, z_atac).
         """
         self._check_if_trained(warn=False)
 
@@ -679,11 +687,22 @@ class CustomNicheCompass(NicheCompass):
             n_gps = (self.n_prior_gp_ + self.n_addon_gp_ )
 
         n_obs = node_masked_data.num_nodes
-        if return_mu_std:
-            mu = np.empty(shape=(n_obs, n_gps), dtype=dtype)
-            std = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+        
+        if separate_modalities:
+            if return_mu_std:
+                mu_rna = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+                std_rna = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+                mu_atac = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+                std_atac = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+            else:
+                z_rna = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+                z_atac = np.empty(shape=(n_obs, n_gps), dtype=dtype)
         else:
-            z = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+            if return_mu_std:
+                mu = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+                std = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+            else:
+                z = np.empty(shape=(n_obs, n_gps), dtype=dtype)
 
         # Get latent representation for each batch of the dataloader and put it
         # into latent vectors
@@ -696,26 +715,63 @@ class CustomNicheCompass(NicheCompass):
             # Ensure node_batch.x has the same dtype as the model
             if node_batch.x.dtype != model_dtype:
                 node_batch.x = node_batch.x.to(model_dtype)
-            if return_mu_std:
-                mu_batch, std_batch = self.model.get_latent_representation(
-                    node_batch=node_batch,
-                    only_active_gps=only_active_gps,
-                    return_mu_std=True)
-                mu[n_obs_before_batch:n_obs_after_batch, :] = (
-                    mu_batch.detach().cpu().numpy())
-                std[n_obs_before_batch:n_obs_after_batch, :] = (
-                    std_batch.detach().cpu().numpy())
+            
+            if separate_modalities:
+                if return_mu_std:
+                    mu_rna_batch, std_rna_batch, mu_atac_batch, std_atac_batch = (
+                        self.model.get_latent_representation(
+                            node_batch=node_batch,
+                            only_active_gps=only_active_gps,
+                            return_mu_std=True,
+                            separate_modalities=True))
+                    mu_rna[n_obs_before_batch:n_obs_after_batch, :] = (
+                        mu_rna_batch.detach().cpu().numpy())
+                    std_rna[n_obs_before_batch:n_obs_after_batch, :] = (
+                        std_rna_batch.detach().cpu().numpy())
+                    mu_atac[n_obs_before_batch:n_obs_after_batch, :] = (
+                        mu_atac_batch.detach().cpu().numpy())
+                    std_atac[n_obs_before_batch:n_obs_after_batch, :] = (
+                        std_atac_batch.detach().cpu().numpy())
+                else:
+                    z_rna_batch, z_atac_batch = self.model.get_latent_representation(
+                        node_batch=node_batch,
+                        only_active_gps=only_active_gps,
+                        return_mu_std=False,
+                        separate_modalities=True)
+                    z_rna[n_obs_before_batch:n_obs_after_batch, :] = (
+                        z_rna_batch.detach().cpu().numpy())
+                    z_atac[n_obs_before_batch:n_obs_after_batch, :] = (
+                        z_atac_batch.detach().cpu().numpy())
             else:
-                z_batch = self.model.get_latent_representation(
-                    node_batch=node_batch,
-                    only_active_gps=only_active_gps,
-                    return_mu_std=False)
-                z[n_obs_before_batch:n_obs_after_batch, :] = (
-                    z_batch.detach().cpu().numpy())
-        if return_mu_std:
-            return mu, std
+                if return_mu_std:
+                    mu_batch, std_batch = self.model.get_latent_representation(
+                        node_batch=node_batch,
+                        only_active_gps=only_active_gps,
+                        return_mu_std=True,
+                        separate_modalities=False)
+                    mu[n_obs_before_batch:n_obs_after_batch, :] = (
+                        mu_batch.detach().cpu().numpy())
+                    std[n_obs_before_batch:n_obs_after_batch, :] = (
+                        std_batch.detach().cpu().numpy())
+                else:
+                    z_batch = self.model.get_latent_representation(
+                        node_batch=node_batch,
+                        only_active_gps=only_active_gps,
+                        return_mu_std=False,
+                        separate_modalities=False)
+                    z[n_obs_before_batch:n_obs_after_batch, :] = (
+                        z_batch.detach().cpu().numpy())
+        
+        if separate_modalities:
+            if return_mu_std:
+                return mu_rna, std_rna, mu_atac, std_atac
+            else:
+                return z_rna, z_atac
         else:
-            return z
+            if return_mu_std:
+                return mu, std
+            else:
+                return z
 
     def get_omics_decoder_outputs(
             self,
@@ -1730,12 +1786,30 @@ class CustomVGPGAE(VGPGAE):
             self,
             node_batch: Data,
             only_active_gps: bool=True,
-            return_mu_std: bool=False
-            ) -> torch.Tensor:
+            return_mu_std: bool=False,
+            separate_modalities: bool=False
+            ):
         """
         Encode RNA + ATAC separately and combine latents via Gaussian product.
+        
+        Parameters
+        ----------
+        node_batch : Data
+            Batch of nodes to encode.
+        only_active_gps : bool
+            Whether to return only active gene programs.
+        return_mu_std : bool
+            If True, returns (mu, std) instead of sampled z.
+        separate_modalities : bool
+            If True, returns separate RNA and ATAC latents instead of combined.
+            When True and return_mu_std=True, returns (mu_rna, std_rna, mu_atac, std_atac).
+            When True and return_mu_std=False, returns (z_rna, z_atac).
         """
         if self.encoder_atac is None:
+            if separate_modalities:
+                raise ValueError(
+                    "separate_modalities=True requires a multimodal model with "
+                    "separate RNA and ATAC encoders.")
             return super().get_latent_representation(
                 node_batch=node_batch,
                 only_active_gps=only_active_gps,
@@ -1778,6 +1852,24 @@ class CustomVGPGAE(VGPGAE):
         mu_atac = encoder_outputs_atac[0][:node_batch.batch_size, :]
         logstd_atac = encoder_outputs_atac[1][:node_batch.batch_size, :]
 
+        if only_active_gps:
+            active_gp_mask = self.get_active_gp_mask()
+            mu_rna = mu_rna[:, active_gp_mask]
+            logstd_rna = logstd_rna[:, active_gp_mask]
+            mu_atac = mu_atac[:, active_gp_mask]
+            logstd_atac = logstd_atac[:, active_gp_mask]
+
+        if separate_modalities:
+            if return_mu_std:
+                std_rna = torch.exp(logstd_rna)
+                std_atac = torch.exp(logstd_atac)
+                return mu_rna, std_rna, mu_atac, std_atac
+            else:
+                z_rna = self.reparameterize(mu_rna, logstd_rna)
+                z_atac = self.reparameterize(mu_atac, logstd_atac)
+                return z_rna, z_atac
+
+        # Combine modalities (original behavior)
         modality_mask = getattr(node_batch, "modality_mask", None)
         if modality_mask is not None:
             modality_mask = modality_mask[:node_batch.batch_size]
@@ -1787,10 +1879,6 @@ class CustomVGPGAE(VGPGAE):
             mu_atac,
             logstd_atac,
             modality_mask=modality_mask)
-
-        if only_active_gps:
-            active_gp_mask = self.get_active_gp_mask()
-            mu, logstd = mu[:, active_gp_mask], logstd[:, active_gp_mask]
 
         if return_mu_std:
             std = torch.exp(logstd)

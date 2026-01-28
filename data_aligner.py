@@ -462,6 +462,35 @@ target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].s
 
 target_data = MuData({"rna": target_rna, "atac": target_atac})
 
+#%% plot trained model's latents based on training source data
+
+z_source_rna, _, z_source_atac, _ = model.get_latent_representation(
+    adata=model.adata,
+    adata_atac=model.adata_atac,
+    paired_data=True,
+    counts_key="counts",
+    adj_key="spatial_connectivities",
+    cat_covariates_keys=None,
+    only_active_gps=True,
+    return_mu_std=True,
+    separate_modalities=True,
+    node_batch_size=model.node_batch_size_,
+)
+
+latent_adata = ad.AnnData(
+    X=np.concatenate([z_source_rna, z_source_atac], axis=0),
+    obs=pd.concat([
+        model.adata.obs.assign(modality="rna"),
+        model.adata_atac.obs.assign(modality="atac"),
+    ], axis=0),
+)
+
+import scanpy as sc
+sc.pp.pca(latent_adata, n_comps=50)
+sc.pp.neighbors(latent_adata, use_rep='X_pca', n_neighbors=100)
+sc.tl.umap(latent_adata, min_dist=0.3)
+sc.pl.umap(latent_adata, color=['modality'], wspace=0.2)
+
 #%%
 data_aligner = DataAligner(
     source_data,
@@ -556,16 +585,16 @@ model = CustomNicheCompass.load(
     gp_names_key=gp_names_key
 )
 '''
-z, _ = model_target.get_latent_representation(
-        adata=model_target.adata,
-        adata_atac=model_target.adata_atac,
-        paired_data=False,
-        counts_key="counts",
-        adj_key="spatial_connectivities",
-        cat_covariates_keys=None,
-        only_active_gps=True,
-        return_mu_std=True,
-        node_batch_size=model_target.node_batch_size_,
+z_target, _ = model_target.get_latent_representation(
+            adata=model_target.adata,
+            adata_atac=model_target.adata_atac,
+            paired_data=False,
+            counts_key="counts",
+            adj_key="spatial_connectivities",
+            cat_covariates_keys=None,
+            only_active_gps=True,
+            return_mu_std=True,
+            node_batch_size=model_target.node_batch_size_,
 )
 
 #%% TMP: plot latent representation with umap
@@ -576,7 +605,7 @@ multimodal_obs = pd.concat([
 ], axis=0)
 
 latent_adata = ad.AnnData(
-    X=z,
+    X=z_target,
     obs=multimodal_obs,
 )
 

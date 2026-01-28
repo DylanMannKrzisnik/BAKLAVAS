@@ -33,6 +33,7 @@ import os
 import random
 import warnings
 from datetime import datetime
+from typing import Optional
 
 import gdown
 import matplotlib.pyplot as plt
@@ -128,6 +129,12 @@ differential_gp_test_results_key = "nichecompass_differential_gp_test_results"
 warnings.filterwarnings("ignore")
 pd.set_option("display.max_columns", None)
 
+# Notebook-style pretty display (safe fallback for script execution)
+try:
+    from IPython.display import display  # type: ignore
+except Exception:  # pragma: no cover
+    def display(x):  # type: ignore
+        print(x)
 
 # Get time of notebook execution for timestamping saved artifacts
 now = datetime.now()
@@ -643,6 +650,555 @@ model_folder_path = f"{outpath}/multimodal/{load_timestamp}/model"
 os.makedirs(figure_folder_path, exist_ok=True)
 
 
+#%% 4. ANALYSIS FUNCTIONS
+
+def compute_and_store_latent_representation(
+    model: CustomNicheCompass,
+    latent_key: str,
+    counts_key: Optional[str] = None,
+    adj_key: Optional[str] = None,
+    only_active_gps: bool = True,
+    paired_data: bool = True
+):
+    """
+    Compute latent representation for a model and store it in adata.obsm.
+    
+    This is necessary for models loaded with new data (e.g., target data) where
+    the latent representation hasn't been computed yet.
+    
+    Parameters
+    ----------
+    model : CustomNicheCompass
+        Trained NicheCompass model
+    latent_key : str
+        Key to store latent representation in adata.obsm
+    counts_key : Optional[str]
+        Key for counts in adata.layers (uses model's default if None)
+    adj_key : Optional[str]
+        Key for adjacency matrix in adata.obsp (uses model's default if None)
+    only_active_gps : bool
+        Whether to return only active gene programs
+    paired_data : bool
+        Whether RNA and ATAC data are paired (same cells)
+    """
+    if counts_key is None:
+        counts_key = model.counts_key_
+    if adj_key is None:
+        adj_key = model.adj_key_
+    
+    # Compute latent representation
+    z, _ = model.get_latent_representation(
+        adata=model.adata,
+        adata_atac=model.adata_atac if hasattr(model, 'adata_atac') else None,
+        paired_data=paired_data,
+        counts_key=counts_key,
+        adj_key=adj_key,
+        cat_covariates_keys=None,
+        only_active_gps=only_active_gps,
+        return_mu_std=True,
+        node_batch_size=getattr(model, 'node_batch_size_', 64),
+    )
+    
+    # Store in adata.obsm
+    model.adata.obsm[latent_key] = z
+    
+    print(f"Computed and stored latent representation with shape {z.shape} "
+          f"in model.adata.obsm['{latent_key}']")
+
+
+def visualize_cell_types_in_latent_and_physical_space(
+    model: CustomNicheCompass,
+    samples: list,
+    cell_type_key: str,
+    sample_key: str,
+    latent_key: str,
+    figure_folder_path: str,
+    spot_size: int = 30,
+    groups: Optional[list] = None,
+    save_fig: bool = True,
+    file_suffix: str = "",
+    skip_default_colors: int = 50
+):
+    """
+    Visualize cell types in latent (UMAP) and physical (spatial) space.
+    
+    Parameters
+    ----------
+    model : CustomNicheCompass
+        Trained NicheCompass model
+    samples : list
+        List of sample names to visualize
+    cell_type_key : str
+        Key in adata.obs for cell type annotations
+    sample_key : str
+        Key in adata.obs for sample annotations
+    latent_key : str
+        Key for latent representation in adata.obsm
+    figure_folder_path : str
+        Path to save figures
+    spot_size : int
+        Size of spots in spatial plots
+    groups : Optional[list]
+        Specific groups to highlight (None for all)
+    save_fig : bool
+        Whether to save the figure
+    file_suffix : str
+        Suffix to add to filename (e.g., "_source" or "_target")
+    skip_default_colors : int
+        Number of default colors to skip when creating color dict
+    """
+    cell_type_colors = create_new_color_dict(
+        adata=model.adata,
+        skip_default_colors=skip_default_colors,
+        cat_key=cell_type_key)
+    
+    file_path = f"{figure_folder_path}/cell_types_latent_physical_space{file_suffix}.svg"
+    
+    fig = plt.figure(figsize=(12, 14))
+    title = fig.suptitle(t="Cell Types in Latent and Physical Space",
+                         y=0.96,
+                         x=0.55,
+                         fontsize=20)
+    spec1 = gridspec.GridSpec(ncols=1,
+                              nrows=2,
+                              width_ratios=[1],
+                              height_ratios=[3, 2])
+    spec2 = gridspec.GridSpec(ncols=len(samples),
+                              nrows=2,
+                              width_ratios=[1] * len(samples),
+                              height_ratios=[3, 2])
+    axs = []
+    axs.append(fig.add_subplot(spec1[0]))
+    sc.pl.umap(adata=model.adata,
+               color=[cell_type_key],
+               groups=groups,
+               palette=cell_type_colors,
+               title=f"Cell Types in Latent Space",
+               ax=axs[0],
+               size=40,
+               show=False)
+    for idx, sample in enumerate(samples):
+        axs.append(fig.add_subplot(spec2[len(samples) + idx]))
+        sc.pl.spatial(adata=model.adata[model.adata.obs[sample_key] == sample],
+                      color=[cell_type_key],
+                      groups=groups,
+                      palette=cell_type_colors,
+                      spot_size=spot_size,
+                      title=f"Cell Types in Physical Space \n"
+                            f"(Sample: {sample})",
+                      legend_loc=None,
+                      ax=axs[idx+1],
+                      show=False)
+    
+    # Create and position shared legend
+    handles, labels = axs[0].get_legend_handles_labels()
+    lgd = fig.legend(handles,
+                     labels,
+                     loc="center left",
+                     bbox_to_anchor=(0.98, 0.5))
+    axs[0].get_legend().remove()
+    
+    # Adjust, save and display plot
+    plt.subplots_adjust(wspace=0.2, hspace=0.25)
+    if save_fig:
+        fig.savefig(file_path,
+                    bbox_extra_artists=(lgd, title),
+                    bbox_inches="tight")
+    plt.show()
+    
+    return cell_type_colors
+
+
+def identify_niches(
+    model: CustomNicheCompass,
+    samples: list,
+    sample_key: str,
+    latent_key: str,
+    latent_cluster_key: str,
+    latent_leiden_resolution: float,
+    figure_folder_path: str,
+    spot_size: int = 30,
+    groups: Optional[list] = None,
+    save_fig: bool = True,
+    file_suffix: str = ""
+):
+    """
+    Identify niches using Leiden clustering and visualize in latent and physical space.
+    
+    Parameters
+    ----------
+    model : CustomNicheCompass
+        Trained NicheCompass model
+    samples : list
+        List of sample names to visualize
+    sample_key : str
+        Key in adata.obs for sample annotations
+    latent_key : str
+        Key for latent representation in adata.obsm
+    latent_cluster_key : str
+        Key to store Leiden cluster results in adata.obs
+    latent_leiden_resolution : float
+        Resolution parameter for Leiden clustering
+    figure_folder_path : str
+        Path to save figures
+    spot_size : int
+        Size of spots in spatial plots
+    groups : Optional[list]
+        Specific groups to highlight (None for all)
+    save_fig : bool
+        Whether to save the figure
+    file_suffix : str
+        Suffix to add to filename
+        
+    Returns
+    -------
+    latent_cluster_colors : dict
+        Color dictionary for clusters
+    """
+    # Compute latent Leiden clustering
+    sc.tl.leiden(adata=model.adata,
+                 resolution=latent_leiden_resolution,
+                 key_added=latent_cluster_key,
+                 neighbors_key=latent_key)
+    
+    latent_cluster_colors = create_new_color_dict(
+        adata=model.adata,
+        cat_key=latent_cluster_key)
+    
+    file_path = f"{figure_folder_path}/res_{latent_leiden_resolution}_niches_latent_physical_space{file_suffix}.svg"
+    
+    fig = plt.figure(figsize=(12, 14))
+    title = fig.suptitle(t=f"NicheCompass Niches "
+                            "in Latent and Physical Space",
+                         y=0.96,
+                         x=0.55,
+                         fontsize=20)
+    spec1 = gridspec.GridSpec(ncols=1,
+                              nrows=2,
+                              width_ratios=[1],
+                              height_ratios=[3, 2])
+    spec2 = gridspec.GridSpec(ncols=len(samples),
+                              nrows=2,
+                              width_ratios=[1] * len(samples),
+                              height_ratios=[3, 2])
+    axs = []
+    axs.append(fig.add_subplot(spec1[0]))
+    sc.pl.umap(adata=model.adata,
+               color=[latent_cluster_key],
+               groups=groups,
+               palette=latent_cluster_colors,
+               title=f"Niches in Latent Space",
+               ax=axs[0],
+               size=40,
+               show=False)
+    for idx, sample in enumerate(samples):
+        axs.append(fig.add_subplot(spec2[len(samples) + idx]))
+        sc.pl.spatial(adata=model.adata[model.adata.obs[sample_key] == sample],
+                      color=[latent_cluster_key],
+                      groups=groups,
+                      palette=latent_cluster_colors,
+                      spot_size=spot_size,
+                      title=f"Niches in Physical Space \n"
+                            f"(Sample: {sample})",
+                      legend_loc=None,
+                      ax=axs[idx+1],
+                      show=False)
+    
+    # Create and position shared legend
+    handles, labels = axs[0].get_legend_handles_labels()
+    lgd = fig.legend(handles,
+                     labels,
+                     loc="center left",
+                     bbox_to_anchor=(0.98, 0.5))
+    axs[0].get_legend().remove()
+    
+    # Adjust, save and display plot
+    plt.subplots_adjust(wspace=0.2, hspace=0.25)
+    if save_fig:
+        fig.savefig(file_path,
+                    bbox_extra_artists=(lgd, title),
+                    bbox_inches="tight")
+    plt.show()
+    
+    return latent_cluster_colors
+
+
+def characterize_niche_composition(
+    model: CustomNicheCompass,
+    latent_cluster_key: str,
+    cell_type_key: str,
+    latent_leiden_resolution: float,
+    figure_folder_path: str,
+    save_fig: bool = True,
+    file_suffix: str = ""
+):
+    """
+    Characterize niche composition by cell type.
+    
+    Parameters
+    ----------
+    model : CustomNicheCompass
+        Trained NicheCompass model
+    latent_cluster_key : str
+        Key in adata.obs for niche/cluster annotations
+    cell_type_key : str
+        Key in adata.obs for cell type annotations
+    latent_leiden_resolution : float
+        Resolution parameter used for Leiden clustering
+    figure_folder_path : str
+        Path to save figures
+    save_fig : bool
+        Whether to save the figure
+    file_suffix : str
+        Suffix to add to filename
+    """
+    file_path = f"{figure_folder_path}/res_{latent_leiden_resolution}_niche_composition{file_suffix}.svg"
+    
+    df_counts = (model.adata.obs.groupby([latent_cluster_key, cell_type_key])
+                 .size().unstack())
+    df_counts.plot(kind="bar", stacked=True, figsize=(10,10))
+    legend = plt.legend(bbox_to_anchor=(1, 1), loc="upper left", prop={'size': 10})
+    legend.set_title("Cell Type Annotations", prop={'size': 10})
+    plt.title("Cell Type Composition of Niches")
+    plt.xlabel("Niche")
+    plt.ylabel("Cell Type Counts")
+    if save_fig:
+        plt.savefig(file_path,
+                    bbox_extra_artists=(legend,),
+                    bbox_inches="tight")
+    plt.show()
+
+
+def run_differential_gp_analysis(
+    model: CustomNicheCompass,
+    latent_cluster_key: str,
+    sample_key: str,
+    samples: list,
+    gp_names_key: str,
+    differential_gp_test_results_key: str,
+    figure_folder_path: str,
+    selected_cats: Optional[list] = None,
+    comparison_cats: str = "rest",
+    log_bayes_factor_thresh: float = 2.3,
+    latent_cluster_colors: Optional[dict] = None,
+    save_fig: bool = True,
+    save_file: bool = True,
+    file_suffix: str = "",
+    n_top_enriched_gp_start_idx: int = 0,
+    n_top_enriched_gp_end_idx: int = 10,
+    n_top_genes_per_gp: int = 3,
+    n_top_peaks_per_gp: int = 3
+):
+    """
+    Run differential GP testing and create visualizations.
+    
+    Parameters
+    ----------
+    model : CustomNicheCompass
+        Trained NicheCompass model
+    latent_cluster_key : str
+        Key in adata.obs for niche/cluster annotations
+    sample_key : str
+        Key in adata.obs for sample annotations
+    samples : list
+        List of sample names for visualization
+    gp_names_key : str
+        Key in adata.uns for gene program names
+    differential_gp_test_results_key : str
+        Key in adata.uns for differential GP test results
+    figure_folder_path : str
+        Path to save figures
+    selected_cats : Optional[list]
+        Selected categories for differential testing (None for all)
+    comparison_cats : str or list
+        Categories to compare against ("rest" or specific list)
+    log_bayes_factor_thresh : float
+        Threshold for log Bayes factor
+    latent_cluster_colors : Optional[dict]
+        Color dictionary for clusters (created if None)
+    save_fig : bool
+        Whether to save figures
+    save_file : bool
+        Whether to save CSV summary
+    file_suffix : str
+        Suffix to add to filenames
+    n_top_enriched_gp_start_idx : int
+        Start index for top enriched GPs to plot
+    n_top_enriched_gp_end_idx : int
+        End index for top enriched GPs to plot
+    n_top_genes_per_gp : int
+        Number of top genes per GP to visualize
+    n_top_peaks_per_gp : int
+        Number of top peaks per GP to visualize
+        
+    Returns
+    -------
+    enriched_gps : list
+        List of enriched gene program names
+    gp_summary_df : pd.DataFrame
+        Gene program summary dataframe
+    """
+    # Check number of active GPs
+    active_gps = model.get_active_gps()
+    print(f"Number of total gene programs: {len(model.adata.uns[gp_names_key])}.")
+    print(f"Number of active gene programs: {len(active_gps)}.")
+    
+    # Get GP summary
+    gp_summary_df = model.get_gp_summary()
+    print("\nExample active GPs:")
+    display(gp_summary_df[gp_summary_df["gp_active"] == True].head())
+    
+    # Run differential gp testing
+    enriched_gps = model.run_differential_gp_tests(
+        cat_key=latent_cluster_key,
+        selected_cats=selected_cats,
+        comparison_cats=comparison_cats,
+        log_bayes_factor_thresh=log_bayes_factor_thresh)
+    
+    # Results are stored in a df in the adata object
+    print("\nDifferential GP test results:")
+    display(model.adata.uns[differential_gp_test_results_key])
+    
+    # Visualize GP activities of enriched GPs across niches
+    df = model.adata.obs[[latent_cluster_key] + enriched_gps].groupby(latent_cluster_key).mean()
+    
+    scaler = MinMaxScaler()
+    normalized_columns = scaler.fit_transform(df)
+    normalized_df = pd.DataFrame(normalized_columns, columns=df.columns)
+    normalized_df.index = df.index
+    
+    plt.figure(figsize=(16, 8))
+    ax = sns.heatmap(normalized_df,
+                     cmap='viridis',
+                     annot=False,
+                     linewidths=0)
+    plt.xticks(rotation=45,
+               fontsize=8,
+               ha="right")
+    plt.xlabel("Gene Programs", fontsize=16)
+    plt.ylabel("Niches", fontsize=16)
+    heatmap_path = f"{figure_folder_path}/enriched_gps_heatmap{file_suffix}.svg"
+    if save_fig:
+        plt.savefig(heatmap_path, bbox_inches="tight")
+    plt.show()
+    
+    # Store gene program summary of enriched gene programs
+    gp_summary_cols = ["gp_name",
+                       "n_source_genes",
+                       "n_non_zero_source_genes",
+                       "n_target_genes",
+                       "n_non_zero_target_genes",
+                       "gp_source_genes",
+                       "gp_target_genes",
+                       "gp_source_genes_importances",
+                       "gp_target_genes_importances",
+                       "n_source_peaks",
+                       "n_target_peaks",
+                       "gp_source_peaks",
+                       "gp_target_peaks",
+                       "gp_source_peaks_importances",
+                       "gp_target_peaks_importances"]
+    
+    enriched_gp_summary_df = gp_summary_df[gp_summary_df["gp_name"].isin(enriched_gps)].copy()
+    if len(enriched_gp_summary_df) > 0:
+        cat_dtype = pd.CategoricalDtype(categories=enriched_gps, ordered=True)
+        enriched_gp_summary_df.loc[:, "gp_name"] = enriched_gp_summary_df["gp_name"].astype(cat_dtype)
+        enriched_gp_summary_df = enriched_gp_summary_df.sort_values(by="gp_name")
+        enriched_gp_summary_df = enriched_gp_summary_df[gp_summary_cols]
+        
+        file_path = f"{figure_folder_path}/log_bayes_factor_{log_bayes_factor_thresh}_niche_enriched_gps_summary{file_suffix}.csv"
+        if save_file:
+            enriched_gp_summary_df.to_csv(file_path)
+        else:
+            display(enriched_gp_summary_df)
+    
+    # Generate plots of enriched GPs
+    if selected_cats is not None and len(selected_cats) > 0:
+        plot_label = f"log_bayes_factor_{log_bayes_factor_thresh}_cluster_{selected_cats[0]}_vs_rest{file_suffix}"
+    else:
+        plot_label = f"log_bayes_factor_{log_bayes_factor_thresh}_all_clusters{file_suffix}"
+    
+    if latent_cluster_colors is None:
+        latent_cluster_colors = create_new_color_dict(
+            adata=model.adata,
+            cat_key=latent_cluster_key)
+    
+    generate_enriched_gp_info_plots(
+        plot_label=plot_label,
+        model=model,
+        sample_key=sample_key,
+        differential_gp_test_results_key=differential_gp_test_results_key,
+        cat_key=latent_cluster_key,
+        cat_palette=latent_cluster_colors,
+        n_top_enriched_gp_start_idx=n_top_enriched_gp_start_idx,
+        n_top_enriched_gp_end_idx=n_top_enriched_gp_end_idx,
+        feature_spaces=samples,
+        n_top_genes_per_gp=n_top_genes_per_gp,
+        n_top_peaks_per_gp=n_top_peaks_per_gp,
+        save_figs=save_fig,
+        figure_folder_path=f"{figure_folder_path}/",
+        spot_size=30)
+    
+    return enriched_gps, gp_summary_df
+
+
+def analyze_cell_cell_communication(
+    model: CustomNicheCompass,
+    gp_name: str,
+    latent_cluster_key: str,
+    latent_cluster_colors: dict,
+    figure_folder_path: str,
+    n_neighbors: int = 4,
+    save: bool = True,
+    file_suffix: str = ""
+):
+    """
+    Analyze cell-cell communication using a specific gene program.
+    
+    Parameters
+    ----------
+    model : CustomNicheCompass
+        Trained NicheCompass model
+    gp_name : str
+        Name of the gene program to analyze
+    latent_cluster_key : str
+        Key in adata.obs for niche/cluster annotations
+    latent_cluster_colors : dict
+        Color dictionary for clusters
+    figure_folder_path : str
+        Path to save figures
+    n_neighbors : int
+        Number of neighbors for network computation
+    save : bool
+        Whether to save the figure
+    file_suffix : str
+        Suffix to add to filename
+        
+    Returns
+    -------
+    network_df : pd.DataFrame
+        Communication network dataframe
+    """
+    network_df = compute_communication_gp_network(
+        gp_list=[gp_name],
+        model=model,
+        group_key=latent_cluster_key,
+        n_neighbors=n_neighbors)
+    
+    visualize_communication_gp_network(
+        adata=model.adata,
+        network_df=network_df,
+        figsize=(9, 8),
+        cat_colors=latent_cluster_colors,
+        edge_type_colors=["#1f77b4"],
+        cat_key=latent_cluster_key,
+        save=save,
+        save_path=f"{figure_folder_path}/gp_network_{gp_name}{file_suffix}.svg",
+    )
+    
+    return network_df
+
+
 #%% Load trained model
 
 source_model = CustomNicheCompass.load(
@@ -663,319 +1219,221 @@ target_model = CustomNicheCompass.load(
     gp_names_key=gp_names_key
 )
 
+# Compute latent representation for target data (required before neighbors/UMAP)
+compute_and_store_latent_representation(
+    model=target_model,
+    latent_key=latent_key,
+    counts_key=counts_key,
+    adj_key=adj_key,
+    only_active_gps=True,
+    paired_data=False  # Adjust if RNA and ATAC are not paired
+)
+
 target_samples = target_model.adata.obs["PCR_sample_name"].unique().tolist()
 
-#%% 4.1 Visualize NicheCompass Latent GP Space
+#%% Compute latent neighbor graph & UMAP embedding for target data
 
-# Let's look at the preservation of cell type annotations in the latent GP space. Note that the goal of NicheCompass is not a separation of cell types but rather to identify spatially consistent cell niches.
+# Note: The latent representation was computed above. Now we can compute 
+# neighbors and UMAP embeddings for downstream analysis.
+sc.pp.neighbors(target_model.adata,
+                use_rep=latent_key,
+                key_added=latent_key)
 
-cell_type_colors = create_new_color_dict(
-    adata=source_model.adata,
-    skip_default_colors=50,
-    cat_key=cell_type_key)
-
-groups = None
-save_fig = True
-file_path = f"{figure_folder_path}/" \
-            "cell_types_latent_physical_space.svg"
-
-fig = plt.figure(figsize=(12, 14))
-title = fig.suptitle(t="Cell Types in Latent and Physical Space",
-                     y=0.96,
-                     x=0.55,
-                     fontsize=20)
-spec1 = gridspec.GridSpec(ncols=1,
-                          nrows=2,
-                          width_ratios=[1],
-                          height_ratios=[3, 2])
-spec2 = gridspec.GridSpec(ncols=len(source_samples),
-                          nrows=2,
-                          width_ratios=[1] * len(source_samples),
-                          height_ratios=[3, 2])
-axs = []
-axs.append(fig.add_subplot(spec1[0]))
-sc.pl.umap(adata=source_model.adata,
-           color=[cell_type_key],
-           groups=groups,palette=cell_type_colors,
-           title=f"Cell Types in Latent Space",
-           ax=axs[0],
-           size=40,
-           show=False)
-for idx, sample in enumerate(source_samples):
-    axs.append(fig.add_subplot(spec2[len(source_samples) + idx]))
-    sc.pl.spatial(adata=source_model.adata[source_model.adata.obs[sample_key] == sample],
-                  color=[cell_type_key],
-                  groups=groups,
-                  palette=cell_type_colors,
-                  spot_size=spot_size,
-                  title=f"Cell Types in Physical Space \n"
-                        f"(Sample: {sample})",
-                  legend_loc=None,
-                  ax=axs[idx+1],
-                  show=False)
-
-# Create and position shared legend
-handles, labels = axs[0].get_legend_handles_labels()
-lgd = fig.legend(handles,
-                 labels,
-                 loc="center left",
-                 bbox_to_anchor=(0.98, 0.5))
-axs[0].get_legend().remove()
-
-# Adjust, save and display plot
-plt.subplots_adjust(wspace=0.2, hspace=0.25)
-if save_fig:
-    fig.savefig(file_path,
-                bbox_extra_artists=(lgd, title),
-                bbox_inches="tight")
-plt.show()
+sc.tl.umap(target_model.adata,
+           neighbors_key=latent_key)
 
 
-#%% 4.2 Identify Niches
 
-# We compute Leiden clustering of the NicheCompass latent GP space to identify spatially consistent cell niches.
+
+#%% 4.1 Visualize NicheCompass Latent GP Space (Source)
+
+# Let's look at the preservation of cell type annotations in the latent GP space. 
+# Note that the goal of NicheCompass is not a separation of cell types but rather 
+# to identify spatially consistent cell niches.
+
+source_cell_type_colors = visualize_cell_types_in_latent_and_physical_space(
+    model=source_model,
+    samples=source_samples,
+    cell_type_key=cell_type_key,
+    sample_key=sample_key,
+    latent_key=latent_key,
+    figure_folder_path=figure_folder_path,
+    spot_size=spot_size,
+    groups=None,
+    save_fig=True,
+    file_suffix="_source")
+
+target_cell_type_colors = visualize_cell_types_in_latent_and_physical_space(
+    model=target_model,
+    samples=target_samples,
+    cell_type_key="Main_cluster_name",
+    sample_key="PCR_sample_name",
+    latent_key=latent_key,
+    figure_folder_path=figure_folder_path,
+    spot_size=spot_size,
+    groups=None,
+    save_fig=True,
+    file_suffix="_target")
+
+
+#%% 4.2 Identify Niches (Source)
+
+# We compute Leiden clustering of the NicheCompass latent GP space to identify 
+# spatially consistent cell niches.
 
 latent_leiden_resolution = 0.5
 
-
-# Compute latent Leiden clustering
-sc.tl.leiden(adata=source_model.adata,
-             resolution=latent_leiden_resolution,
-             key_added=latent_cluster_key,
-             neighbors_key=latent_key)
-
-
-latent_cluster_colors = create_new_color_dict(
-    adata=source_model.adata,
-    cat_key=latent_cluster_key)
-
-
-# Create plot of latent cluster / niche annotations in physical and latent space
-groups = None # set this to a specific cluster for easy visualization, e.g. ["0"]
-save_fig = True
-file_path = f"{figure_folder_path}/" \
-            f"res_{latent_leiden_resolution}_" \
-            "niches_latent_physical_space.svg"
-
-fig = plt.figure(figsize=(12, 14))
-title = fig.suptitle(t=f"NicheCompass Niches " \
-                       "in Latent and Physical Space",
-                     y=0.96,
-                     x=0.55,
-                     fontsize=20)
-spec1 = gridspec.GridSpec(ncols=1,
-                          nrows=2,
-                          width_ratios=[1],
-                          height_ratios=[3, 2])
-spec2 = gridspec.GridSpec(ncols=len(source_samples),
-                          nrows=2,
-                          width_ratios=[1] * len(source_samples),
-                          height_ratios=[3, 2])
-axs = []
-axs.append(fig.add_subplot(spec1[0]))
-sc.pl.umap(adata=source_model.adata,
-           color=[latent_cluster_key],
-           groups=groups,
-           palette=latent_cluster_colors,
-           title=f"Niches in Latent Space",
-           ax=axs[0],
-           size=40,
-           show=False)
-for idx, sample in enumerate(source_samples):
-    axs.append(fig.add_subplot(spec2[len(source_samples) + idx]))
-    sc.pl.spatial(adata=source_model.adata[source_model.adata.obs[sample_key] == sample],
-                  color=[latent_cluster_key],
-                  groups=groups,
-                  palette=latent_cluster_colors,
-                  spot_size=spot_size,
-                  title=f"Niches in Physical Space \n"
-                        f"(Sample: {sample})",
-                  legend_loc=None,
-                  ax=axs[idx+1],
-                  show=False)
-
-# Create and position shared legend
-handles, labels = axs[0].get_legend_handles_labels()
-lgd = fig.legend(handles,
-                 labels,
-                 loc="center left",
-                 bbox_to_anchor=(0.98, 0.5))
-axs[0].get_legend().remove()
-
-# Adjust, save and display plot
-plt.subplots_adjust(wspace=0.2, hspace=0.25)
-if save_fig:
-    fig.savefig(file_path,
-                bbox_extra_artists=(lgd, title),
-                bbox_inches="tight")
-plt.show()
+source_latent_cluster_colors = identify_niches(
+    model=source_model,
+    samples=source_samples,
+    sample_key=sample_key,
+    latent_key=latent_key,
+    latent_cluster_key=latent_cluster_key,
+    latent_leiden_resolution=latent_leiden_resolution,
+    figure_folder_path=figure_folder_path,
+    spot_size=spot_size,
+    groups=None,
+    save_fig=True,
+    file_suffix="_source")
 
 
-#%% 4.3 Characterize niche composition
+#%% 4.3 Characterize niche composition (Source)
 
-save_fig = True
-file_path = f"{figure_folder_path}/" \
-            f"res_{latent_leiden_resolution}_" \
-            f"niche_composition.svg"
-
-df_counts = (source_model.adata.obs.groupby([latent_cluster_key, cell_type_key])
-             .size().unstack())
-df_counts.plot(kind="bar", stacked=True, figsize=(10,10))
-legend = plt.legend(bbox_to_anchor=(1, 1), loc="upper left", prop={'size': 10})
-legend.set_title("Cell Type Annotations", prop={'size': 10})
-plt.title("Cell Type Composition of Niches")
-plt.xlabel("Niche")
-plt.ylabel("Cell Type Counts")
-if save_fig:
-    plt.savefig(file_path,
-                bbox_extra_artists=(legend,),
-                bbox_inches="tight")
+characterize_niche_composition(
+    model=source_model,
+    latent_cluster_key=latent_cluster_key,
+    cell_type_key=cell_type_key,
+    latent_leiden_resolution=latent_leiden_resolution,
+    figure_folder_path=figure_folder_path,
+    save_fig=True,
+    file_suffix="_source")
 
 
-#%% 4.3.2 Differential GPs
+#%% 4.3.2 Differential GPs (Source)
 
-# Now we can test which GPs are differentially expressed in a niche. To this end, we will perform differential GP testing of a selected niche, e.g. niche "9" (```selected_cats = ["9"]```) vs all other niches (```comparison_cats = "rest"```). However, differential GP testing can also be performed in the following ways:
-# - Set ```selected_cats = None``` to perform differential GP testing across all niches, as opposed to just for one specific niche.
-# - Set ```comparison_cats = ["12"]``` to perform differential GP testing against niche "12" as opposed to against all other niches.
+# Now we can test which GPs are differentially expressed in a niche. To this end, 
+# we will perform differential GP testing of a selected niche, e.g. niche "9" 
+# (```selected_cats = ["9"]```) vs all other niches (```comparison_cats = "rest"```). 
+# However, differential GP testing can also be performed in the following ways:
+# - Set ```selected_cats = None``` to perform differential GP testing across all niches, 
+#   as opposed to just for one specific niche.
+# - Set ```comparison_cats = ["12"]``` to perform differential GP testing against 
+#   niche "12" as opposed to against all other niches.
 # 
-# We choose an absolute log bayes factor threshold of 2.3 to determine strongly enriched GPs (see https://en.wikipedia.org/wiki/Bayes_factor).
+# We choose an absolute log bayes factor threshold of 2.3 to determine strongly 
+# enriched GPs (see https://en.wikipedia.org/wiki/Bayes_factor).
 
-# Check number of active GPs
-active_gps = source_model.get_active_gps()
-print(f"Number of total gene programs: {len(model.adata.uns[gp_names_key])}.")
-print(f"Number of active gene programs: {len(active_gps)}.")
-
-
-# Display example active GPs
-gp_summary_df = source_model.get_gp_summary()
-gp_summary_df[gp_summary_df["gp_active"] == True].head()
-
-
-#%% Differential GP Testing
-
-#  Set parameters for differential gp testing
+# Set parameters for differential gp testing
 selected_cats = ["9"]
 comparison_cats = "rest"
-title = f"NicheCompass Strongly Enriched Niche GPs"
 log_bayes_factor_thresh = 2.3
-save_fig = True
-file_path = f"{figure_folder_path}/" \
-            f"/log_bayes_factor_{log_bayes_factor_thresh}" \
-             "_niches_enriched_gps_heatmap.svg"
 
-# Run differential gp testing
-enriched_gps = source_model.run_differential_gp_tests(
-    cat_key=latent_cluster_key,
+source_enriched_gps, source_gp_summary_df = run_differential_gp_analysis(
+    model=source_model,
+    latent_cluster_key=latent_cluster_key,
+    sample_key=sample_key,
+    samples=source_samples,
+    gp_names_key=gp_names_key,
+    differential_gp_test_results_key=differential_gp_test_results_key,
+    figure_folder_path=figure_folder_path,
     selected_cats=selected_cats,
     comparison_cats=comparison_cats,
-    log_bayes_factor_thresh=log_bayes_factor_thresh)
-
-# Results are stored in a df in the adata object
-source_model.adata.uns[differential_gp_test_results_key]
-
-#%% Visualize GP activities of enriched GPs across niches
-df = source_model.adata.obs[[latent_cluster_key] + enriched_gps].groupby(latent_cluster_key).mean()
-
-scaler = MinMaxScaler()
-normalized_columns = scaler.fit_transform(df)
-normalized_df = pd.DataFrame(normalized_columns, columns=df.columns)
-normalized_df.index = df.index
-
-plt.figure(figsize=(16, 8))  # Set the figure size
-ax = sns.heatmap(normalized_df,
-            cmap='viridis',
-            annot=False,
-            linewidths=0)
-plt.xticks(rotation=45,
-           fontsize=8,
-           ha="right"
-          )
-plt.xlabel("Gene Programs", fontsize=16)
-plt.savefig(f"{figure_folder_path}/enriched_gps_heatmap.svg",
-            bbox_inches="tight")
-
-
-#%% Store gene program summary of enriched gene programs
-save_file = True
-file_path = f"{figure_folder_path}/" \
-            f"/log_bayes_factor_{log_bayes_factor_thresh}_" \
-            "niche_enriched_gps_summary.csv"
-
-gp_summary_cols = ["gp_name",
-                   "n_source_genes",
-                   "n_non_zero_source_genes",
-                   "n_target_genes",
-                   "n_non_zero_target_genes",
-                   "gp_source_genes",
-                   "gp_target_genes",
-                   "gp_source_genes_importances",
-                   "gp_target_genes_importances",
-                   "n_source_peaks",
-                   "n_target_peaks",
-                   "gp_source_peaks",
-                   "gp_target_peaks",
-                   "gp_source_peaks_importances",
-                   "gp_target_peaks_importances"]
-
-enriched_gp_summary_df = gp_summary_df[gp_summary_df["gp_name"].isin(enriched_gps)]
-cat_dtype = pd.CategoricalDtype(categories=enriched_gps, ordered=True)
-enriched_gp_summary_df.loc[:, "gp_name"] = enriched_gp_summary_df["gp_name"].astype(cat_dtype)
-enriched_gp_summary_df = enriched_gp_summary_df.sort_values(by="gp_name")
-enriched_gp_summary_df = enriched_gp_summary_df[gp_summary_cols]
-
-if save_file:
-    enriched_gp_summary_df.to_csv(f"{file_path}")
-else:
-    display(enriched_gp_summary_df)
-
-
-#%% Generate plots of enriched GPs
-
-# Now we will have a look at the GP activities and the log normalized counts of
-# the most important omics features of the differential GPs.
-
-plot_label = f"log_bayes_factor_{log_bayes_factor_thresh}_cluster_{selected_cats[0]}_vs_rest"
-save_figs = True
-
-generate_enriched_gp_info_plots(
-    plot_label=plot_label,
-    model=source_model,
-    sample_key=sample_key,
-    differential_gp_test_results_key=differential_gp_test_results_key,
-    cat_key=latent_cluster_key,
-    cat_palette=latent_cluster_colors,
+    log_bayes_factor_thresh=log_bayes_factor_thresh,
+    latent_cluster_colors=source_latent_cluster_colors,
+    save_fig=True,
+    save_file=True,
+    file_suffix="_source",
     n_top_enriched_gp_start_idx=0,
     n_top_enriched_gp_end_idx=10,
-    feature_spaces=source_samples, # ["latent"]
     n_top_genes_per_gp=3,
-    n_top_peaks_per_gp=3,
-    save_figs=save_figs,
-    figure_folder_path=f"{figure_folder_path}/",
-    spot_size=spot_size)
+    n_top_peaks_per_gp=3)
 
 
-#%% 4.3.3 Cell-cell Communication
+#%% 4.3.3 Cell-cell Communication (Source)
 
-# Now we will use the inferred activity of an enriched combined interaction GP to analyze the involved intercellular interactions.
+# Now we will use the inferred activity of an enriched combined interaction GP 
+# to analyze the involved intercellular interactions.
 
 gp_name = "Cldn11_ligand_receptor_target_gene_GP"
 
-network_df = compute_communication_gp_network(
-    gp_list=[gp_name],
+source_network_df = analyze_cell_cell_communication(
     model=source_model,
-    group_key=latent_cluster_key,
-    n_neighbors=n_neighbors)
-
-visualize_communication_gp_network(
-    adata=source_model.adata,
-    network_df=network_df,
-    figsize=(9, 8),
-    cat_colors=latent_cluster_colors,
-    edge_type_colors=["#1f77b4"], 
-    cat_key=latent_cluster_key,
+    gp_name=gp_name,
+    latent_cluster_key=latent_cluster_key,
+    latent_cluster_colors=source_latent_cluster_colors,
+    figure_folder_path=figure_folder_path,
+    n_neighbors=n_neighbors,
     save=True,
-    save_path=f"{figure_folder_path}/gp_network_{gp_name}.svg",
-    )
+    file_suffix="_source")
+
+
+#%% Apply same analyses to target data (optional)
+
+# Uncomment and modify as needed to run analyses on target data:
+
+# target_cell_type_colors = visualize_cell_types_in_latent_and_physical_space(
+#     model=target_model,
+#     samples=target_samples,
+#     cell_type_key=cell_type_key,  # Adjust if different key name
+#     sample_key="PCR_sample_name",  # Adjust to match target data
+#     latent_key=latent_key,
+#     figure_folder_path=figure_folder_path,
+#     spot_size=spot_size,
+#     groups=None,
+#     save_fig=True,
+#     file_suffix="_target")
+#
+# target_latent_cluster_colors = identify_niches(
+#     model=target_model,
+#     samples=target_samples,
+#     sample_key="PCR_sample_name",  # Adjust to match target data
+#     latent_key=latent_key,
+#     latent_cluster_key=latent_cluster_key,
+#     latent_leiden_resolution=latent_leiden_resolution,
+#     figure_folder_path=figure_folder_path,
+#     spot_size=spot_size,
+#     groups=None,
+#     save_fig=True,
+#     file_suffix="_target")
+#
+# characterize_niche_composition(
+#     model=target_model,
+#     latent_cluster_key=latent_cluster_key,
+#     cell_type_key=cell_type_key,  # Adjust if different key name
+#     latent_leiden_resolution=latent_leiden_resolution,
+#     figure_folder_path=figure_folder_path,
+#     save_fig=True,
+#     file_suffix="_target")
+#
+# target_enriched_gps, target_gp_summary_df = run_differential_gp_analysis(
+#     model=target_model,
+#     latent_cluster_key=latent_cluster_key,
+#     sample_key="PCR_sample_name",  # Adjust to match target data
+#     samples=target_samples,
+#     gp_names_key=gp_names_key,
+#     differential_gp_test_results_key=differential_gp_test_results_key,
+#     figure_folder_path=figure_folder_path,
+#     selected_cats=selected_cats,
+#     comparison_cats=comparison_cats,
+#     log_bayes_factor_thresh=log_bayes_factor_thresh,
+#     latent_cluster_colors=target_latent_cluster_colors,
+#     save_fig=True,
+#     save_file=True,
+#     file_suffix="_target",
+#     n_top_enriched_gp_start_idx=0,
+#     n_top_enriched_gp_end_idx=10,
+#     n_top_genes_per_gp=3,
+#     n_top_peaks_per_gp=3)
+#
+# target_network_df = analyze_cell_cell_communication(
+#     model=target_model,
+#     gp_name=gp_name,
+#     latent_cluster_key=latent_cluster_key,
+#     latent_cluster_colors=target_latent_cluster_colors,
+#     figure_folder_path=figure_folder_path,
+#     n_neighbors=n_neighbors,
+#     save=True,
+#     file_suffix="_target")
 
 #%% End of Notebook
 

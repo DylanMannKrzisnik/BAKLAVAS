@@ -504,6 +504,7 @@ class CustomNicheCompass(NicheCompass):
               node_val_ratio: float=0.1,
               edge_batch_size: int=256,
               node_batch_size: Optional[int]=None,
+              paired_data: bool=True,
               mlflow_experiment_id: Optional[str]=None,
               retrieve_cat_covariates_embeds: bool=False,
               retrieve_recon_edge_probs: bool=False,
@@ -528,6 +529,7 @@ class CustomNicheCompass(NicheCompass):
             node_val_ratio=node_val_ratio,
             edge_batch_size=edge_batch_size,
             node_batch_size=node_batch_size,
+            paired_data=paired_data,
             use_cuda_if_available=use_cuda_if_available,
             n_sampled_neighbors=n_sampled_neighbors,
             latent_dtype=latent_dtype,
@@ -622,13 +624,191 @@ class CustomNicheCompass(NicheCompass):
             mlflow.log_metric("n_active_gps",
                               len(self.adata.uns[self.active_gp_names_key_]))
 
+    def get_latent_representation(
+            self,
+            adata: Optional[AnnData]=None,
+            adata_atac: Optional[AnnData]=None,
+            counts_key: Optional[str]="counts",
+            adj_key: str="spatial_connectivities",
+            cat_covariates_keys: Optional[List[str]]=None,
+            paired_data: bool=True,
+            only_active_gps: bool=True,
+            return_mu_std: bool=False,
+            node_batch_size: int=64,
+            dtype: type=np.float64,
+            ) -> np.ndarray:
+        """
+        Get the latent representation / gene program scores from a trained model.
+        """
+        self._check_if_trained(warn=False)
+
+        device = next(self.model.parameters()).device
+
+        if adata is None:
+            adata = self.adata
+        if (adata_atac is None) & hasattr(self, "adata_atac"):
+            adata_atac = self.adata_atac
+
+        # Create single dataloader containing entire dataset
+        data_dict = prepare_data(
+            adata=adata,
+            cat_covariates_label_encoders=self.model.cat_covariates_label_encoders_,
+            adata_atac=adata_atac,
+            counts_key=counts_key,
+            adj_key=adj_key,
+            cat_covariates_keys=cat_covariates_keys,
+            paired_data=paired_data,
+            edge_val_ratio=0.,
+            edge_test_ratio=0.,
+            node_val_ratio=0.,
+            node_test_ratio=0.)
+        node_masked_data = data_dict["node_masked_data"]
+        loader_dict = initialize_dataloaders(
+            node_masked_data=node_masked_data,
+            edge_train_data=None,
+            edge_val_data=None,
+            edge_batch_size=None,
+            node_batch_size=node_batch_size,
+            shuffle=False)
+        node_loader = loader_dict["node_train_loader"]
+
+        # Get number of gene programs
+        if only_active_gps:
+            n_gps = self.get_active_gps().shape[0]
+        else:
+            n_gps = (self.n_prior_gp_ + self.n_addon_gp_ )
+
+        n_obs = node_masked_data.num_nodes
+        if return_mu_std:
+            mu = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+            std = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+        else:
+            z = np.empty(shape=(n_obs, n_gps), dtype=dtype)
+
+        # Get latent representation for each batch of the dataloader and put it
+        # into latent vectors
+        # Get model dtype to ensure consistency
+        model_dtype = next(self.model.parameters()).dtype
+        for i, node_batch in enumerate(node_loader):
+            n_obs_before_batch = i * node_batch_size
+            n_obs_after_batch = n_obs_before_batch + node_batch.batch_size
+            node_batch = node_batch.to(device)
+            # Ensure node_batch.x has the same dtype as the model
+            if node_batch.x.dtype != model_dtype:
+                node_batch.x = node_batch.x.to(model_dtype)
+            if return_mu_std:
+                mu_batch, std_batch = self.model.get_latent_representation(
+                    node_batch=node_batch,
+                    only_active_gps=only_active_gps,
+                    return_mu_std=True)
+                mu[n_obs_before_batch:n_obs_after_batch, :] = (
+                    mu_batch.detach().cpu().numpy())
+                std[n_obs_before_batch:n_obs_after_batch, :] = (
+                    std_batch.detach().cpu().numpy())
+            else:
+                z_batch = self.model.get_latent_representation(
+                    node_batch=node_batch,
+                    only_active_gps=only_active_gps,
+                    return_mu_std=False)
+                z[n_obs_before_batch:n_obs_after_batch, :] = (
+                    z_batch.detach().cpu().numpy())
+        if return_mu_std:
+            return mu, std
+        else:
+            return z
+
+    def get_omics_decoder_outputs(
+            self,
+            adata: Optional[AnnData]=None,
+            adata_atac: Optional[AnnData]=None,
+            paired_data: bool=True,
+            only_active_gps: bool=True,
+            node_batch_size: int=64,
+            ) -> dict:
+        """
+        Get the omics decoder outputs.
+        """
+        self._check_if_trained(warn=False)
+
+        device = next(self.model.parameters()).device
+
+        if adata is None:
+            adata = self.adata
+        if (adata_atac is None) & hasattr(self, "adata_atac"):
+            adata_atac = self.adata_atac
+
+        # Create single dataloader containing entire dataset
+        data_dict = prepare_data(
+            adata=adata,
+            cat_covariates_label_encoders=self.model.cat_covariates_label_encoders_,
+            adata_atac=adata_atac,
+            counts_key=self.counts_key_,
+            adj_key=self.adj_key_,
+            cat_covariates_keys=self.cat_covariates_keys_,
+            paired_data=paired_data,
+            edge_val_ratio=0.,
+            edge_test_ratio=0.,
+            node_val_ratio=0.,
+            node_test_ratio=0.)
+        node_masked_data = data_dict["node_masked_data"]
+        loader_dict = initialize_dataloaders(
+            node_masked_data=node_masked_data,
+            edge_train_data=None,
+            edge_val_data=None,
+            edge_batch_size=None,
+            node_batch_size=node_batch_size,
+            shuffle=False)
+        node_loader = loader_dict["node_train_loader"]
+
+        n_obs = node_masked_data.num_nodes
+        output = {}
+        output["target_rna_nb_means"] = np.empty(
+            shape=(n_obs, self.n_output_genes_))
+        output["source_rna_nb_means"] = np.empty(
+            shape=(n_obs, self.n_output_genes_))
+        if "atac" in self.modalities_:
+            output["target_atac_nb_means"] = np.empty(
+                shape=(n_obs, self.n_output_peaks_))
+            output["source_atac_nb_means"] = np.empty(
+                shape=(n_obs, self.n_output_peaks_))
+
+        # Get latent representation for each batch of the dataloader and put it
+        # into latent vectors
+        # Get model dtype to ensure consistency
+        model_dtype = next(self.model.parameters()).dtype
+        for i, node_batch in enumerate(node_loader):
+            n_obs_before_batch = i * node_batch_size
+            n_obs_after_batch = n_obs_before_batch + node_batch.batch_size
+            node_batch = node_batch.to(device)
+            # Ensure node_batch.x has the same dtype as the model
+            if node_batch.x.dtype != model_dtype:
+                node_batch.x = node_batch.x.to(model_dtype)
+            output_batch = self.model.get_omics_decoder_outputs(
+                node_batch=node_batch,
+                only_active_gps=only_active_gps)
+            output["target_rna_nb_means"][
+                n_obs_before_batch:n_obs_after_batch, :] = (
+                    output_batch["target_rna_nb_means"].detach().cpu().numpy())
+            output["source_rna_nb_means"][
+                n_obs_before_batch:n_obs_after_batch, :] = (
+                    output_batch["source_rna_nb_means"].detach().cpu().numpy())
+            if "atac" in self.modalities_:
+                output["target_atac_nb_means"][
+                    n_obs_before_batch:n_obs_after_batch, :] = (
+                        output_batch["target_atac_nb_means"].detach()
+                        .cpu().numpy())
+                output["source_atac_nb_means"][
+                    n_obs_before_batch:n_obs_after_batch, :] = (
+                        output_batch["source_atac_nb_means"].detach()
+                        .cpu().numpy())
+        return output
 
 class CustomTrainer(Trainer):
     """
     Trainer that uses the project-specific prepare_data implementation.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, paired_data: bool=True, **kwargs):
         super().__init__(*args, **kwargs)
 
         data_dict = prepare_data(
@@ -638,6 +818,7 @@ class CustomTrainer(Trainer):
             counts_key=self.counts_key,
             adj_key=self.adj_key,
             cat_covariates_keys=self.cat_covariates_keys,
+            paired_data=paired_data,
             edge_val_ratio=self.edge_val_ratio_,
             edge_test_ratio=0.,
             node_val_ratio=self.node_val_ratio_,
@@ -1071,6 +1252,45 @@ class CustomVGPGAE(VGPGAE):
         
         return mu_new, s_new
 
+    def _combine_posteriors(self,
+                            mu_rna: torch.Tensor,
+                            logstd_rna: torch.Tensor,
+                            mu_atac: torch.Tensor,
+                            logstd_atac: torch.Tensor,
+                            modality_mask: Optional[torch.Tensor]=None
+                            ) -> tuple:
+        if modality_mask is None:
+            return self.multiply_gaussians_log_space(
+                mu_rna, logstd_rna, mu_atac, logstd_atac)
+
+        if modality_mask.dtype != torch.bool:
+            modality_mask = modality_mask.to(torch.bool)
+        has_rna = modality_mask[:, 0]
+        has_atac = modality_mask[:, 1]
+        both = has_rna & has_atac
+        only_rna = has_rna & ~has_atac
+        only_atac = ~has_rna & has_atac
+
+        mu = torch.zeros_like(mu_rna)
+        logstd = torch.zeros_like(logstd_rna)
+
+        if both.any():
+            mu_both, logstd_both = self.multiply_gaussians_log_space(
+                mu_rna[both],
+                logstd_rna[both],
+                mu_atac[both],
+                logstd_atac[both])
+            mu[both] = mu_both
+            logstd[both] = logstd_both
+        if only_rna.any():
+            mu[only_rna] = mu_rna[only_rna]
+            logstd[only_rna] = logstd_rna[only_rna]
+        if only_atac.any():
+            mu[only_atac] = mu_atac[only_atac]
+            logstd[only_atac] = logstd_atac[only_atac]
+
+        return mu, logstd
+
     def forward(self,
                 data_batch: Data,
                 decoder: Literal["graph", "omics"],
@@ -1190,13 +1410,17 @@ class CustomVGPGAE(VGPGAE):
         output["logstd_atac"] = self.logstd_atac
         z_atac = self.reparameterize(self.mu_atac, self.logstd_atac)
 
+        modality_mask = getattr(data_batch, "modality_mask", None)
+        if modality_mask is not None:
+            modality_mask = modality_mask[batch_idx]
+
         # Combine rna and atac latent distributions using product of Gaussians
-        self.mu, self.logstd = self.multiply_gaussians_log_space(
+        self.mu, self.logstd = self._combine_posteriors(
             self.mu_rna,
             self.logstd_rna,
             self.mu_atac,
             self.logstd_atac,
-        )
+            modality_mask=modality_mask)
         output["mu"] = self.mu
         output["logstd"] = self.logstd
         z = self.reparameterize(self.mu, self.logstd)
@@ -1554,8 +1778,15 @@ class CustomVGPGAE(VGPGAE):
         mu_atac = encoder_outputs_atac[0][:node_batch.batch_size, :]
         logstd_atac = encoder_outputs_atac[1][:node_batch.batch_size, :]
 
-        mu, logstd = self.multiply_gaussians_log_space(
-            mu_rna, logstd_rna, mu_atac, logstd_atac)
+        modality_mask = getattr(node_batch, "modality_mask", None)
+        if modality_mask is not None:
+            modality_mask = modality_mask[:node_batch.batch_size]
+        mu, logstd = self._combine_posteriors(
+            mu_rna,
+            logstd_rna,
+            mu_atac,
+            logstd_atac,
+            modality_mask=modality_mask)
 
         if only_active_gps:
             active_gp_mask = self.get_active_gp_mask()
@@ -1630,8 +1861,15 @@ class CustomVGPGAE(VGPGAE):
         mu_atac = encoder_outputs_atac[0][batch_idx, :]
         logstd_atac = encoder_outputs_atac[1][batch_idx, :]
 
-        mu, logstd = self.multiply_gaussians_log_space(
-            mu_rna, logstd_rna, mu_atac, logstd_atac)
+        modality_mask = getattr(node_batch, "modality_mask", None)
+        if modality_mask is not None:
+            modality_mask = modality_mask[batch_idx]
+        mu, logstd = self._combine_posteriors(
+            mu_rna,
+            logstd_rna,
+            mu_atac,
+            logstd_atac,
+            modality_mask=modality_mask)
         z = self.reparameterize(mu, logstd)
 
         if only_active_gps:
@@ -1849,7 +2087,8 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
                  adj_key: str="spatial_connectivities",
                  edge_label_adj_key: str="edge_label_spatial_connectivities",
                  self_loops: bool=True,
-                 cat_covariates_keys: Optional[List[str]]=None):
+                 cat_covariates_keys: Optional[List[str]]=None,
+                 paired_data: bool=True):
         if counts_key is None:
             x_rna = adata.X
         else:
@@ -1863,21 +2102,88 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
 
         # Store ATAC features in dense format if provided
         if adata_atac is not None:
-            if sp.issparse(adata_atac.X):
-                self.x_atac = torch.tensor(adata_atac.X.toarray())
+            if paired_data:
+                if ((adata.n_obs != adata_atac.n_obs) or
+                    (not adata.obs_names.equals(adata_atac.obs_names))):
+                    raise ValueError(
+                        "adata and adata_atac must have matching obs_names in "
+                        "the same order when paired_data=True. Set "
+                        "paired_data=False for unpaired forward passes.")
+
+                if sp.issparse(adata_atac.X):
+                    self.x_atac = torch.tensor(adata_atac.X.toarray())
+                else:
+                    self.x_atac = torch.tensor(adata_atac.X)
+                self.x = torch.cat((self.x_rna, self.x_atac), axis=1)
+                self.modality_mask = torch.ones(
+                    (self.x.size(0), 2), dtype=torch.bool)
             else:
-                self.x_atac = torch.tensor(adata_atac.X)
-            self.x = torch.cat((self.x_rna, self.x_atac), axis=1)
+                rna_obs = adata.obs_names
+                atac_obs = adata_atac.obs_names
+                extra_atac_obs = atac_obs[~atac_obs.isin(rna_obs)]
+                union_obs = rna_obs.append(extra_atac_obs)
+                n_obs_total = len(union_obs)
+
+                rna_positions = np.arange(adata.n_obs)
+                atac_positions = union_obs.get_indexer(atac_obs)
+                if (atac_positions < 0).any():
+                    raise ValueError("Unpaired union index is missing ATAC obs.")
+
+                x_rna_full = torch.zeros(
+                    (n_obs_total, adata.n_vars),
+                    dtype=self.x_rna.dtype)
+                x_rna_full[rna_positions] = self.x_rna
+
+                if sp.issparse(adata_atac.X):
+                    x_atac = torch.tensor(adata_atac.X.toarray(),
+                                          dtype=self.x_rna.dtype)
+                else:
+                    x_atac = torch.tensor(adata_atac.X,
+                                          dtype=self.x_rna.dtype)
+                x_atac_full = torch.zeros(
+                    (n_obs_total, adata_atac.n_vars),
+                    dtype=self.x_rna.dtype)
+                x_atac_full[atac_positions] = x_atac
+
+                self.x_rna = x_rna_full
+                self.x_atac = x_atac_full
+                self.x = torch.cat((self.x_rna, self.x_atac), axis=1)
+
+                modality_mask = torch.zeros((n_obs_total, 2), dtype=torch.bool)
+                modality_mask[rna_positions, 0] = True
+                modality_mask[atac_positions, 1] = True
+                self.modality_mask = modality_mask
         else:
             self.x_atac = None
             self.x = self.x_rna
+            self.modality_mask = torch.stack(
+                (torch.ones(self.x.size(0), dtype=torch.bool),
+                 torch.zeros(self.x.size(0), dtype=torch.bool)),
+                dim=1)
 
         # Store adjacency matrix in torch_sparse SparseTensor format
-        if sp.issparse(adata.obsp[adj_key]):
-            self.adj = sparse_mx_to_sparse_tensor(adata.obsp[adj_key])
+        if paired_data or adata_atac is None:
+            adj_rna = (adata.obsp[adj_key] if sp.issparse(adata.obsp[adj_key])
+                       else sp.csr_matrix(adata.obsp[adj_key]))
+            self.adj = sparse_mx_to_sparse_tensor(adj_rna)
         else:
-            self.adj = sparse_mx_to_sparse_tensor(
-                sp.csr_matrix(adata.obsp[adj_key]))
+            adj_rna = (adata.obsp[adj_key] if sp.issparse(adata.obsp[adj_key])
+                       else sp.csr_matrix(adata.obsp[adj_key]))
+            if adj_key not in adata_atac.obsp:
+                raise ValueError("Please specify an adequate 'adj_key' for "
+                                 "adata_atac when paired_data=False.")
+            atac_obs = adata_atac.obs_names
+            atac_only_mask = ~atac_obs.isin(adata.obs_names)
+            if atac_only_mask.any():
+                atac_only_idx = np.where(atac_only_mask)[0]
+                adj_atac_full = (adata_atac.obsp[adj_key] if sp.issparse(
+                    adata_atac.obsp[adj_key]) else sp.csr_matrix(
+                        adata_atac.obsp[adj_key]))
+                adj_atac = adj_atac_full[atac_only_idx][:, atac_only_idx]
+                adj = sp.block_diag((adj_rna, adj_atac), format="csr")
+            else:
+                adj = adj_rna
+            self.adj = sparse_mx_to_sparse_tensor(adj)
             
         # Store edge label adjacency matrix
         if edge_label_adj_key in adata.obsp:
@@ -1903,10 +2209,32 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
             for cat_covariate_key, cat_covariate_label_encoder in zip(
                 cat_covariates_keys,
                 cat_covariates_label_encoders):
-                cat_covariate_cats = torch.tensor(
-                    encode_labels(adata,
-                                  cat_covariate_label_encoder,
-                                  cat_covariate_key), dtype=torch.long)
+                if paired_data or adata_atac is None:
+                    cat_covariate_cats = torch.tensor(
+                        encode_labels(adata,
+                                      cat_covariate_label_encoder,
+                                      cat_covariate_key),
+                        dtype=torch.long)
+                else:
+                    cat_covariate_cats = -1 * np.ones(
+                        self.x.size(0), dtype=np.int64)
+                    rna_encoded = encode_labels(
+                        adata, cat_covariate_label_encoder, cat_covariate_key)
+                    rna_encoded = rna_encoded.astype(np.int64)
+                    cat_covariate_cats[:adata.n_obs] = rna_encoded
+                    atac_obs = adata_atac.obs_names
+                    atac_only_mask = ~atac_obs.isin(adata.obs_names)
+                    if atac_only_mask.any():
+                        atac_encoded = encode_labels(
+                            adata_atac,
+                            cat_covariate_label_encoder,
+                            cat_covariate_key).astype(np.int64)
+                        extra_positions = np.arange(
+                            adata.n_obs, self.x.size(0))
+                        cat_covariate_cats[extra_positions] = (
+                            atac_encoded[atac_only_mask])
+                    cat_covariate_cats = torch.tensor(
+                        cat_covariate_cats, dtype=torch.long)
                 self.cat_covariates_cats.append(cat_covariate_cats)
             self.cat_covariates_cats = torch.stack(self.cat_covariates_cats,
                                                    dim=1)            
@@ -1925,6 +2253,7 @@ def prepare_data(adata: AnnData,
                  counts_key: Optional[str]="counts",
                  adj_key: str="spatial_connectivities",
                  cat_covariates_keys: Optional[List[str]]=None,
+                 paired_data: bool=True,
                  edge_val_ratio: float=0.1,
                  edge_test_ratio: float=0.,
                  node_val_ratio: float=0.1,
@@ -1939,7 +2268,8 @@ def prepare_data(adata: AnnData,
         counts_key=counts_key,
         adj_key=adj_key,
         cat_covariates_keys=cat_covariates_keys,
-        cat_covariates_label_encoders=cat_covariates_label_encoders)
+        cat_covariates_label_encoders=cat_covariates_label_encoders,
+        paired_data=paired_data)
 
     # PyG Data object (has 2 edge index pairs for one edge because of symmetry;
     # one edge index pair will be removed in the edge-level split).
@@ -1955,6 +2285,8 @@ def prepare_data(adata: AnnData,
     data.x_rna = dataset.x_rna
     if dataset.x_atac is not None:
         data.x_atac = dataset.x_atac
+
+    data.modality_mask = dataset.modality_mask
 
     if cat_covariates_keys is not None:
         data.cat_covariates_cats = dataset.cat_covariates_cats

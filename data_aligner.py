@@ -476,7 +476,7 @@ data_aligner.find_gene_overlap()
 data_aligner.find_peak_overlap()
 data_aligner.align_features_by_overlap()
 
-# %%
+#%% TMP: artificial data setup
 from scipy.sparse import csr_matrix
 
 target_data = data_aligner.target_data
@@ -532,18 +532,22 @@ target_atac_with_missing.uns['nichecompass_target_peaks_idx'] = model.adata_atac
 target_atac_with_missing.uns['nichecompass_source_peaks_idx'] = model.adata_atac.uns['nichecompass_source_peaks_idx'].copy()
 #target_atac_with_missing.uns['nichecompass_gp_names'] = source_atac.uns['nichecompass_gp_names'].copy()
 
-#target_atac_with_missing.obsp['spatial_connectivities'] = source_atac.obsp['connectivities'].copy()
+if ('spatial_connectivities' not in target_atac_with_missing.obsp) and ('connectivities' in model.adata_atac.obsp):
+    target_atac_with_missing.obsp['spatial_connectivities'] = model.adata_atac.obsp['connectivities'].copy()
+elif ('spatial_connectivities' not in target_atac_with_missing.obsp) and ('spatial_connectivities' in model.adata_atac.obsp):
+    target_atac_with_missing.obsp['spatial_connectivities'] = model.adata_atac.obsp['spatial_connectivities'].copy()
+
+## set RNA to the same number of cells as ATAC
+target_rna_with_missing = target_rna_with_missing[:target_atac_with_missing.n_obs].copy()
 
 #%%
 
-target_rna_with_missing = target_rna_with_missing[::100].copy()
-
-model = CustomNicheCompass.load(
-    dir_path=model_folder_path,
-    adata=target_rna_with_missing,
-    adata_atac=target_atac_with_missing,
-    gp_names_key=gp_names_key,
-)
+model_target = CustomNicheCompass.load(
+        dir_path=model_folder_path,
+        adata=target_rna_with_missing,
+        adata_atac=target_atac_with_missing,
+        gp_names_key=gp_names_key,
+    )
 '''
 model = CustomNicheCompass.load(
     dir_path=model_folder_path,
@@ -552,13 +556,15 @@ model = CustomNicheCompass.load(
     gp_names_key=gp_names_key
 )
 '''
-z, _ = model.get_latent_representation(
-    adata=model.adata,
-    counts_key="counts",
-    adj_key="spatial_connectivities",
-    cat_covariates_keys=None,
-    only_active_gps=True,
-    return_mu_std=True,
-    node_batch_size=model.node_batch_size_,
+z, _ = model_target.get_latent_representation(
+        adata=model_target.adata,
+        adata_atac=model_target.adata_atac,
+        paired_data=False,
+        counts_key="counts",
+        adj_key="spatial_connectivities",
+        cat_covariates_keys=None,
+        only_active_gps=True,
+        return_mu_std=True,
+        node_batch_size=model_target.node_batch_size_,
 )
 

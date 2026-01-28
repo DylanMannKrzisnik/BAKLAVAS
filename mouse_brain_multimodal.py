@@ -289,7 +289,7 @@ print(f"Number of gene programs after filtering and combining: "
       f"{len(combined_gp_dict)}.")
 
 
-#%% 2.2 Load Data & Compute Spatial Neighbor Graph
+#%% 2.2 Load source data
 
 # - NicheCompass expects a precomputed spatial adjacency matrix stored in 'adata.obsp[adj_key]'.
 # - The user can customize the spatial neighbor graph construction based on the biological question of interest.
@@ -440,6 +440,71 @@ sc.pl.spatial(adata,
               palette=cell_type_colors,
               spot_size=spot_size)
 
+
+#%% Load target data
+
+import mygene as mg
+import anndata as ad
+
+model_folder_path = "/home/mcb/users/dmannk/BAKLAVA_base/data/Spatial_ATAC_RNA/mouse/artifacts/multimodal/21012026_181240/model"
+gp_names_key = "nichecompass_gp_names"
+
+target_rna = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/RNA/mouse_rna_processed.h5ad")
+target_atac = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/ATAC/mouse_atac_processed.h5ad")
+
+mginfo = mg.MyGeneInfo()
+results = mginfo.querymany(
+    target_rna.var["gene_id_no_version"].tolist(),
+    scopes="ensembl.gene",
+    species="mouse",
+    fields="symbol",
+    as_dataframe=True,
+)
+results = results.reset_index().drop_duplicates(subset='query') # remove duplicate genes
+assert results.groupby('query')['symbol'].nunique().le(1).all(), "Multiple symbols still found for some genes"
+
+target_rna.var = target_rna.var.merge(results, left_on="gene_id_no_version", right_on="query", how="left")
+target_rna.var.loc[target_rna.var['symbol'].isna(), 'symbol'] = target_rna.var.loc[target_rna.var['symbol'].isna(), 'query']
+target_rna.var.set_index("symbol", inplace=True)
+
+## remove duplicate genes (again)
+target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep='first')]
+assert target_rna.var_names.is_unique, "Target RNA data must have unique gene names"
+
+target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].str.split('-').tolist()
+
+
+#%% Perform data alignment
+
+#from data_aligner import DataAligner
+from muon import MuData
+
+source_data = MuData({"rna": adata, "atac": adata_atac})
+source_name = "Spatial_ATAC_RNA"
+source_assembly = "mm10"
+
+target_data = MuData({"rna": target_rna, "atac": target_atac})
+target_name = "EasySci_SLL"
+target_assembly = "mm39"
+
+data_aligner = DataAligner(
+    source_data=source_data,
+    target_data=target_data,
+    source_name=source_name,
+    target_name=target_name,
+    source_assembly=source_assembly,
+    target_assembly=target_assembly,
+)
+data_aligner.find_gene_overlap()
+data_aligner.find_peak_overlap()
+data_aligner.align_features_by_overlap()
+
+## retrieve aligned data
+adata = data_aligner.source_data['rna']
+adata_atac = data_aligner.source_data['atac']
+
+target_rna = data_aligner.target_data['rna']
+target_atac = data_aligner.target_data['atac']
 
 #%% 3. MODEL TRAINING
 

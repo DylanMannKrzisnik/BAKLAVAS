@@ -517,7 +517,7 @@ bm = Benchmarker(
     label_key="RNA_clusters",
     bio_conservation_metrics=BioConservation(),
     batch_correction_metrics=BatchCorrection(),
-    embedding_obsm_keys=["X"],
+    embedding_obsm_keys=["X", "X_pca"],
     #pre_integrated_embedding_obsm_key="X_gps",
     n_jobs=6,
 )

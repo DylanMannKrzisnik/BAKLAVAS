@@ -542,6 +542,74 @@ target_rna, target_atac = DataAligner.set_target_spatial_connectivities(
     target_atac=target_atac
 )
 
+#%% Convert non-string columns in var to string representation
+# Fix non-string columns in var that can't be saved to H5AD
+def fix_var_for_h5ad(adata):
+    """Convert non-string columns in var to string representation."""
+    import pandas as pd
+    
+    for col in list(adata.var.columns):  # Use list() to avoid modification during iteration
+        try:
+            # For object dtype columns, ensure ALL values are strings
+            if adata.var[col].dtype == 'object':
+                # Convert all values to strings, handling None/NaN and mixed types
+                def safe_str_convert(x):
+                    if pd.isna(x) or x is None:
+                        return ''
+                    elif isinstance(x, str):
+                        return x
+                    elif isinstance(x, (list, tuple, dict, np.ndarray)):
+                        return str(x)
+                    elif isinstance(x, (int, float, bool)):
+                        return str(x)
+                    else:
+                        # Try to convert anything else to string
+                        try:
+                            return str(x)
+                        except:
+                            return ''
+                
+                # Apply conversion to all values
+                adata.var[col] = adata.var[col].apply(safe_str_convert)
+                # Ensure the dtype is object with string values
+                adata.var[col] = adata.var[col].astype(str)
+            
+            # Also check for categorical dtypes - convert to string
+            elif hasattr(adata.var[col].dtype, 'categories'):
+                # Categorical dtype - convert to string
+                adata.var[col] = adata.var[col].astype(str)
+                
+        except Exception as e:
+            print(f"Warning: Could not fix column '{col}', dropping it: {e}")
+            import traceback
+            traceback.print_exc()
+            adata.var = adata.var.drop(columns=[col])
+    
+    return adata
+
+# First, identify problematic columns
+def diagnose_var_columns(adata, name="adata"):
+    """Diagnose which columns might cause issues."""
+    print(f"\nDiagnosing {name}.var columns:")
+    for col in adata.var.columns:
+        dtype = adata.var[col].dtype
+        print(f"  {col}: dtype={dtype}")
+        if dtype == 'object':
+            sample_vals = adata.var[col].dropna().head(3)
+            for idx, val in sample_vals.items():
+                print(f"    Sample value type: {type(val)}, value: {val}")
+
+# Fix both RNA and ATAC var tables
+print("Fixing var tables for H5AD compatibility...")
+
+diagnose_var_columns(target_rna, "RNA")
+diagnose_var_columns(target_atac, "ATAC")
+
+target_rna = fix_var_for_h5ad(target_rna)
+target_atac = fix_var_for_h5ad(target_atac)
+
+# try: target_rna.write_h5ad(os.path.join(target_model_folder_path, 'target_rna.h5ad'))
+
 #%% Initialize model
 
 model = CustomNicheCompass(
@@ -617,17 +685,6 @@ model.save(dir_path=model_folder_path,
            save_adata_atac=True,
            adata_atac_file_name=f"adata_atac.h5ad"
           )
-
-
-#%% 4. ANALYSIS
-
-#load_timestamp = "22082024_142839"
-load_timestamp = current_timestamp # uncomment if you trained the model in this notebook
-
-figure_folder_path = f"{outpath}/multimodal/{load_timestamp}/figures"
-model_folder_path = f"{outpath}/multimodal/{load_timestamp}/model"
-
-os.makedirs(figure_folder_path, exist_ok=True) # model_folder_path already created in previous cell
 
 
 #%% 4. ANALYSIS FUNCTIONS
@@ -1181,6 +1238,14 @@ def analyze_cell_cell_communication(
 
 #%% Load trained model
 
+load_timestamp = "28012026_153505"
+#load_timestamp = current_timestamp # uncomment if you trained the model in this notebook
+
+model_folder_path = f"{outpath}/artifacts/multimodal/{load_timestamp}/model"
+model_folder_stable_path = model_folder_path.replace('artifacts', 'stable')
+model_folder_path = model_folder_stable_path if os.path.exists(model_folder_stable_path) else model_folder_path
+print(f"Loading model from {model_folder_path}...")
+
 source_model = CustomNicheCompass.load(
     dir_path=model_folder_path,
     adata=None,
@@ -1194,8 +1259,8 @@ source_samples = source_model.adata.obs[sample_key].unique().tolist()
 
 target_model = CustomNicheCompass.load(
     dir_path=model_folder_path,
-    adata=target_rna,
-    adata_atac=target_atac,
+    adata=sc.pp.subsample(target_rna, n_obs=10000, copy=True),     # could also use geosketch: sketch_indices = gs(adata.obsm['X_pca'], 5000, replace=False)
+    adata_atac=sc.pp.subsample(target_atac, n_obs=10000, copy=True),
     gp_names_key=gp_names_key
 )
 
@@ -1205,6 +1270,7 @@ target_samples = target_model.adata.obs["PCR_sample_name"].unique().tolist()
 
 ## Compute latent representation for target data (required before neighbors/UMAP)
 print(f"Computing latent representation for target data (n cells: {target_model.adata.n_obs + target_model.adata_atac.n_obs})...")
+'''
 compute_and_store_latent_representation(
     model=target_model,
     latent_key=latent_key,
@@ -1213,6 +1279,53 @@ compute_and_store_latent_representation(
     only_active_gps=True,
     paired_data=False  # Adjust if RNA and ATAC are not paired
 )
+'''
+
+_, _, _, _, clip_embeddings_rna, clip_embeddings_atac = \
+    target_model.get_latent_representation(
+                adata=target_model.adata,
+                adata_atac=target_model.adata_atac,
+                paired_data=False,
+                counts_key="counts",
+                adj_key="spatial_connectivities",
+                cat_covariates_keys=None,
+                only_active_gps=True,
+                return_mu_std=True,
+                separate_modalities=True,
+                return_clip_embeddings=True,
+                node_batch_size=target_model.node_batch_size_,
+        )
+
+clip_embeddings_rna_magnitude = np.linalg.norm(clip_embeddings_rna, axis=1)
+clip_embeddings_atac_magnitude = np.linalg.norm(clip_embeddings_atac, axis=1)
+print(f'Mean magnitude of raw CLIP embeddings - RNA: {np.mean(clip_embeddings_rna_magnitude):.2f}, ATAC: {np.mean(clip_embeddings_atac_magnitude):.2f}')
+
+# Normalize clip embeddings to unit norm
+clip_embeddings_rna = clip_embeddings_rna / np.linalg.norm(clip_embeddings_rna, axis=1, keepdims=True)
+clip_embeddings_atac = clip_embeddings_atac / np.linalg.norm(clip_embeddings_atac, axis=1, keepdims=True)
+assert np.allclose(np.linalg.norm(clip_embeddings_rna, axis=1), 1), "RNA clip embeddings are not unit norm"
+assert np.allclose(np.linalg.norm(clip_embeddings_atac, axis=1), 1), "ATAC clip embeddings are not unit norm"
+
+n_rna = target_model.adata.n_obs
+
+# RNA is always first in the union
+clip_rna = clip_embeddings_rna[:n_rna, :]
+
+# ATAC: map atac_obs into the union index
+rna_obs = target_model.adata.obs_names
+atac_obs = target_model.adata_atac.obs_names
+extra_atac_obs = atac_obs[~atac_obs.isin(rna_obs)]
+union_obs = rna_obs.append(extra_atac_obs)
+atac_pos = union_obs.get_indexer(atac_obs)
+
+clip_atac = clip_embeddings_atac[atac_pos, :]
+
+target_model.adata.obsm[latent_key] = clip_rna
+target_model.adata_atac.obsm[latent_key] = clip_atac
+
+## Assign clip embeddings to target data
+target_model.adata.obsm[latent_key] = clip_embeddings_rna
+target_model.adata_atac.obsm[latent_key] = clip_embeddings_atac
 
 # Compute neighbor graph and UMAP embedding for target data
 sc.pp.neighbors(target_model.adata,
@@ -1221,6 +1334,20 @@ sc.pp.neighbors(target_model.adata,
 
 sc.tl.umap(target_model.adata,
            neighbors_key=latent_key)
+
+#%% Save target model
+
+target_model_folder_path = model_folder_path.replace('model', 'target_model')
+os.makedirs(target_model_folder_path, exist_ok=True)
+
+target_model.save(
+    dir_path=target_model_folder_path,
+    overwrite=True,
+    save_adata=True,
+    adata_file_name="target_adata.h5ad",
+    save_adata_atac=True,
+    adata_atac_file_name=f"target_adata_atac.h5ad"
+)
 
 
 #%% 4.1 Visualize NicheCompass Latent GP Space (Source)

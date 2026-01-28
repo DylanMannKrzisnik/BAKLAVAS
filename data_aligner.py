@@ -495,13 +495,34 @@ clip_embeddings_adata = ad.AnnData(
         model.adata.obs.assign(modality="rna"),
         model.adata_atac.obs.assign(modality="atac"),
     ], axis=0),
+    obsm={'X_gps': np.concatenate([z_source_rna, z_source_atac], axis=0)}
 )
 
 import scanpy as sc
 sc.pp.pca(clip_embeddings_adata, n_comps=50)
 sc.pp.neighbors(clip_embeddings_adata, use_rep='X_pca', n_neighbors=100)
+sc.tl.leiden(clip_embeddings_adata, resolution=0.5)
 sc.tl.umap(clip_embeddings_adata, min_dist=0.3)
-sc.pl.umap(clip_embeddings_adata, color=['modality'], wspace=0.2)
+sc.pl.umap(clip_embeddings_adata, color=['modality', 'cell_type', 'RNA_clusters', 'ATAC_clusters'], ncols=2, wspace=0.1, size=25)
+sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden', 'RNA_clusters', 'ATAC_clusters'], ncols=2, wspace=0.1, size=25)
+
+
+from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
+
+clip_embeddings_adata.obsm['X'] = clip_embeddings_adata.X.copy()
+
+bm = Benchmarker(
+    clip_embeddings_adata,
+    batch_key="modality",
+    label_key="RNA_clusters",
+    bio_conservation_metrics=BioConservation(),
+    batch_correction_metrics=BatchCorrection(),
+    embedding_obsm_keys=["X"],
+    #pre_integrated_embedding_obsm_key="X_gps",
+    n_jobs=6,
+)
+bm.benchmark()
+bm.plot_results_table(min_max_scale=False)
 
 #%%
 data_aligner = DataAligner(

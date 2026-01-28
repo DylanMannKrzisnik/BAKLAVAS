@@ -385,44 +385,6 @@ print(adata.var[["chrom", "chromStart", "chromEnd"]])
 # Display peak annotations
 print(adata_atac.var[["chrom", "chromStart", "chromEnd"]])
 
-
-#%% 2.5 Add GP Mask to Data
-
-# Add the GP dictionary as binary masks to the adata
-add_gps_from_gp_dict_to_adata(
-    gp_dict=combined_gp_dict,
-    adata=adata,
-    gp_targets_mask_key=gp_targets_mask_key,
-    gp_targets_categories_mask_key=gp_targets_categories_mask_key,
-    gp_sources_mask_key=gp_sources_mask_key,
-    gp_sources_categories_mask_key=gp_sources_categories_mask_key,
-    gp_names_key=gp_names_key,
-    min_genes_per_gp=2,
-    min_source_genes_per_gp=0,
-    min_target_genes_per_gp=1,
-    max_genes_per_gp=None,
-    max_source_genes_per_gp=None,
-    max_target_genes_per_gp=None,
-    plot_gp_gene_count_distributions=True)
-
-
-#%% 2.6 Add Chromatin Accessibility Mask to Data
-
-# Based on spatial proximity to the genes in the GP mask, we will add a chromatin accessibility mask.
-
-gene_peak_mapping_dict = generate_multimodal_mapping_dict(
-    adata=adata,
-    adata_atac=adata_atac)
-
-adata, adata_atac = add_multimodal_mask_to_adata(
-    adata=adata,
-    adata_atac=adata_atac,
-    gene_peak_mapping_dict=gene_peak_mapping_dict)
-
-print(f"Keeping {adata_atac.n_vars} peaks after filtering peaks with "
-      "no matching genes in gp mask.")
-
-
 #%% 2.7 Explore Data
 
 cell_type_colors = create_new_color_dict(
@@ -506,11 +468,94 @@ adata_atac = data_aligner.source_data['atac']
 target_rna = data_aligner.target_data['rna']
 target_atac = data_aligner.target_data['atac']
 
-#%% 3. MODEL TRAINING
+#%% Rebuild GP + multimodal masks on aligned feature space
+#
+# After alignment, (re)create all masks so they are strictly tied to the final
+# aligned `adata.var_names` / `adata_atac.var_names`.
 
-# - Initialize, Train & Save Model
+# Defensive cleanup in case this cell was executed before (e.g., in notebooks)
+for _k in [gp_targets_mask_key, gp_targets_categories_mask_key, gp_sources_mask_key, gp_sources_categories_mask_key]:
+    if _k in adata.varm:
+        del adata.varm[_k]
+for _k in [gp_names_key]:
+    if _k in adata.uns:
+        del adata.uns[_k]
 
-#%% 3.1 Initialize Model
+# Add the GP dictionary as binary masks to the (aligned) RNA adata
+add_gps_from_gp_dict_to_adata(
+    gp_dict=combined_gp_dict,
+    adata=adata,
+    gp_targets_mask_key=gp_targets_mask_key,
+    gp_targets_categories_mask_key=gp_targets_categories_mask_key,
+    gp_sources_mask_key=gp_sources_mask_key,
+    gp_sources_categories_mask_key=gp_sources_categories_mask_key,
+    gp_names_key=gp_names_key,
+    min_genes_per_gp=2,
+    min_source_genes_per_gp=0,
+    min_target_genes_per_gp=1,
+    max_genes_per_gp=None,
+    max_source_genes_per_gp=None,
+    max_target_genes_per_gp=None,
+    plot_gp_gene_count_distributions=True
+    )
+
+## Based on spatial proximity to the genes in the GP mask, add chromatin accessibility masks
+gene_peak_mapping_dict = generate_multimodal_mapping_dict(
+    adata=adata,
+    adata_atac=adata_atac
+    )
+
+## Add chromatin accessibility masks
+filter_peaks_based_on_genes = True    # If ´True´, filter ´adata_atac´ to only keep peaks that are mapped to genes in ´gene_peak_mapping_dict´.
+adata, adata_atac = add_multimodal_mask_to_adata(
+    adata=adata,
+    adata_atac=adata_atac,
+    gene_peak_mapping_dict=gene_peak_mapping_dict,
+    filter_peaks_based_on_genes=filter_peaks_based_on_genes
+    )
+
+if filter_peaks_based_on_genes:
+    print(f"Keeping {adata_atac.n_vars} peaks after filtering peaks with "
+        "no matching genes in gp mask.")
+
+    remaining_peaks = target_atac.var_names.isin(adata_atac.var_names)
+    target_atac = target_atac[:, remaining_peaks]
+
+assert adata.var_names.equals(target_rna.var_names), "RNA data must have the same gene names"
+assert adata_atac.var_names.equals(target_atac.var_names), "ATAC data must have the same peak names"
+
+#%% copy var and uns from source to target
+
+for var_key in adata.varm.keys():
+    try:
+        target_rna.varm[var_key] = adata.varm[var_key].copy()
+    except:
+        print(f"Could not copy RNA var_key '{var_key}' from source to target.")
+        pass
+for var_key in adata_atac.varm.keys():
+    try:
+        target_atac.varm[var_key] = adata_atac.varm[var_key].copy()
+    except:
+        print(f"Could not copy ATAC var_key '{var_key}' from source to target.")
+        pass
+
+for uns_key in adata.uns.keys():
+    try:
+        target_rna.uns[uns_key] = adata.uns[uns_key].copy()
+    except:
+        print(f"Could not copy RNA uns_key '{uns_key}' from source to target.")
+        pass
+for uns_key in adata_atac.uns.keys():
+    try:
+        target_atac.uns[uns_key] = adata_atac.uns[uns_key].copy()
+    except:
+        print(f"Could not copy ATAC uns_key '{uns_key}' from source to target.")
+        pass
+
+target_rna.obsp['spatial_connectivities'] = target_rna.obsp['connectivities']
+target_atac.obsp['spatial_connectivities'] = target_atac.obsp['connectivities']
+
+#%% Initialize model
 
 model = CustomNicheCompass(
     adata,
@@ -563,15 +608,15 @@ with mlflow.start_run(run_name=current_timestamp):
                 lambda_multimodal_contrastive_loss=100.0,
                 multimodal_contrastive_anneal=False,
                 verbose=False,
-                mlflow_experiment_id=mlflow_experiment_id)
+                mlflow_experiment_id=mlflow_experiment_id
+            )
 
 
-#%% Compute latent neighbor graph
+#%% Compute latent neighbor graph & UMAP embedding
 sc.pp.neighbors(model.adata,
                 use_rep=latent_key,
                 key_added=latent_key)
 
-#%% Compute UMAP embedding
 sc.tl.umap(model.adata,
            neighbors_key=latent_key)
 
@@ -600,7 +645,7 @@ os.makedirs(figure_folder_path, exist_ok=True)
 
 #%% Load trained model
 
-model = CustomNicheCompass.load(
+model_source = CustomNicheCompass.load(
     dir_path=model_folder_path,
     adata=None,
     adata_file_name="adata.h5ad",
@@ -609,8 +654,16 @@ model = CustomNicheCompass.load(
     gp_names_key=gp_names_key
 )
 
-samples = model.adata.obs[sample_key].unique().tolist()
+source_samples = model_source.adata.obs[sample_key].unique().tolist()
 
+model_target = CustomNicheCompass.load(
+    dir_path=model_folder_path,
+    adata=target_rna,
+    adata_atac=target_atac,
+    gp_names_key=gp_names_key
+)
+
+target_samples = model_target.adata.obs["PCR_sample_name"].unique().tolist()
 
 #%% 4.1 Visualize NicheCompass Latent GP Space
 

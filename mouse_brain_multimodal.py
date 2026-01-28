@@ -46,7 +46,6 @@ from matplotlib import gridspec
 from sklearn.preprocessing import MinMaxScaler
 import mlflow
 
-from nichecompass.models import NicheCompass
 from nichecompass.utils import (add_gps_from_gp_dict_to_adata,
                                 add_multimodal_mask_to_adata,
                                 create_new_color_dict,
@@ -62,7 +61,7 @@ from nichecompass.utils import (add_gps_from_gp_dict_to_adata,
                                 generate_multimodal_mapping_dict,
                                 get_unique_genes_from_gp_dict)
 
-#%% Import custom NicheCompass class
+#%% Import custom NicheCompass and DataAligner classes
 
 import sys
 
@@ -70,6 +69,7 @@ import sys
 BAKLAVA_ROOT = "/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA"
 sys.path.append(str(BAKLAVA_ROOT))
 from nichecompass_utils import CustomNicheCompass
+from data_aligner import DataAligner
 
 #%% 1.2 Define Parameters
 

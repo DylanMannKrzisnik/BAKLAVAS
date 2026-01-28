@@ -645,7 +645,7 @@ os.makedirs(figure_folder_path, exist_ok=True)
 
 #%% Load trained model
 
-model_source = CustomNicheCompass.load(
+source_model = CustomNicheCompass.load(
     dir_path=model_folder_path,
     adata=None,
     adata_file_name="adata.h5ad",
@@ -654,23 +654,23 @@ model_source = CustomNicheCompass.load(
     gp_names_key=gp_names_key
 )
 
-source_samples = model_source.adata.obs[sample_key].unique().tolist()
+source_samples = source_model.adata.obs[sample_key].unique().tolist()
 
-model_target = CustomNicheCompass.load(
+target_model = CustomNicheCompass.load(
     dir_path=model_folder_path,
     adata=target_rna,
     adata_atac=target_atac,
     gp_names_key=gp_names_key
 )
 
-target_samples = model_target.adata.obs["PCR_sample_name"].unique().tolist()
+target_samples = target_model.adata.obs["PCR_sample_name"].unique().tolist()
 
 #%% 4.1 Visualize NicheCompass Latent GP Space
 
 # Let's look at the preservation of cell type annotations in the latent GP space. Note that the goal of NicheCompass is not a separation of cell types but rather to identify spatially consistent cell niches.
 
 cell_type_colors = create_new_color_dict(
-    adata=model.adata,
+    adata=source_model.adata,
     skip_default_colors=50,
     cat_key=cell_type_key)
 
@@ -688,22 +688,22 @@ spec1 = gridspec.GridSpec(ncols=1,
                           nrows=2,
                           width_ratios=[1],
                           height_ratios=[3, 2])
-spec2 = gridspec.GridSpec(ncols=len(samples),
+spec2 = gridspec.GridSpec(ncols=len(source_samples),
                           nrows=2,
-                          width_ratios=[1] * len(samples),
+                          width_ratios=[1] * len(source_samples),
                           height_ratios=[3, 2])
 axs = []
 axs.append(fig.add_subplot(spec1[0]))
-sc.pl.umap(adata=model.adata,
+sc.pl.umap(adata=source_model.adata,
            color=[cell_type_key],
            groups=groups,palette=cell_type_colors,
            title=f"Cell Types in Latent Space",
            ax=axs[0],
            size=40,
            show=False)
-for idx, sample in enumerate(samples):
-    axs.append(fig.add_subplot(spec2[len(samples) + idx]))
-    sc.pl.spatial(adata=model.adata[model.adata.obs[sample_key] == sample],
+for idx, sample in enumerate(source_samples):
+    axs.append(fig.add_subplot(spec2[len(source_samples) + idx]))
+    sc.pl.spatial(adata=source_model.adata[source_model.adata.obs[sample_key] == sample],
                   color=[cell_type_key],
                   groups=groups,
                   palette=cell_type_colors,
@@ -739,14 +739,14 @@ latent_leiden_resolution = 0.5
 
 
 # Compute latent Leiden clustering
-sc.tl.leiden(adata=model.adata,
+sc.tl.leiden(adata=source_model.adata,
              resolution=latent_leiden_resolution,
              key_added=latent_cluster_key,
              neighbors_key=latent_key)
 
 
 latent_cluster_colors = create_new_color_dict(
-    adata=model.adata,
+    adata=source_model.adata,
     cat_key=latent_cluster_key)
 
 
@@ -767,13 +767,13 @@ spec1 = gridspec.GridSpec(ncols=1,
                           nrows=2,
                           width_ratios=[1],
                           height_ratios=[3, 2])
-spec2 = gridspec.GridSpec(ncols=len(samples),
+spec2 = gridspec.GridSpec(ncols=len(source_samples),
                           nrows=2,
-                          width_ratios=[1] * len(samples),
+                          width_ratios=[1] * len(source_samples),
                           height_ratios=[3, 2])
 axs = []
 axs.append(fig.add_subplot(spec1[0]))
-sc.pl.umap(adata=model.adata,
+sc.pl.umap(adata=source_model.adata,
            color=[latent_cluster_key],
            groups=groups,
            palette=latent_cluster_colors,
@@ -781,9 +781,9 @@ sc.pl.umap(adata=model.adata,
            ax=axs[0],
            size=40,
            show=False)
-for idx, sample in enumerate(samples):
-    axs.append(fig.add_subplot(spec2[len(samples) + idx]))
-    sc.pl.spatial(adata=model.adata[model.adata.obs[sample_key] == sample],
+for idx, sample in enumerate(source_samples):
+    axs.append(fig.add_subplot(spec2[len(source_samples) + idx]))
+    sc.pl.spatial(adata=source_model.adata[source_model.adata.obs[sample_key] == sample],
                   color=[latent_cluster_key],
                   groups=groups,
                   palette=latent_cluster_colors,
@@ -811,20 +811,14 @@ if save_fig:
 plt.show()
 
 
-#%% 4.3 Characterize Niches
-
-# Now we will characterize the identified cell niches.
-
-#%% 4.3.1 Niche Composition
-
-# We can analyze the niche composition in terms of cell type labels.
+#%% 4.3 Characterize niche composition
 
 save_fig = True
 file_path = f"{figure_folder_path}/" \
             f"res_{latent_leiden_resolution}_" \
             f"niche_composition.svg"
 
-df_counts = (model.adata.obs.groupby([latent_cluster_key, cell_type_key])
+df_counts = (source_model.adata.obs.groupby([latent_cluster_key, cell_type_key])
              .size().unstack())
 df_counts.plot(kind="bar", stacked=True, figsize=(10,10))
 legend = plt.legend(bbox_to_anchor=(1, 1), loc="upper left", prop={'size': 10})
@@ -847,13 +841,13 @@ if save_fig:
 # We choose an absolute log bayes factor threshold of 2.3 to determine strongly enriched GPs (see https://en.wikipedia.org/wiki/Bayes_factor).
 
 # Check number of active GPs
-active_gps = model.get_active_gps()
+active_gps = source_model.get_active_gps()
 print(f"Number of total gene programs: {len(model.adata.uns[gp_names_key])}.")
 print(f"Number of active gene programs: {len(active_gps)}.")
 
 
 # Display example active GPs
-gp_summary_df = model.get_gp_summary()
+gp_summary_df = source_model.get_gp_summary()
 gp_summary_df[gp_summary_df["gp_active"] == True].head()
 
 
@@ -870,17 +864,17 @@ file_path = f"{figure_folder_path}/" \
              "_niches_enriched_gps_heatmap.svg"
 
 # Run differential gp testing
-enriched_gps = model.run_differential_gp_tests(
+enriched_gps = source_model.run_differential_gp_tests(
     cat_key=latent_cluster_key,
     selected_cats=selected_cats,
     comparison_cats=comparison_cats,
     log_bayes_factor_thresh=log_bayes_factor_thresh)
 
 # Results are stored in a df in the adata object
-model.adata.uns[differential_gp_test_results_key]
+source_model.adata.uns[differential_gp_test_results_key]
 
 #%% Visualize GP activities of enriched GPs across niches
-df = model.adata.obs[[latent_cluster_key] + enriched_gps].groupby(latent_cluster_key).mean()
+df = source_model.adata.obs[[latent_cluster_key] + enriched_gps].groupby(latent_cluster_key).mean()
 
 scaler = MinMaxScaler()
 normalized_columns = scaler.fit_transform(df)
@@ -945,14 +939,14 @@ save_figs = True
 
 generate_enriched_gp_info_plots(
     plot_label=plot_label,
-    model=model,
+    model=source_model,
     sample_key=sample_key,
     differential_gp_test_results_key=differential_gp_test_results_key,
     cat_key=latent_cluster_key,
     cat_palette=latent_cluster_colors,
     n_top_enriched_gp_start_idx=0,
     n_top_enriched_gp_end_idx=10,
-    feature_spaces=samples, # ["latent"]
+    feature_spaces=source_samples, # ["latent"]
     n_top_genes_per_gp=3,
     n_top_peaks_per_gp=3,
     save_figs=save_figs,
@@ -968,12 +962,12 @@ gp_name = "Cldn11_ligand_receptor_target_gene_GP"
 
 network_df = compute_communication_gp_network(
     gp_list=[gp_name],
-    model=model,
+    model=source_model,
     group_key=latent_cluster_key,
     n_neighbors=n_neighbors)
 
 visualize_communication_gp_network(
-    adata=model.adata,
+    adata=source_model.adata,
     network_df=network_df,
     figsize=(9, 8),
     cat_colors=latent_cluster_colors,
@@ -988,19 +982,3 @@ visualize_communication_gp_network(
 # Cells below are not part of Tutorial
 
 #%%
-from sklearn.metrics.pairwise import cosine_similarity
-
-Z = model.get_latent_representation(only_active_gps=True)
-print(f"Shape of Z: {Z.shape}")
-
-Z_norms = np.linalg.norm(Z, axis=1)
-print("Mean Z norm: ", np.mean(Z_norms))
-
-cosine_similarity_matrix = cosine_similarity(Z, Z)
-
-fig, ax = plt.subplots(figsize=(10, 10))
-im = ax.matshow(cosine_similarity_matrix, cmap='coolwarm', vmin=-1, vmax=1)
-plt.colorbar(im, ax=ax)
-plt.show()
-
-# %%

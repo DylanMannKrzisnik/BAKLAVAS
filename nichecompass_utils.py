@@ -285,10 +285,10 @@ class CustomNicheCompass(NicheCompass):
         self.n_output_genes_ = adata.n_vars
         if adata_atac is not None:
             self.modalities_ = ["rna", "atac"]
-            if not np.all(adata.obs.index == adata_atac.obs.index):
-                raise ValueError("Please make sure that 'adata' and "
-                                 "'adata_atac' contain the same observations in"
-                                 " the same order.")
+            #if not np.all(adata.obs.index == adata_atac.obs.index):
+            #    raise ValueError("Please make sure that 'adata' and "
+            #                     "'adata_atac' contain the same observations in"
+            #                     " the same order.")
             # Peaks are concatenated to genes in input
             self.n_input_ += adata_atac.n_vars
             self.n_output_peaks_ = adata_atac.n_vars

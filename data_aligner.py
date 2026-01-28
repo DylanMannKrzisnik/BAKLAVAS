@@ -483,7 +483,7 @@ from scipy.sparse import csr_matrix
 
 target_data = data_aligner.target_data
 
-# 2. Create a dummy AnnData with 0 observations and the target genes
+## RNA formatting
 missing_genes = set(source_rna.var_names) - set(target_data['rna'].var_names)
 
 dummy = ad.AnnData(
@@ -497,21 +497,51 @@ target_rna_with_missing = target_rna_with_missing[:, var_sort_idxs]
 assert target_rna_with_missing.var_names.equals(source_rna.var_names), "Target RNA data must have the same gene names"
 
 # ensure GP names exist and reflect the model’s GP count/order
-gp_names = source_rna.uns["nichecompass_active_gp_names"]
-n_gps = len(gp_names)
-target_rna_with_missing.varm["nichecompass_gp_targets"] = np.ones((target_rna_with_missing.n_vars, n_gps), dtype=bool)
-target_rna_with_missing.varm["nichecompass_gp_sources"] = np.ones((target_rna_with_missing.n_vars, n_gps), dtype=bool)
+target_rna_with_missing.varm["nichecompass_gp_targets"] = source_rna.varm["nichecompass_gp_targets"].copy()
+target_rna_with_missing.varm["nichecompass_gp_sources"] = source_rna.varm["nichecompass_gp_sources"].copy()
 
 target_rna_with_missing.varm['nichecompass_gene_peaks'] = source_rna.varm['nichecompass_gene_peaks'].copy()
 target_rna_with_missing.uns['nichecompass_genes_idx'] = source_rna.uns['nichecompass_genes_idx'].copy()
 target_rna_with_missing.uns['nichecompass_target_genes_idx'] = source_rna.uns['nichecompass_target_genes_idx'].copy()
 target_rna_with_missing.uns['nichecompass_source_genes_idx'] = source_rna.uns['nichecompass_source_genes_idx'].copy()
+target_rna_with_missing.uns['nichecompass_gp_names'] = source_rna.uns['nichecompass_gp_names'].copy()
+
+target_rna_with_missing.obsp['spatial_connectivities'] = target_rna.obsp['connectivities'].copy()
+
+## ATAC formatting
+#missing_peaks = set(data_aligner.source_data['atac'].var_names) - set(source_atac.var_names)
+missing_peaks = set(model.adata_atac.var_names)
+
+dummy = ad.AnnData(
+    X=csr_matrix((model.adata_atac.n_obs, len(missing_peaks))), 
+    var=pd.DataFrame(index=list(missing_peaks)),
+    obs=pd.DataFrame(index=data_aligner.source_data['atac'].obs_names)
+)
+
+#target_atac_with_missing = ad.concat([target_data['atac'], dummy], join="outer")
+#var_sort_idxs = target_atac_with_missing.var_names.get_indexer(data_aligner.source_data['atac'].var_names)
+#target_atac_with_missing = target_atac_with_missing[:, var_sort_idxs]
+#assert target_atac_with_missing.var_names.equals(data_aligner.source_data['atac'].var_names), "Target ATAC data must have the same peak names"
+
+## Placeholder solution since can't use peak name mapper here
+target_atac_with_missing = dummy.copy()
+
+target_atac_with_missing.varm['nichecompass_ca_targets'] = model.adata_atac.varm['nichecompass_ca_targets'].copy()
+target_atac_with_missing.varm['nichecompass_ca_sources'] = model.adata_atac.varm['nichecompass_ca_sources'].copy()
+
+target_atac_with_missing.uns['nichecompass_peaks_idx'] = model.adata_atac.uns['nichecompass_peaks_idx'].copy()
+target_atac_with_missing.uns['nichecompass_target_peaks_idx'] = model.adata_atac.uns['nichecompass_target_peaks_idx'].copy()
+target_atac_with_missing.uns['nichecompass_source_peaks_idx'] = model.adata_atac.uns['nichecompass_source_peaks_idx'].copy()
+#target_atac_with_missing.uns['nichecompass_gp_names'] = source_atac.uns['nichecompass_gp_names'].copy()
+
+#target_atac_with_missing.obsp['spatial_connectivities'] = source_atac.obsp['connectivities'].copy()
 
 '''
 model = CustomNicheCompass.load(
     dir_path=model_folder_path,
     adata=target_rna_with_missing,
-    gp_names_key=gp_names_key
+    adata_atac=target_atac_with_missing,
+    gp_names_key=gp_names_key,
 )
 '''
 model = CustomNicheCompass.load(
@@ -523,9 +553,9 @@ model = CustomNicheCompass.load(
 
 z, _ = model.get_latent_representation(
     adata=model.adata,
-    counts_key=counts_key,
-    adj_key=adj_key,
-    cat_covariates_keys=cat_covariates_keys,
+    counts_key="counts",
+    adj_key="spatial_connectivities",
+    cat_covariates_keys=None,
     only_active_gps=True,
     return_mu_std=True,
     node_batch_size=model.node_batch_size_,

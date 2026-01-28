@@ -203,6 +203,112 @@ class DataAligner:
         self.source_data.obs = source_obs
         self.target_data.obs = target_obs
 
+    @staticmethod
+    def copy_annotations_to_target(
+        source_rna: ad.AnnData,
+        source_atac: ad.AnnData,
+        target_rna: ad.AnnData,
+        target_atac: ad.AnnData
+    ):
+        """
+        Copy varm and uns annotations from source to target data.
+        
+        This static method copies gene program masks, indices, and other annotations
+        from the aligned source data to the aligned target data. This is necessary
+        because the target data needs the same annotations (e.g., GP masks, gene/peak
+        indices) as the source data for model compatibility.
+        
+        This is a static method because it's often called after additional data
+        manipulations (e.g., rebuilding GP masks) that happen outside of DataAligner.
+        
+        Parameters
+        ----------
+        source_rna : AnnData
+            Source RNA AnnData object with annotations to copy
+        source_atac : AnnData
+            Source ATAC AnnData object with annotations to copy
+        target_rna : AnnData
+            Target RNA AnnData object (will be modified in place)
+        target_atac : AnnData
+            Target ATAC AnnData object (will be modified in place)
+            
+        Returns
+        -------
+        target_rna : AnnData
+            Modified target RNA object (same object, mutated in place)
+        target_atac : AnnData
+            Modified target ATAC object (same object, mutated in place)
+        """
+        # Copy varm (variable metadata) from source to target
+        for var_key in source_rna.varm.keys():
+            try:
+                target_rna.varm[var_key] = source_rna.varm[var_key].copy()
+            except Exception as e:
+                print(f"Could not copy RNA var_key '{var_key}' from source to target: {e}")
+        
+        for var_key in source_atac.varm.keys():
+            try:
+                target_atac.varm[var_key] = source_atac.varm[var_key].copy()
+            except Exception as e:
+                print(f"Could not copy ATAC var_key '{var_key}' from source to target: {e}")
+
+        # Copy uns (unstructured metadata) from source to target
+        for uns_key in source_rna.uns.keys():
+            try:
+                target_rna.uns[uns_key] = source_rna.uns[uns_key].copy()
+            except Exception as e:
+                print(f"Could not copy RNA uns_key '{uns_key}' from source to target: {e}")
+        
+        for uns_key in source_atac.uns.keys():
+            try:
+                target_atac.uns[uns_key] = source_atac.uns[uns_key].copy()
+            except Exception as e:
+                print(f"Could not copy ATAC uns_key '{uns_key}' from source to target: {e}")
+        
+        return target_rna, target_atac
+
+    @staticmethod
+    def set_target_spatial_connectivities(
+        target_rna: ad.AnnData,
+        target_atac: ad.AnnData
+    ):
+        """
+        Set spatial_connectivities in obsp from connectivities for target data.
+        
+        This ensures that the target data has the spatial connectivity matrix
+        in the expected key ('spatial_connectivities') that NicheCompass expects.
+        
+        This is a static method because it's often called after additional data
+        manipulations that happen outside of DataAligner.
+        
+        Parameters
+        ----------
+        target_rna : AnnData
+            Target RNA AnnData object (will be modified in place)
+        target_atac : AnnData
+            Target ATAC AnnData object (will be modified in place)
+            
+        Returns
+        -------
+        target_rna : AnnData
+            Modified target RNA object (same object, mutated in place)
+        target_atac : AnnData
+            Modified target ATAC object (same object, mutated in place)
+        """
+        if 'connectivities' in target_rna.obsp:
+            target_rna.obsp['spatial_connectivities'] = target_rna.obsp['connectivities']
+        else:
+            print("Warning: 'connectivities' not found in target_rna.obsp. "
+                  "Spatial connectivities not set for RNA data.")
+        
+        if 'connectivities' in target_atac.obsp:
+            target_atac.obsp['spatial_connectivities'] = target_atac.obsp['connectivities']
+        else:
+            print("Warning: 'connectivities' not found in target_atac.obsp. "
+                  "Spatial connectivities not set for ATAC data.")
+        
+        return target_rna, target_atac
+
     def do_liftOver(self):
         print(f"Lifting over source data to target assembly: {self.source_data.obs['assembly'].unique()[0]} to {self.target_data.obs['assembly'].unique()[0]}")
 

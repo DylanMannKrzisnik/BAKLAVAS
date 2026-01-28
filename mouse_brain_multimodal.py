@@ -414,6 +414,7 @@ sc.pl.spatial(adata,
 
 import mygene as mg
 import anndata as ad
+from anndata import AnnData
 
 model_folder_path = "/home/mcb/users/dmannk/BAKLAVA_base/data/Spatial_ATAC_RNA/mouse/artifacts/multimodal/21012026_181240/model"
 gp_names_key = "nichecompass_gp_names"
@@ -531,36 +532,18 @@ if filter_peaks_based_on_genes:
 assert adata.var_names.equals(target_rna.var_names), "RNA data must have the same gene names"
 assert adata_atac.var_names.equals(target_atac.var_names), "ATAC data must have the same peak names"
 
-#%% copy var and uns from source to target
+#%% Copy annotations and set spatial connectivities for target data
 
-for var_key in adata.varm.keys():
-    try:
-        target_rna.varm[var_key] = adata.varm[var_key].copy()
-    except:
-        print(f"Could not copy RNA var_key '{var_key}' from source to target.")
-        pass
-for var_key in adata_atac.varm.keys():
-    try:
-        target_atac.varm[var_key] = adata_atac.varm[var_key].copy()
-    except:
-        print(f"Could not copy ATAC var_key '{var_key}' from source to target.")
-        pass
-
-for uns_key in adata.uns.keys():
-    try:
-        target_rna.uns[uns_key] = adata.uns[uns_key].copy()
-    except:
-        print(f"Could not copy RNA uns_key '{uns_key}' from source to target.")
-        pass
-for uns_key in adata_atac.uns.keys():
-    try:
-        target_atac.uns[uns_key] = adata_atac.uns[uns_key].copy()
-    except:
-        print(f"Could not copy ATAC uns_key '{uns_key}' from source to target.")
-        pass
-
-target_rna.obsp['spatial_connectivities'] = target_rna.obsp['connectivities']
-target_atac.obsp['spatial_connectivities'] = target_atac.obsp['connectivities']
+target_rna, target_atac = DataAligner.copy_annotations_to_target(
+    source_rna=adata,
+    source_atac=adata_atac,
+    target_rna=target_rna,
+    target_atac=target_atac
+)
+target_rna, target_atac = DataAligner.set_target_spatial_connectivities(
+    target_rna=target_rna,
+    target_atac=target_atac
+)
 
 #%% Initialize model
 

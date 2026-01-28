@@ -568,3 +568,20 @@ z, _ = model_target.get_latent_representation(
         node_batch_size=model_target.node_batch_size_,
 )
 
+#%% TMP: plot latent representation with umap
+
+multimodal_obs = pd.concat([
+    model_target.adata.obs.assign(modality="rna"),
+    model_target.adata_atac.obs.assign(modality="atac"),
+], axis=0)
+
+latent_adata = ad.AnnData(
+    X=z,
+    obs=multimodal_obs,
+)
+
+import scanpy as sc
+sc.pp.pca(latent_adata, n_comps=50)
+sc.pp.neighbors(latent_adata, use_rep='X_pca', n_neighbors=100)
+sc.tl.umap(latent_adata, min_dist=0.3)
+sc.pl.umap(latent_adata, color=['modality'], wspace=0.2)

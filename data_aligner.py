@@ -11,53 +11,6 @@ import os
 import subprocess
 from nichecompass_utils import CustomNicheCompass
 
-'''
-import mygene as mg
-
-model_folder_path = "/home/mcb/users/dmannk/BAKLAVA_base/data/Spatial_ATAC_RNA/mouse/artifacts/multimodal/21012026_181240/model"
-gp_names_key = "nichecompass_gp_names"
-
-model = CustomNicheCompass.load(
-    dir_path=model_folder_path,
-    adata=None,
-    adata_file_name="adata.h5ad",
-    adata_atac=None,
-    adata_atac_file_name="adata_atac.h5ad",
-    gp_names_key=gp_names_key
-)
-
-source_rna = model.adata
-source_atac = model.adata_atac
-source_data = MuData({"rna": source_rna, "atac": source_atac})
-
-target_rna = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/RNA/mouse_rna_processed.h5ad")
-target_atac = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/ATAC/mouse_atac_processed.h5ad")
-
-mginfo = mg.MyGeneInfo()
-results = mginfo.querymany(
-    target_rna.var["gene_id_no_version"].tolist(),
-    scopes="ensembl.gene",
-    species="mouse",
-    fields="symbol",
-    as_dataframe=True,
-)
-results = results.reset_index().drop_duplicates(subset='query') # remove duplicate genes
-assert results.groupby('query')['symbol'].nunique().le(1).all(), "Multiple symbols still found for some genes"
-
-target_rna.var = target_rna.var.merge(results, left_on="gene_id_no_version", right_on="query", how="left")
-target_rna.var.loc[target_rna.var['symbol'].isna(), 'symbol'] = target_rna.var.loc[target_rna.var['symbol'].isna(), 'query']
-target_rna.var.set_index("symbol", inplace=True)
-
-## remove duplicate genes (again)
-target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep='first')]
-assert target_rna.var_names.is_unique, "Target RNA data must have unique gene names"
-
-target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].str.split('-').tolist()
-
-target_data = MuData({"rna": target_rna, "atac": target_atac})
-
-'''
-
 class DataAligner:
     def __init__(
         self,
@@ -465,6 +418,51 @@ class DataAligner:
             self.source_data["atac"] = source_atac
 
 #%%
+import mygene as mg
+
+model_folder_path = "/home/mcb/users/dmannk/BAKLAVA_base/data/Spatial_ATAC_RNA/mouse/artifacts/multimodal/21012026_181240/model"
+gp_names_key = "nichecompass_gp_names"
+
+model = CustomNicheCompass.load(
+    dir_path=model_folder_path,
+    adata=None,
+    adata_file_name="adata.h5ad",
+    adata_atac=None,
+    adata_atac_file_name="adata_atac.h5ad",
+    gp_names_key=gp_names_key
+)
+
+source_rna = model.adata
+source_atac = model.adata_atac
+source_data = MuData({"rna": source_rna, "atac": source_atac})
+
+target_rna = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/RNA/mouse_rna_processed.h5ad")
+target_atac = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/ATAC/mouse_atac_processed.h5ad")
+
+mginfo = mg.MyGeneInfo()
+results = mginfo.querymany(
+    target_rna.var["gene_id_no_version"].tolist(),
+    scopes="ensembl.gene",
+    species="mouse",
+    fields="symbol",
+    as_dataframe=True,
+)
+results = results.reset_index().drop_duplicates(subset='query') # remove duplicate genes
+assert results.groupby('query')['symbol'].nunique().le(1).all(), "Multiple symbols still found for some genes"
+
+target_rna.var = target_rna.var.merge(results, left_on="gene_id_no_version", right_on="query", how="left")
+target_rna.var.loc[target_rna.var['symbol'].isna(), 'symbol'] = target_rna.var.loc[target_rna.var['symbol'].isna(), 'query']
+target_rna.var.set_index("symbol", inplace=True)
+
+## remove duplicate genes (again)
+target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep='first')]
+assert target_rna.var_names.is_unique, "Target RNA data must have unique gene names"
+
+target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].str.split('-').tolist()
+
+target_data = MuData({"rna": target_rna, "atac": target_atac})
+
+#%%
 data_aligner = DataAligner(
     source_data,
     target_data,
@@ -536,7 +534,10 @@ target_atac_with_missing.uns['nichecompass_source_peaks_idx'] = model.adata_atac
 
 #target_atac_with_missing.obsp['spatial_connectivities'] = source_atac.obsp['connectivities'].copy()
 
-'''
+#%%
+
+target_rna_with_missing = target_rna_with_missing[::100].copy()
+
 model = CustomNicheCompass.load(
     dir_path=model_folder_path,
     adata=target_rna_with_missing,
@@ -550,7 +551,7 @@ model = CustomNicheCompass.load(
     adata_atac=data_aligner.target_data['atac'],
     gp_names_key=gp_names_key
 )
-
+'''
 z, _ = model.get_latent_representation(
     adata=model.adata,
     counts_key="counts",

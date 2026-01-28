@@ -637,6 +637,7 @@ class CustomNicheCompass(NicheCompass):
             node_batch_size: int=64,
             dtype: type=np.float64,
             separate_modalities: bool=False,
+            return_clip_embeddings: bool=False,
             ) -> np.ndarray:
         """
         Get the latent representation / gene program scores from a trained model.
@@ -647,6 +648,13 @@ class CustomNicheCompass(NicheCompass):
             If True, returns separate RNA and ATAC latents instead of combined.
             When True and return_mu_std=True, returns (mu_rna, std_rna, mu_atac, std_atac).
             When True and return_mu_std=False, returns (z_rna, z_atac).
+        return_clip_embeddings : bool
+            If True (and `separate_modalities=True` and `return_mu_std=True`),
+            also returns the outputs of forwarding the RNA/ATAC means through
+            `self.model.multimodal_layer`. These are returned as
+            `(clip_embeddings_rna, clip_embeddings_atac)`.
+            Note: `clip_embeddings` are only valid when
+            `separate_modalities=True` and `return_mu_std=True`.
         """
         self._check_if_trained(warn=False)
 
@@ -687,8 +695,21 @@ class CustomNicheCompass(NicheCompass):
             n_gps = (self.n_prior_gp_ + self.n_addon_gp_ )
 
         n_obs = node_masked_data.num_nodes
+
+        if return_clip_embeddings and (not separate_modalities):
+            raise ValueError(
+                "return_clip_embeddings=True requires separate_modalities=True "
+                "because clip_embeddings are modality-specific.")
+        if return_clip_embeddings and (not return_mu_std):
+            raise ValueError(
+                "return_clip_embeddings=True requires return_mu_std=True "
+                "because clip_embeddings are computed from modality means (mu).")
         
         if separate_modalities:
+            if return_clip_embeddings:
+                clip_dim = int(getattr(self.model.multimodal_layer, "out_features"))
+                clip_embeddings_rna = np.empty(shape=(n_obs, clip_dim), dtype=dtype)
+                clip_embeddings_atac = np.empty(shape=(n_obs, clip_dim), dtype=dtype)
             if return_mu_std:
                 mu_rna = np.empty(shape=(n_obs, n_gps), dtype=dtype)
                 std_rna = np.empty(shape=(n_obs, n_gps), dtype=dtype)
@@ -718,12 +739,26 @@ class CustomNicheCompass(NicheCompass):
             
             if separate_modalities:
                 if return_mu_std:
-                    mu_rna_batch, std_rna_batch, mu_atac_batch, std_atac_batch = (
-                        self.model.get_latent_representation(
+                    if return_clip_embeddings:
+                        (mu_rna_batch,
+                         std_rna_batch,
+                         mu_atac_batch,
+                         std_atac_batch,
+                         clip_rna_batch,
+                         clip_atac_batch) = self.model.get_latent_representation(
                             node_batch=node_batch,
                             only_active_gps=only_active_gps,
                             return_mu_std=True,
-                            separate_modalities=True))
+                            separate_modalities=True,
+                            return_clip_embeddings=True)
+                    else:
+                        mu_rna_batch, std_rna_batch, mu_atac_batch, std_atac_batch = (
+                            self.model.get_latent_representation(
+                                node_batch=node_batch,
+                                only_active_gps=only_active_gps,
+                                return_mu_std=True,
+                                separate_modalities=True,
+                                return_clip_embeddings=False))
                     mu_rna[n_obs_before_batch:n_obs_after_batch, :] = (
                         mu_rna_batch.detach().cpu().numpy())
                     std_rna[n_obs_before_batch:n_obs_after_batch, :] = (
@@ -732,12 +767,18 @@ class CustomNicheCompass(NicheCompass):
                         mu_atac_batch.detach().cpu().numpy())
                     std_atac[n_obs_before_batch:n_obs_after_batch, :] = (
                         std_atac_batch.detach().cpu().numpy())
+                    if return_clip_embeddings:
+                        clip_embeddings_rna[n_obs_before_batch:n_obs_after_batch, :] = (
+                            clip_rna_batch.detach().cpu().numpy())
+                        clip_embeddings_atac[n_obs_before_batch:n_obs_after_batch, :] = (
+                            clip_atac_batch.detach().cpu().numpy())
                 else:
                     z_rna_batch, z_atac_batch = self.model.get_latent_representation(
                         node_batch=node_batch,
                         only_active_gps=only_active_gps,
                         return_mu_std=False,
-                        separate_modalities=True)
+                        separate_modalities=True,
+                        return_clip_embeddings=False)
                     z_rna[n_obs_before_batch:n_obs_after_batch, :] = (
                         z_rna_batch.detach().cpu().numpy())
                     z_atac[n_obs_before_batch:n_obs_after_batch, :] = (
@@ -764,6 +805,13 @@ class CustomNicheCompass(NicheCompass):
         
         if separate_modalities:
             if return_mu_std:
+                if return_clip_embeddings:
+                    return (mu_rna,
+                            std_rna,
+                            mu_atac,
+                            std_atac,
+                            clip_embeddings_rna,
+                            clip_embeddings_atac)
                 return mu_rna, std_rna, mu_atac, std_atac
             else:
                 return z_rna, z_atac
@@ -1787,7 +1835,8 @@ class CustomVGPGAE(VGPGAE):
             node_batch: Data,
             only_active_gps: bool=True,
             return_mu_std: bool=False,
-            separate_modalities: bool=False
+            separate_modalities: bool=False,
+            return_clip_embeddings: bool=False,
             ):
         """
         Encode RNA + ATAC separately and combine latents via Gaussian product.
@@ -1804,7 +1853,21 @@ class CustomVGPGAE(VGPGAE):
             If True, returns separate RNA and ATAC latents instead of combined.
             When True and return_mu_std=True, returns (mu_rna, std_rna, mu_atac, std_atac).
             When True and return_mu_std=False, returns (z_rna, z_atac).
+        return_clip_embeddings : bool
+            If True (and `separate_modalities=True` and `return_mu_std=True`),
+            also returns the outputs of forwarding the RNA/ATAC means through
+            `self.multimodal_layer` as `(clip_embeddings_rna, clip_embeddings_atac)`.
+            Note: `clip_embeddings` are only valid when
+            `separate_modalities=True` and `return_mu_std=True`.
         """
+        if return_clip_embeddings and (not separate_modalities):
+            raise ValueError(
+                "return_clip_embeddings=True requires separate_modalities=True "
+                "because clip_embeddings are modality-specific.")
+        if return_clip_embeddings and (not return_mu_std):
+            raise ValueError(
+                "return_clip_embeddings=True requires return_mu_std=True "
+                "because clip_embeddings are computed from modality means (mu).")
         if self.encoder_atac is None:
             if separate_modalities:
                 raise ValueError(
@@ -1852,17 +1915,45 @@ class CustomVGPGAE(VGPGAE):
         mu_atac = encoder_outputs_atac[0][:node_batch.batch_size, :]
         logstd_atac = encoder_outputs_atac[1][:node_batch.batch_size, :]
 
+        # Keep full-sized modality means for CLIP projection (multimodal_layer
+        # expects the full latent dimensionality: n_prior_gp + n_addon_gp).
+        mu_rna_full = mu_rna
+        mu_atac_full = mu_atac
+
         if only_active_gps:
             active_gp_mask = self.get_active_gp_mask()
             mu_rna = mu_rna[:, active_gp_mask]
             logstd_rna = logstd_rna[:, active_gp_mask]
             mu_atac = mu_atac[:, active_gp_mask]
             logstd_atac = logstd_atac[:, active_gp_mask]
+        else:
+            active_gp_mask = None
 
         if separate_modalities:
+            if return_clip_embeddings:
+                if active_gp_mask is None:
+                    clip_embeddings_rna = self.multimodal_layer(mu_rna_full)
+                    clip_embeddings_atac = self.multimodal_layer(mu_atac_full)
+                else:
+                    # Project only-active GPs by masking the Linear weights.
+                    # This avoids a dimension mismatch while ensuring inactive
+                    # GPs do not contribute to the clip_embeddings.
+                    w = self.multimodal_layer.weight  # (out, in_full)
+                    b = self.multimodal_layer.bias
+                    clip_embeddings_rna = F.linear(
+                        mu_rna, w[:, active_gp_mask], b)
+                    clip_embeddings_atac = F.linear(
+                        mu_atac, w[:, active_gp_mask], b)
             if return_mu_std:
                 std_rna = torch.exp(logstd_rna)
                 std_atac = torch.exp(logstd_atac)
+                if return_clip_embeddings:
+                    return (mu_rna,
+                            std_rna,
+                            mu_atac,
+                            std_atac,
+                            clip_embeddings_rna,
+                            clip_embeddings_atac)
                 return mu_rna, std_rna, mu_atac, std_atac
             else:
                 z_rna = self.reparameterize(mu_rna, logstd_rna)

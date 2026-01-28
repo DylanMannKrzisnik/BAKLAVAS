@@ -464,7 +464,7 @@ target_data = MuData({"rna": target_rna, "atac": target_atac})
 
 #%% plot trained model's latents based on training source data
 
-z_source_rna, _, z_source_atac, _ = model.get_latent_representation(
+z_source_rna, _, z_source_atac, _, clip_embeddings_rna, clip_embeddings_atac = model.get_latent_representation(
     adata=model.adata,
     adata_atac=model.adata_atac,
     paired_data=True,
@@ -474,11 +474,23 @@ z_source_rna, _, z_source_atac, _ = model.get_latent_representation(
     only_active_gps=True,
     return_mu_std=True,
     separate_modalities=True,
+    return_clip_embeddings=True,
     node_batch_size=model.node_batch_size_,
 )
 
-latent_adata = ad.AnnData(
-    X=np.concatenate([z_source_rna, z_source_atac], axis=0),
+clip_embeddings_rna_magnitude = np.linalg.norm(clip_embeddings_rna, axis=1)
+clip_embeddings_atac_magnitude = np.linalg.norm(clip_embeddings_atac, axis=1)
+print(f'Mean magnitude of clip embeddings - RNA: {np.mean(clip_embeddings_rna_magnitude):.2f}, ATAC: {np.mean(clip_embeddings_atac_magnitude):.2f}')
+
+# Normalize clip embeddings to unit norm
+clip_embeddings_rna = clip_embeddings_rna / np.linalg.norm(clip_embeddings_rna, axis=1, keepdims=True)
+clip_embeddings_atac = clip_embeddings_atac / np.linalg.norm(clip_embeddings_atac, axis=1, keepdims=True)
+assert np.allclose(np.linalg.norm(clip_embeddings_rna, axis=1), 1), "RNA clip embeddings are not unit norm"
+assert np.allclose(np.linalg.norm(clip_embeddings_atac, axis=1), 1), "ATAC clip embeddings are not unit norm"
+
+
+clip_embeddings_adata = ad.AnnData(
+    X=np.concatenate([clip_embeddings_rna, clip_embeddings_atac], axis=0),
     obs=pd.concat([
         model.adata.obs.assign(modality="rna"),
         model.adata_atac.obs.assign(modality="atac"),
@@ -486,10 +498,10 @@ latent_adata = ad.AnnData(
 )
 
 import scanpy as sc
-sc.pp.pca(latent_adata, n_comps=50)
-sc.pp.neighbors(latent_adata, use_rep='X_pca', n_neighbors=100)
-sc.tl.umap(latent_adata, min_dist=0.3)
-sc.pl.umap(latent_adata, color=['modality'], wspace=0.2)
+sc.pp.pca(clip_embeddings_adata, n_comps=50)
+sc.pp.neighbors(clip_embeddings_adata, use_rep='X_pca', n_neighbors=100)
+sc.tl.umap(clip_embeddings_adata, min_dist=0.3)
+sc.pl.umap(clip_embeddings_adata, color=['modality'], wspace=0.2)
 
 #%%
 data_aligner = DataAligner(

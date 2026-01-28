@@ -416,9 +416,6 @@ import mygene as mg
 import anndata as ad
 from anndata import AnnData
 
-model_folder_path = "/home/mcb/users/dmannk/BAKLAVA_base/data/Spatial_ATAC_RNA/mouse/artifacts/multimodal/21012026_181240/model"
-gp_names_key = "nichecompass_gp_names"
-
 target_rna = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/RNA/mouse_rna_processed.h5ad")
 target_atac = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/ATAC/mouse_atac_processed.h5ad")
 
@@ -630,7 +627,7 @@ load_timestamp = current_timestamp # uncomment if you trained the model in this 
 figure_folder_path = f"{outpath}/multimodal/{load_timestamp}/figures"
 model_folder_path = f"{outpath}/multimodal/{load_timestamp}/model"
 
-os.makedirs(figure_folder_path, exist_ok=True)
+os.makedirs(figure_folder_path, exist_ok=True) # model_folder_path already created in previous cell
 
 
 #%% 4. ANALYSIS FUNCTIONS
@@ -1202,7 +1199,12 @@ target_model = CustomNicheCompass.load(
     gp_names_key=gp_names_key
 )
 
-# Compute latent representation for target data (required before neighbors/UMAP)
+target_samples = target_model.adata.obs["PCR_sample_name"].unique().tolist()
+
+#%% Compute latent representation and neighbor graph & UMAP embedding for target data
+
+## Compute latent representation for target data (required before neighbors/UMAP)
+print(f"Computing latent representation for target data (n cells: {target_model.adata.n_obs + target_model.adata_atac.n_obs})...")
 compute_and_store_latent_representation(
     model=target_model,
     latent_key=latent_key,
@@ -1212,20 +1214,13 @@ compute_and_store_latent_representation(
     paired_data=False  # Adjust if RNA and ATAC are not paired
 )
 
-target_samples = target_model.adata.obs["PCR_sample_name"].unique().tolist()
-
-#%% Compute latent neighbor graph & UMAP embedding for target data
-
-# Note: The latent representation was computed above. Now we can compute 
-# neighbors and UMAP embeddings for downstream analysis.
+# Compute neighbor graph and UMAP embedding for target data
 sc.pp.neighbors(target_model.adata,
                 use_rep=latent_key,
                 key_added=latent_key)
 
 sc.tl.umap(target_model.adata,
            neighbors_key=latent_key)
-
-
 
 
 #%% 4.1 Visualize NicheCompass Latent GP Space (Source)

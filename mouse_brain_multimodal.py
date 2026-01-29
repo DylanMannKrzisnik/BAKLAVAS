@@ -540,7 +540,7 @@ target_rna, target_atac = DataAligner.copy_annotations_to_target(
 target_rna, target_atac = DataAligner.set_target_spatial_connectivities(
     target_rna=target_rna,
     target_atac=target_atac,
-    adj_type="identity"
+    adj_type="knn"
 )
 
 #%% Convert non-string columns in var to string representation
@@ -690,6 +690,24 @@ model.save(dir_path=model_folder_path,
 
 
 #%% 4. ANALYSIS FUNCTIONS
+
+def benchmark_clip_embeddings(clip_embeddings_adata):
+    from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
+
+    clip_embeddings_adata.obsm['X'] = clip_embeddings_adata.X
+
+    bm = Benchmarker(
+        clip_embeddings_adata,
+        batch_key="modality",
+        label_key="RNA_clusters",
+        bio_conservation_metrics=BioConservation(),
+        batch_correction_metrics=BatchCorrection(),
+        embedding_obsm_keys=["X", "X_pca"],
+        #pre_integrated_embedding_obsm_key="X_gps",
+        n_jobs=6,
+    )
+    bm.benchmark()
+    bm.plot_results_table(min_max_scale=False)
 
 def compute_and_store_latent_representation(
     model: CustomNicheCompass,
@@ -1268,9 +1286,62 @@ target_model = CustomNicheCompass.load(
 
 target_samples = target_model.adata.obs["PCR_sample_name"].unique().tolist()
 
-#%% Compute latent representation and neighbor graph & UMAP embedding for target data
+#%% Compute neighbor graph and UMAP embedding for target data
 
-## Compute latent representation for target data (required before neighbors/UMAP)
+sc.pp.neighbors(target_model.adata,
+                use_rep=latent_key,
+                key_added=latent_key)
+
+sc.tl.umap(target_model.adata,
+           neighbors_key=latent_key)
+
+#%% Compute latent representation and neighbor graph & UMAP embedding for SOURCE data
+
+z_source_rna, _, z_source_atac, _, clip_embeddings_rna, clip_embeddings_atac = model.get_latent_representation(
+    adata=source_model.adata,
+    adata_atac=source_model.adata_atac,
+    paired_data=True,
+    counts_key="counts",
+    adj_key="spatial_connectivities",
+    cat_covariates_keys=None,
+    only_active_gps=True,
+    return_mu_std=True,
+    separate_modalities=True,
+    return_clip_embeddings=True,
+    node_batch_size=source_model.node_batch_size_,
+)
+
+clip_embeddings_rna_magnitude = np.linalg.norm(clip_embeddings_rna, axis=1)
+clip_embeddings_atac_magnitude = np.linalg.norm(clip_embeddings_atac, axis=1)
+print(f'Mean magnitude of clip embeddings - RNA: {np.mean(clip_embeddings_rna_magnitude):.2f}, ATAC: {np.mean(clip_embeddings_atac_magnitude):.2f}')
+
+# Normalize clip embeddings to unit norm
+clip_embeddings_rna = clip_embeddings_rna / np.linalg.norm(clip_embeddings_rna, axis=1, keepdims=True)
+clip_embeddings_atac = clip_embeddings_atac / np.linalg.norm(clip_embeddings_atac, axis=1, keepdims=True)
+assert np.allclose(np.linalg.norm(clip_embeddings_rna, axis=1), 1), "RNA clip embeddings are not unit norm"
+assert np.allclose(np.linalg.norm(clip_embeddings_atac, axis=1), 1), "ATAC clip embeddings are not unit norm"
+
+
+clip_embeddings_adata = ad.AnnData(
+    X=np.concatenate([clip_embeddings_rna, clip_embeddings_atac], axis=0),
+    obs=pd.concat([
+        source_model.adata.obs.assign(modality="rna"),
+        source_model.adata_atac.obs.assign(modality="atac"),
+    ], axis=0),
+    obsm={'X_gps': np.concatenate([z_source_rna, z_source_atac], axis=0)}
+)
+
+sc.pp.pca(clip_embeddings_adata, n_comps=50)
+sc.pp.neighbors(clip_embeddings_adata, use_rep='X_pca', n_neighbors=100)
+sc.tl.leiden(clip_embeddings_adata, resolution=0.5) # also leiden clustering in identify_niches()
+sc.tl.umap(clip_embeddings_adata, min_dist=0.3)
+sc.pl.umap(clip_embeddings_adata, color=['modality', 'cell_type', 'RNA_clusters', 'ATAC_clusters'], ncols=2, wspace=0.1, size=25)
+sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden', 'RNA_clusters', 'ATAC_clusters'], ncols=2, wspace=0.1, size=25)
+
+sc.tl.embedding_density(clip_embeddings_adata, groupby='modality')
+sc.pl.embedding_density(clip_embeddings_adata, key='umap_density_modality')
+
+#%% Compute latent representation and neighbor graph & UMAP embedding for TARGET data
 print(f"Computing latent representation for target data (n cells: {target_model.adata.n_obs + target_model.adata_atac.n_obs})...")
 '''
 compute_and_store_latent_representation(
@@ -1283,7 +1354,7 @@ compute_and_store_latent_representation(
 )
 '''
 
-_, _, _, _, clip_embeddings_rna, clip_embeddings_atac = \
+mu_target_rna, _, mu_target_atac, _, clip_embeddings_rna, clip_embeddings_atac = \
     target_model.get_latent_representation(
                 adata=target_model.adata,
                 adata_atac=target_model.adata_atac,
@@ -1325,17 +1396,25 @@ clip_atac = clip_embeddings_atac[atac_pos, :]
 target_model.adata.obsm[latent_key] = clip_rna
 target_model.adata_atac.obsm[latent_key] = clip_atac
 
-## Assign clip embeddings to target data
-#target_model.adata.obsm[latent_key] = clip_embeddings_rna
-#target_model.adata_atac.obsm[latent_key] = clip_embeddings_atac
 
-# Compute neighbor graph and UMAP embedding for target data
-sc.pp.neighbors(target_model.adata,
-                use_rep=latent_key,
-                key_added=latent_key)
+clip_embeddings_adata = ad.AnnData(
+    X=np.concatenate([clip_rna, clip_atac], axis=0),
+    obs=pd.concat([
+        target_model.adata.obs.assign(modality="rna"),
+        target_model.adata_atac.obs.assign(modality="atac"),
+    ], axis=0),
+    #obsm={'X_gps': np.concatenate([mu_target_rna, mu_target_atac], axis=0)} # need to correct shape mismatch
+)
 
-sc.tl.umap(target_model.adata,
-           neighbors_key=latent_key)
+sc.pp.pca(clip_embeddings_adata, n_comps=50)
+sc.pp.neighbors(clip_embeddings_adata, use_rep='X_pca', n_neighbors=100)
+sc.tl.leiden(clip_embeddings_adata, resolution=0.5) # also leiden clustering in identify_niches()
+sc.tl.umap(clip_embeddings_adata, min_dist=0.3)
+sc.pl.umap(clip_embeddings_adata, color=['modality', 'cell_type', 'RNA_clusters', 'ATAC_clusters'], ncols=2, wspace=0.1, size=25)
+sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden', 'RNA_clusters', 'ATAC_clusters'], ncols=2, wspace=0.1, size=25)
+
+sc.tl.embedding_density(clip_embeddings_adata, groupby='modality')
+sc.pl.embedding_density(clip_embeddings_adata, key='umap_density_modality')
 
 #%% Save target model
 

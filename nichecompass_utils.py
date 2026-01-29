@@ -7,7 +7,7 @@ override behavior from the NicheCompass package (e.g., custom VGPGAE forward).
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple
 
 import math
 import time
@@ -1271,6 +1271,55 @@ class CustomTrainer(Trainer):
 
         self.model.train()
 
+class EncoderWithFCHidden(Encoder):
+    """
+    Encoder that also returns the post-FC hidden features.
+
+    This mirrors `nichecompass.nn.encoders.Encoder.forward` but additionally
+    returns `hidden_fc`, the output after the dense fully-connected block (and
+    optional categorical covariate injection) and before any graph layers.
+    """
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        cat_covariates_embed: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if ((self.cat_covariates_embed_mode == "input") &
+            (cat_covariates_embed is not None)):
+            # Add categorical covariates embedding to input vector
+            x = torch.cat((x, cat_covariates_embed), dim=1)
+
+        # FC forward pass shared across all nodes
+        hidden = self.dropout(self.activation(self.fc_l1(x)))
+        if self.n_fc_layers == 2:
+            hidden = self.dropout(self.activation(self.fc_l2(hidden)))
+            hidden = self.fc_l2_bn(hidden)
+
+        if ((self.cat_covariates_embed_mode == "hidden") &
+            (cat_covariates_embed is not None)):
+            # Add categorical covariates embedding to hidden vector
+            hidden = torch.cat((hidden, cat_covariates_embed), dim=1)
+
+        # Tap the post-FC representation (before any graph layers)
+        hidden_fc = hidden.clone()
+
+        if self.n_layers == 2:
+            # Part of forward pass shared across all nodes
+            hidden = self.dropout(self.activation(self.conv_l1(hidden, edge_index)))
+
+        # Part of forward pass only for maskable latent nodes
+        mu = self.conv_mu(hidden, edge_index)
+        logstd = self.conv_logstd(hidden, edge_index)
+
+        # Part of forward pass only for unmaskable add-on latent nodes
+        if self.n_addon_latent != 0:
+            mu = torch.cat((mu, self.addon_conv_mu(hidden, edge_index)), dim=1)
+            logstd = torch.cat((logstd, self.addon_conv_logstd(hidden, edge_index)), dim=1)
+
+        return mu, logstd, hidden_fc
+
 class CustomVGPGAE(VGPGAE):
     """
     Project-specific VGPGAE with custom behavior.
@@ -1285,6 +1334,10 @@ class CustomVGPGAE(VGPGAE):
         kwargs_no_mme.pop("multimodal_embedding_size", None)
         super().__init__(*args, **kwargs_no_mme)
 
+        ## remove encoder created by parent class
+        if "encoder" in self:
+            del self.encoder
+
         self.multimodal_embedding_size_ = kwargs.get("multimodal_embedding_size")
 
         n_cat_covariates_embed_input = (
@@ -1295,7 +1348,7 @@ class CustomVGPGAE(VGPGAE):
         )
 
         # Separate encoders for RNA and ATAC inputs when available.
-        self.encoder_rna = Encoder(
+        self.encoder_rna = EncoderWithFCHidden(
             n_input=self.n_output_genes_,
             n_cat_covariates_embed_input=n_cat_covariates_embed_input,
             n_fc_layers=self.n_fc_layers_encoder_,
@@ -1310,7 +1363,7 @@ class CustomVGPGAE(VGPGAE):
             use_bn=self.encoder_use_bn_)
 
         if self.n_output_peaks_ > 0:
-            self.encoder_atac = Encoder(
+            self.encoder_atac = EncoderWithFCHidden(
                 n_input=self.n_output_peaks_,
                 n_cat_covariates_embed_input=n_cat_covariates_embed_input,
                 n_fc_layers=self.n_fc_layers_encoder_,
@@ -1329,6 +1382,22 @@ class CustomVGPGAE(VGPGAE):
         # Multimodal layer
         gp_embedding_size = self.n_prior_gp_ + self.n_addon_gp_
         self.multimodal_layer = torch.nn.Linear(gp_embedding_size, self.multimodal_embedding_size_)
+        self.fc_hidden_adapter = None
+
+    def _fc_hidden_to_multimodal_in(self, hidden_fc: torch.Tensor) -> torch.Tensor:
+        """
+        Map the post-FC hidden representation to the expected input dimensionality
+        of `self.multimodal_layer` (if needed), without affecting the encoder path.
+        """
+        target_in = int(getattr(self.multimodal_layer, "in_features"))
+        if hidden_fc.size(1) == target_in:
+            return hidden_fc
+
+        if self.fc_hidden_adapter is None:
+            adapter = torch.nn.Linear(hidden_fc.size(1), target_in, bias=False)
+            self.fc_hidden_adapter = adapter.to(device=hidden_fc.device, dtype=hidden_fc.dtype)
+
+        return self.fc_hidden_adapter(hidden_fc)
 
 
     def multiply_gaussians_log_space(self,
@@ -1499,6 +1568,11 @@ class CustomVGPGAE(VGPGAE):
         self.logstd_rna = encoder_outputs_rna[1][batch_idx, :]
         output["mu_rna"] = self.mu_rna
         output["logstd_rna"] = self.logstd_rna
+        # Send a copy of the post-FC encoder representation through multimodal_layer
+        self.hidden_fc_rna = encoder_outputs_rna[2][batch_idx, :]
+        output["hidden_fc_rna"] = self.hidden_fc_rna
+        output["fc_multimodal_rna"] = self.multimodal_layer(
+            self._fc_hidden_to_multimodal_in(self.hidden_fc_rna.clone()))
         z_rna = self.reparameterize(self.mu_rna, self.logstd_rna)
 
         # Encode atac data
@@ -1512,6 +1586,11 @@ class CustomVGPGAE(VGPGAE):
         self.logstd_atac = encoder_outputs_atac[1][batch_idx, :]
         output["mu_atac"] = self.mu_atac
         output["logstd_atac"] = self.logstd_atac
+        # Send a copy of the post-FC encoder representation through multimodal_layer
+        self.hidden_fc_atac = encoder_outputs_atac[2][batch_idx, :]
+        output["hidden_fc_atac"] = self.hidden_fc_atac
+        output["fc_multimodal_atac"] = self.multimodal_layer(
+            self._fc_hidden_to_multimodal_in(self.hidden_fc_atac.clone()))
         z_atac = self.reparameterize(self.mu_atac, self.logstd_atac)
 
         modality_mask = getattr(data_batch, "modality_mask", None)

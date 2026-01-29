@@ -9,6 +9,8 @@ from pyliftover import LiftOver
 from pyranges import PyRanges, read_gtf
 import os
 import subprocess
+from scipy.sparse import csr_matrix, eye
+
 from nichecompass_utils import CustomNicheCompass
 
 __all__ = ["DataAligner"]
@@ -270,7 +272,8 @@ class DataAligner:
     @staticmethod
     def set_target_spatial_connectivities(
         target_rna: ad.AnnData,
-        target_atac: ad.AnnData
+        target_atac: ad.AnnData,
+        adj_type: str = "identity"
     ):
         """
         Set spatial_connectivities in obsp from connectivities for target data.
@@ -295,17 +298,18 @@ class DataAligner:
         target_atac : AnnData
             Modified target ATAC object (same object, mutated in place)
         """
-        if 'connectivities' in target_rna.obsp:
+
+        if (adj_type == "knn") and ('connectivities' in target_rna.obsp) and ('connectivities' in target_atac.obsp):
             target_rna.obsp['spatial_connectivities'] = target_rna.obsp['connectivities']
-        else:
-            print("Warning: 'connectivities' not found in target_rna.obsp. "
-                  "Spatial connectivities not set for RNA data.")
-        
-        if 'connectivities' in target_atac.obsp:
             target_atac.obsp['spatial_connectivities'] = target_atac.obsp['connectivities']
+
+        elif (adj_type == "identity"):
+            target_rna.obsp['spatial_connectivities'] = eye(target_rna.n_obs, format="csr")
+            target_atac.obsp['spatial_connectivities'] = eye(target_atac.n_obs, format="csr")
+
         else:
-            print("Warning: 'connectivities' not found in target_atac.obsp. "
-                  "Spatial connectivities not set for ATAC data.")
+            print("Warning: 'connectivities' not found in target_rna.obsp or target_atac.obsp. "
+                  "Spatial connectivities not set for RNA or ATAC data.")
         
         return target_rna, target_atac
 
@@ -650,7 +654,6 @@ if __name__ == "__main__":
     data_aligner.align_features_by_overlap()
 
     #%% TMP: artificial data setup
-    from scipy.sparse import csr_matrix
 
     target_data = data_aligner.target_data
 

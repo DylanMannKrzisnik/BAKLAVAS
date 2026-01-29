@@ -539,7 +539,8 @@ target_rna, target_atac = DataAligner.copy_annotations_to_target(
 )
 target_rna, target_atac = DataAligner.set_target_spatial_connectivities(
     target_rna=target_rna,
-    target_atac=target_atac
+    target_atac=target_atac,
+    adj_type="identity"
 )
 
 #%% Convert non-string columns in var to string representation
@@ -662,6 +663,7 @@ with mlflow.start_run(run_name=current_timestamp):
                 n_sampled_neighbors=n_sampled_neighbors,
                 lambda_multimodal_contrastive_loss=100.0,
                 multimodal_contrastive_anneal=False,
+                use_early_stopping=False,
                 verbose=False,
                 mlflow_experiment_id=mlflow_experiment_id
             )
@@ -1238,8 +1240,8 @@ def analyze_cell_cell_communication(
 
 #%% Load trained model
 
-load_timestamp = "28012026_153505"
-#load_timestamp = current_timestamp # uncomment if you trained the model in this notebook
+#load_timestamp = "28012026_153505"
+load_timestamp = current_timestamp # uncomment if you trained the model in this notebook
 
 model_folder_path = f"{outpath}/artifacts/multimodal/{load_timestamp}/model"
 model_folder_stable_path = model_folder_path.replace('artifacts', 'stable')
@@ -1324,8 +1326,8 @@ target_model.adata.obsm[latent_key] = clip_rna
 target_model.adata_atac.obsm[latent_key] = clip_atac
 
 ## Assign clip embeddings to target data
-target_model.adata.obsm[latent_key] = clip_embeddings_rna
-target_model.adata_atac.obsm[latent_key] = clip_embeddings_atac
+#target_model.adata.obsm[latent_key] = clip_embeddings_rna
+#target_model.adata_atac.obsm[latent_key] = clip_embeddings_atac
 
 # Compute neighbor graph and UMAP embedding for target data
 sc.pp.neighbors(target_model.adata,

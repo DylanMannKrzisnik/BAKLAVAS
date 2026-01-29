@@ -45,6 +45,9 @@ import squidpy as sq
 from matplotlib import gridspec
 from sklearn.preprocessing import MinMaxScaler
 import mlflow
+import mygene as mg
+import anndata as ad
+from muon import MuData
 
 from nichecompass.utils import (add_gps_from_gp_dict_to_adata,
                                 add_multimodal_mask_to_adata,
@@ -170,6 +173,8 @@ figure_folder_path = f"{artifacts_folder_path}/multimodal/{current_timestamp}/fi
 os.makedirs(model_folder_path, exist_ok=True)
 os.makedirs(figure_folder_path, exist_ok=True)
 os.makedirs(so_data_folder_path, exist_ok=True)
+os.makedirs(gp_data_folder_path, exist_ok=True)
+os.makedirs(ga_data_folder_path, exist_ok=True)
 
 
 #%% 1.6 Download Files (Optional)
@@ -195,9 +200,6 @@ if not os.path.exists(os.path.join(so_data_folder_path, 'spatial_atac_rna_seq_mo
 
 #%% 2.1 Create Prior Knowledge Gene Program (GP) Mask
 
-os.makedirs(gp_data_folder_path, exist_ok=True)
-os.makedirs(figure_folder_path, exist_ok=True)
-os.makedirs(ga_data_folder_path, exist_ok=True)
 
 # Retrieve OmniPath GPs (source: ligand genes; target: receptor genes)
 omnipath_gp_dict = extract_gp_dict_from_omnipath_lr_interactions(
@@ -412,39 +414,135 @@ sc.pl.spatial(adata,
 
 #%% Load target data
 
-import mygene as mg
-import anndata as ad
-from anndata import AnnData
+def load_easysci_sll_data():
 
-target_rna = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/RNA/mouse_rna_processed.h5ad")
-target_atac = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/ATAC/mouse_atac_processed.h5ad")
+    target_rna = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/RNA/mouse_rna_processed.h5ad")
+    target_atac = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/ATAC/mouse_atac_processed.h5ad")
 
-mginfo = mg.MyGeneInfo()
-results = mginfo.querymany(
-    target_rna.var["gene_id_no_version"].tolist(),
-    scopes="ensembl.gene",
-    species="mouse",
-    fields="symbol",
-    as_dataframe=True,
-)
-results = results.reset_index().drop_duplicates(subset='query') # remove duplicate genes
-assert results.groupby('query')['symbol'].nunique().le(1).all(), "Multiple symbols still found for some genes"
+    mginfo = mg.MyGeneInfo()
+    results = mginfo.querymany(
+        target_rna.var["gene_id_no_version"].tolist(),
+        scopes="ensembl.gene",
+        species="mouse",
+        fields="symbol",
+        as_dataframe=True,
+    )
+    results = results.reset_index().drop_duplicates(subset='query') # remove duplicate genes
+    assert results.groupby('query')['symbol'].nunique().le(1).all(), "Multiple symbols still found for some genes"
 
-target_rna.var = target_rna.var.merge(results, left_on="gene_id_no_version", right_on="query", how="left")
-target_rna.var.loc[target_rna.var['symbol'].isna(), 'symbol'] = target_rna.var.loc[target_rna.var['symbol'].isna(), 'query']
-target_rna.var.set_index("symbol", inplace=True)
+    target_rna.var = target_rna.var.merge(results, left_on="gene_id_no_version", right_on="query", how="left")
+    target_rna.var.loc[target_rna.var['symbol'].isna(), 'symbol'] = target_rna.var.loc[target_rna.var['symbol'].isna(), 'query']
+    target_rna.var.set_index("symbol", inplace=True)
 
-## remove duplicate genes (again)
-target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep='first')]
-assert target_rna.var_names.is_unique, "Target RNA data must have unique gene names"
+    ## remove duplicate genes (again)
+    target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep='first')]
+    assert target_rna.var_names.is_unique, "Target RNA data must have unique gene names"
 
-target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].str.split('-').tolist()
+    target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].str.split('-').tolist()
 
+    return target_rna, target_atac
+
+def load_10x_mouse_brain_ad_data(
+    data_dir: Optional[str] = None,
+    base_name: str = "Multiome_RNA_ATAC_Mouse_Brain_Alzheimers_AppNote",
+) -> tuple:
+    """
+    Load processed RNA and ATAC data from 10x Multiome Mouse Brain Alzheimers AppNote.
+
+    Expects the following files in `data_dir` (downloaded as per 10x output):
+    - {base_name}_filtered_feature_bc_matrix.h5  (required)
+    - {base_name}_atac_peaks.bed                  (optional, for peak coordinates in ATAC var)
+    - {base_name}_atac_peak_annotation.tsv        (optional, for peak annotations in ATAC var)
+
+    Returns
+    -------
+    tuple of (adata_rna, adata_atac)
+        RNA and ATAC AnnData objects with shared obs (cells). Raw counts in .layers["counts"] and .X.
+    """
+    if data_dir is None:
+        data_dir = os.path.join(BAKLAVA_ROOT, "..", "data", "10x_mouse_brain_AD")
+    data_dir = os.path.abspath(data_dir)
+    h5_path = os.path.join(data_dir, f"{base_name}_filtered_feature_bc_matrix.h5")
+    if not os.path.isfile(h5_path):
+        raise FileNotFoundError(
+            f"10x filtered feature-barcode matrix not found: {h5_path}. "
+            "Download it from 10x (e.g. filtered_feature_bc_matrix.h5) into data_dir."
+        )
+
+    # Read full multiome matrix (Gene Expression + Peaks); gex_only=False keeps both modalities
+    adata_full = sc.read_10x_h5(h5_path, gex_only=False)
+    # 10x multiome var has 'feature_types': "Gene Expression" vs "Peaks"
+    ft_col = "feature_types" if "feature_types" in adata_full.var.columns else "feature_type"
+    if ft_col not in adata_full.var.columns:
+        raise ValueError(
+            f"Expected feature type column '{ft_col}' in 10x multiome var. "
+            f"Columns: {list(adata_full.var.columns)}"
+        )
+
+    is_gex = adata_full.var[ft_col].astype(str).str.strip().str.lower().eq("gene expression")
+    is_peaks = adata_full.var[ft_col].astype(str).str.strip().str.lower().eq("peaks")
+
+    adata_rna = adata_full[:, is_gex].copy()
+    adata_atac = adata_full[:, is_peaks].copy()
+
+    # Drop the feature type column from each modality's var so we don't duplicate
+    for a in (adata_rna, adata_atac):
+        if ft_col in a.var.columns:
+            a.var = a.var.drop(columns=[ft_col])
+
+    # Store raw counts in .layers["counts"] for compatibility with counts_key
+    adata_rna.layers["counts"] = adata_rna.X.copy()
+    adata_atac.layers["counts"] = adata_atac.X.copy()
+
+    # Optionally add ATAC peak coordinates and annotations from BED / peak_annotation.tsv
+    peaks_bed_path = os.path.join(data_dir, f"{base_name}_atac_peaks.bed")
+    peak_ann_path = os.path.join(data_dir, f"{base_name}_atac_peak_annotation.tsv")
+    if os.path.isfile(peaks_bed_path):
+        bed = pd.read_csv(
+            peaks_bed_path,
+            sep="\t",
+            header=None,
+            usecols=[0, 1, 2],
+            names=["chrom", "chromStart", "chromEnd"],
+        )
+        # 10x peak names are "chr1-123-456"; BED order may match var order
+        peak_id_bed = bed["chrom"].astype(str) + "-" + bed["chromStart"].astype(str) + "-" + bed["chromEnd"].astype(str)
+        if adata_atac.n_vars == len(peak_id_bed) and (adata_atac.var_names == peak_id_bed.values).all():
+            adata_atac.var["chrom"] = bed["chrom"].values
+            adata_atac.var["chromStart"] = bed["chromStart"].values
+            adata_atac.var["chromEnd"] = bed["chromEnd"].values
+        else:
+            # Parse coordinates from peak name (chr-start-end)
+            adata_atac.var["peak"] = adata_atac.var_names
+            coords = adata_atac.var["peak"].str.split("-", n=2, expand=True)
+            adata_atac.var["chrom"] = coords[0]
+            adata_atac.var["chromStart"] = pd.to_numeric(coords[1], errors="coerce") if coords.shape[1] > 1 else ""
+            adata_atac.var["chromEnd"] = pd.to_numeric(coords[2], errors="coerce") if coords.shape[1] > 2 else ""
+    else:
+        adata_atac.var["peak"] = adata_atac.var_names
+        coords = adata_atac.var["peak"].str.split("-", n=2, expand=True)
+        adata_atac.var["chrom"] = coords[0]
+        adata_atac.var["chromStart"] = pd.to_numeric(coords[1], errors="coerce") if coords.shape[1] > 1 else ""
+        adata_atac.var["chromEnd"] = pd.to_numeric(coords[2], errors="coerce") if coords.shape[1] > 2 else ""
+
+    if os.path.isfile(peak_ann_path):
+        ann = pd.read_csv(peak_ann_path, sep="\t")
+        peak_col = "Peak" if "Peak" in ann.columns else ("peak" if "peak" in ann.columns else None)
+        if peak_col is not None:
+            ann_indexed = ann.set_index(peak_col)
+            # Only merge columns that are not already in adata_atac.var to avoid duplicates
+            extra = [c for c in ann_indexed.columns if c not in adata_atac.var.columns]
+            if extra:
+                adata_atac.var = adata_atac.var.merge(
+                    ann_indexed[extra], left_index=True, right_index=True, how="left"
+                )
+
+    return adata_rna, adata_atac
+
+## load target data
+target_rna, target_atac = load_10x_mouse_brain_ad_data()
 
 #%% Perform data alignment
-
-#from data_aligner import DataAligner
-from muon import MuData
 
 source_data = MuData({"rna": adata, "atac": adata_atac})
 source_name = "Spatial_ATAC_RNA"
@@ -547,7 +645,6 @@ target_rna, target_atac = DataAligner.set_target_spatial_connectivities(
 # Fix non-string columns in var that can't be saved to H5AD
 def fix_var_for_h5ad(adata):
     """Convert non-string columns in var to string representation."""
-    import pandas as pd
     
     for col in list(adata.var.columns):  # Use list() to avoid modification during iteration
         try:
@@ -1410,8 +1507,7 @@ sc.pp.pca(clip_embeddings_adata, n_comps=50)
 sc.pp.neighbors(clip_embeddings_adata, use_rep='X_pca', n_neighbors=100)
 sc.tl.leiden(clip_embeddings_adata, resolution=0.5) # also leiden clustering in identify_niches()
 sc.tl.umap(clip_embeddings_adata, min_dist=0.3)
-sc.pl.umap(clip_embeddings_adata, color=['modality', 'cell_type', 'RNA_clusters', 'ATAC_clusters'], ncols=2, wspace=0.1, size=25)
-sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden', 'RNA_clusters', 'ATAC_clusters'], ncols=2, wspace=0.1, size=25)
+sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden', 'Main_cluster_name'], ncols=3, wspace=0.1, size=25)
 
 sc.tl.embedding_density(clip_embeddings_adata, groupby='modality')
 sc.pl.embedding_density(clip_embeddings_adata, key='umap_density_modality')

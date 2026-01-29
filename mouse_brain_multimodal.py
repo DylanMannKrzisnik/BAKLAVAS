@@ -547,6 +547,35 @@ target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep='first')]
 
 target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].str.split(':|-').tolist()
 
+#%% Basic feature processing
+
+assert \
+    "counts" in adata.layers and \
+    "counts" in adata_atac.layers and \
+    "counts" in target_rna.layers and \
+    "counts" in target_atac.layers, \
+    "Counts layer not found in source or target data"
+
+## source RNA data
+sc.pp.normalize_total(adata, target_sum=1e4)
+sc.pp.log1p(adata)
+
+## source ATAC data
+sc.pp.normalize_total(adata_atac, target_sum=1e4)
+sc.pp.log1p(adata_atac)
+
+## target RNA data
+sc.pp.filter_cells(target_rna, min_genes=100)
+sc.pp.filter_genes(target_rna, min_cells=3)
+sc.pp.normalize_total(target_rna, target_sum=1e4)
+sc.pp.log1p(target_rna)
+
+## target ATAC data
+sc.pp.filter_cells(target_atac, min_genes=100)
+sc.pp.filter_genes(target_atac, min_cells=3)
+sc.pp.normalize_total(target_atac, target_sum=1e4)
+sc.pp.log1p(target_atac)
+
 ## peform PCA and compute neighbor graph for target data
 sc.pp.pca(target_rna, n_comps=50)
 sc.pp.neighbors(target_rna, use_rep='X_pca', n_neighbors=100)

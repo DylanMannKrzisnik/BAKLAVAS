@@ -26,6 +26,12 @@ class DataAligner:
         target_name: str = "target",
     ):
 
+        ## force source data to share same obs_names across modalitiies
+        if not source_data['rna'].obs_names.equals(source_data['atac'].obs_names):
+            import muon as mu
+            print(f"Intersecting source data obs_names across modalities")
+            mu.pp.intersect_obs(source_data)
+
         ## set metadata
         source_data.obs["dataset_name"] = source_name
         target_data.obs["dataset_name"] = target_name

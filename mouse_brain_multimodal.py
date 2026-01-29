@@ -537,10 +537,22 @@ def load_10x_mouse_brain_ad_data(
                     ann_indexed[extra], left_index=True, right_index=True, how="left"
                 )
 
-    return adata_rna, adata_atac
+    return adata_rna, adata_atac, "mm10", "10x_mouse_brain_AD"
 
 ## load target data
-target_rna, target_atac = load_10x_mouse_brain_ad_data()
+target_rna, target_atac, target_assembly, target_name = load_10x_mouse_brain_ad_data()
+
+target_rna.var_names = target_rna.var_names.str.split(".").str[0]
+target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep='first')]
+
+target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].str.split(':|-').tolist()
+
+## peform PCA and compute neighbor graph for target data
+sc.pp.pca(target_rna, n_comps=50)
+sc.pp.neighbors(target_rna, use_rep='X_pca', n_neighbors=100)
+
+sc.pp.pca(target_atac, n_comps=50)
+sc.pp.neighbors(target_atac, use_rep='X_pca', n_neighbors=100)
 
 #%% Perform data alignment
 
@@ -549,8 +561,6 @@ source_name = "Spatial_ATAC_RNA"
 source_assembly = "mm10"
 
 target_data = MuData({"rna": target_rna, "atac": target_atac})
-target_name = "EasySci_SLL"
-target_assembly = "mm39"
 
 data_aligner = DataAligner(
     source_data=source_data,
@@ -706,7 +716,7 @@ diagnose_var_columns(target_atac, "ATAC")
 target_rna = fix_var_for_h5ad(target_rna)
 target_atac = fix_var_for_h5ad(target_atac)
 
-# try: target_rna.write_h5ad(os.path.join(target_model_folder_path, 'target_rna.h5ad'))
+# try: target_rna.write_h5ad(os.path.join(model_folder_path, 'target_rna.h5ad')); print(os.path.join(model_folder_path, 'target_rna.h5ad'))
 
 #%% Initialize model
 
@@ -747,6 +757,12 @@ mlflow.set_experiment(experiment_name=mlflow_experiment_name)
 
 # Start MLflow run with timestamp-based name
 with mlflow.start_run(run_name=current_timestamp):
+
+    ## Log source and target dataset names in MLflow
+    mlflow.log_param("source_dataset_name", source_name)
+    mlflow.log_param("target_dataset_name", target_name)
+
+    ## Train model
     model.train(n_epochs=n_epochs,
                 n_epochs_all_gps=n_epochs_all_gps,
                 lr=lr,
@@ -1381,7 +1397,7 @@ target_model = CustomNicheCompass.load(
     gp_names_key=gp_names_key
 )
 
-target_samples = target_model.adata.obs["PCR_sample_name"].unique().tolist()
+#target_samples = target_model.adata.obs[target_sample_key].unique().tolist()
 
 #%% Compute neighbor graph and UMAP embedding for target data
 

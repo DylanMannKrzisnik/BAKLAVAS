@@ -43,7 +43,7 @@ class DataAligner:
         self.target_data = target_data
 
         ## check that data are from the same assembly
-        if self.source_data.obs["assembly"].equals(self.target_data.obs["assembly"]):
+        if self.source_data.obs["assembly"].unique()[0] == self.target_data.obs["assembly"].unique()[0]:
             print(f"Source and target data are from the same assembly: {self.source_data.obs['assembly'].unique()[0]}")
         else:
             print(f"Source and target data are from different assemblies: {self.source_data.obs['assembly'].unique()[0]} and {self.target_data.obs['assembly'].unique()[0]}")

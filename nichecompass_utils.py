@@ -1335,7 +1335,7 @@ class CustomVGPGAE(VGPGAE):
         super().__init__(*args, **kwargs_no_mme)
 
         ## remove encoder created by parent class
-        if "encoder" in self:
+        if hasattr(self, "encoder"):
             del self.encoder
 
         self.multimodal_embedding_size_ = kwargs.get("multimodal_embedding_size")

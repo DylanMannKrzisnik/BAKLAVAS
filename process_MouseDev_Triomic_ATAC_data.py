@@ -7,6 +7,8 @@ import tempfile
 import sys
 from pathlib import Path
 from tqdm import tqdm
+import polars as pl
+import multiprocessing as mp
 
 import snapatac2 as snap
 
@@ -47,7 +49,7 @@ def save_ann_dataset(
     data: snap.AnnDataSet,
     sample_names: list,
     out_h5ad_paths: list,
-    scratch_base: str,
+    outpath: str,
     update_individual_files: bool = True,
     save_consolidated: bool = False,
 ) -> None:
@@ -67,7 +69,7 @@ def save_ann_dataset(
         List of sample names corresponding to individual AnnData objects
     out_h5ad_paths : list
         List of paths where individual h5ad files should be saved
-    scratch_base : str
+    outpath : str
         Base directory for saving files
     update_individual_files : bool, default=True
         If True, update individual h5ad files with latest annotations from AnnDataSet.
@@ -76,7 +78,7 @@ def save_ann_dataset(
         If True, save a single consolidated .zarr or .h5ad file (memory-intensive).
         Set via SAVE_CONSOLIDATED_FILE environment variable.
     """
-    print(f"[INFO] AnnDataSet is already saved to: {data.filename}", flush=True)
+    #print(f"[INFO] AnnDataSet is already saved to: {data.filename}", flush=True)
     print(f"[INFO] This file contains all modifications and can be loaded without memory overhead.", flush=True)
     
     # Update individual h5ad files with latest annotations
@@ -139,20 +141,21 @@ def save_ann_dataset(
                 print(f"[INFO] Dropping X_spectral to save memory (can be recomputed)", flush=True)
                 del adata.obsm['X_spectral']
             
-            if 'count' in adata.var.columns:
-                print(f"[INFO] Dropping 'count' column from var", flush=True)
-                adata.var = adata.var.drop(columns=['count'])
-            
-            # Write as Zarr (better for large datasets, supports chunked access)
-            zarr_path = os.path.join(scratch_base, "MouseDev_Triomic_ATAC.zarr")
-            print(f"[INFO] Writing to Zarr format (chunked, memory-efficient)...", flush=True)
-            adata.write_zarr(zarr_path, chunks=(10000, None))
-            print(f"[PROGRESS] Saved as Zarr: {zarr_path}", flush=True)
+            #if 'count' in adata.var.columns:
+            #    print(f"[INFO] Dropping 'count' column from var", flush=True)
+            #    adata.var = adata.var.drop(columns=['count'])
             
             # Optionally also save as h5ad (uncomment if needed)
-            # h5ad_path = os.path.join(scratch_base, "MouseDev_Triomic_ATAC.h5ad")
-            # adata.write_h5ad(h5ad_path, compression='gzip')
-            # print(f"[PROGRESS] Saved as H5AD: {h5ad_path}", flush=True)
+            h5ad_path = os.path.join(outpath, "MouseDev_Triomic_ATAC.h5ad")
+            adata.write_h5ad(h5ad_path, compression='gzip')
+            print(f"[PROGRESS] Saved as H5AD: {h5ad_path}", flush=True)
+
+            # Write as Zarr (better for large datasets, supports chunked access)
+            #zarr_path = os.path.join(outpath, "MouseDev_Triomic_ATAC.zarr")
+            #print(f"[INFO] Writing to Zarr format (chunked, memory-efficient)...", flush=True)
+            #adata.write_zarr(zarr_path, chunks=(10000, None))
+            #print(f"[PROGRESS] Saved as Zarr: {zarr_path}", flush=True)
+            
             
             # Clean up
             del adata
@@ -172,7 +175,9 @@ def save_ann_dataset(
 def main() -> None:
 
     outpath = os.path.join("/home/dmannk/links/scratch", f"MouseDev_Triomic_ATAC_{os.environ.get('SLURM_JOB_ID', 'local')}")
-    scratch_base = os.environ.get("SLURM_TMPDIR", outpath)
+    scratch_login = "/home/dmannk/links/scratch"
+    scratch_base = os.environ.get("SLURM_TMPDIR", scratch_login)
+    print(f"[INFO] Scratch base: {scratch_base}", flush=True)
     os.makedirs(outpath, exist_ok=True)
     os.makedirs(scratch_base, exist_ok=True)
 
@@ -293,9 +298,13 @@ def main() -> None:
     )
     print(f"[PROGRESS] AnnDataSet created successfully.", flush=True)
 
+    # Redo TSS enrichment scores on AnnDataSet
+    #print(f"[PROGRESS] Redoing TSS enrichment scores on AnnDataSet...", flush=True)
+    #snap.metrics.tsse(data, gene_anno if gene_anno_exists else snap.genome.mm10)
+    
     # Generate plots
+    #snap.pl.tsse(data, interactive=False, out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_tsse.png")) # RuntimeError: not found: n_fragment
     snap.pl.frag_size_distr(data, interactive=False, out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_frag_size_distr.png"))
-    snap.pl.tsse(data, interactive=False, out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_tsse.png"))
 
     '''
     if os.path.exists(os.path.join(datapath, "MouseDev_Triomic_ATAC.h5ads")):
@@ -309,9 +318,9 @@ def main() -> None:
     print(f"Number of cells: {data.n_obs}", flush=True)
     print(f"Number of unique barcodes: {np.unique(data.obs_names).size}", flush=True)
 
-    unique_cell_ids = [sa + ":" + bc for sa, bc in zip(data.obs["sample"], data.obs_names)]
-    data.obs_names = unique_cell_ids
-    assert data.n_obs == np.unique(data.obs_names).size
+    #unique_cell_ids = [sa + ":" + bc for sa, bc in zip(data.obs["sample"], data.obs_names)]
+    #data.obs_names = unique_cell_ids
+    #assert data.n_obs == np.unique(data.obs_names).size
 
     # add obs metadata
     data.obs['stage'] = data.obs['sample'].str.extract(r"_(P\d+)")
@@ -326,14 +335,19 @@ def main() -> None:
     # Batch correction
     #snap.pp.mnc_correct(data, batch="stage")
 
-    snap.pp.harmony(
+    X_spectral_harmony = snap.pp.harmony(
         data,
         batch="sample",
         groupby="stage",
         use_rep="X_spectral",
-        max_iter_harmony=20,
+        max_iter_harmony=10,
+        max_iter_kmeans=10, # reduced for speed
+        nclust=30, # reduced for speed
         theta=3,
+        n_jobs=_infer_n_jobs(default=8),
+        inplace=False, # if True: adata.obsm[use_rep + "_harmony"] = mat ~~~~ RuntimeError: dimension cannot be changed from 37221 to 30
     )
+    data.obsm["X_spectral_harmony"] = np.ascontiguousarray(X_spectral_harmony, dtype=np.float64)
 
     # Clustering
     #snap.pp.knn(data, use_rep="X_spectral_harmony")
@@ -344,15 +358,18 @@ def main() -> None:
     print(f"[PROGRESS] Leiden clustering completed.", flush=True)
 
     # UMAP
-    snap.tl.umap(data, use_rep="X_spectral_harmony")
-    snap.pl.umap(data, color=["leiden", "sample", "stage", "rep"], wspace=0.4, interactive=False,
+    snap.tl.umap(data, use_rep="X_spectral_harmony", random_state=None if int(os.environ.get("SLURM_CPUS_PER_TASK", 1)) > 1 else 42) # random_state seed removes parallelization
+    #snap.pl.umap(data, color=["leiden", "sample", "stage", "rep"], interactive=False,
+    snap.pl.umap(data, interactive=False, # using the color argument results in uninformative plots
         out_file=os.path.join(outpath, "MouseDev_Triomic_ATAC_UMAP.png"))
 
     # filter leiden clusters used for peak calling by number of cells
     leiden_stage_counts_threshold = 500
-    data.obs["leiden_stage"] = data.obs["leiden"].astype(str) + "_" + data.obs["stage"]
+    data.obs["leiden_stage"] = data.obs["leiden"] + "_" + data.obs["stage"]
     counts = data.obs["leiden_stage"].value_counts()
-    selected_leiden_stages = set(counts[counts >= leiden_stage_counts_threshold].index)
+    selected_leiden_stages = set(
+        counts.filter(pl.col("count") >= leiden_stage_counts_threshold)["leiden_stage"].to_list()
+    )
     print(f"Number of leiden clusters used for peak calling (n>={leiden_stage_counts_threshold}): {len(selected_leiden_stages)} out of {len(data.obs['leiden_stage'].unique())}", flush=True)
 
     # Peak calling
@@ -374,10 +391,35 @@ def main() -> None:
     merged_peaks = snap.tl.merge_peaks(data.uns['macs3'], chrom_sizes=snap.genome.mm10)
     print(f"Number of merged peaks: {merged_peaks.shape[0]}", flush=True)
 
+    ## TMP: save data and merged peaks to disk
+    merged_peaks.write_csv(os.path.join(outpath, "MouseDev_Triomic_ATAC_merged_peaks.csv"))
+
+    macs3 = dict(data.uns["macs3"])
+    fp = os.path.join(outpath, "macs3_uns.pkl")
+
+    import pickle as pkl
+    with open(fp, "wb") as f:
+        pkl.dump(macs3, f)
+
+    data.uns["macs3_pickle"] = fp
+
+    uns = dict(data.uns)          # materialize as a plain dict
+    uns.pop("macs3", None)
+    data.uns = uns
+
+    save_ann_dataset(
+        data=data,
+        sample_names=sample_names,
+        out_h5ad_paths=out_h5ad_paths,
+        outpath=outpath,
+        update_individual_files=False,
+        save_consolidated=True,
+    )
+
     ## create peak matrix from merged peaks
     print(f"[PROGRESS] Creating peak matrix...", flush=True)
     peak_mat = snap.pp.make_peak_matrix(data, use_rep=merged_peaks['Peaks'])
-    print(f"[PROGRESS] Peak matrix created successfully.", flush=True)
+    print(f"[PROGRESS] Peak matrix created successfully. Number of peaks: {peak_mat.n_vars}", flush=True)
 
     ## save peak matrix to disk
     print(f"[PROGRESS] Saving peak matrix to disk...", flush=True)
@@ -388,15 +430,6 @@ def main() -> None:
     '''
     save_consolidated = os.environ.get("SAVE_CONSOLIDATED_FILE", "false").lower() == "true"
     update_individual = os.environ.get("UPDATE_INDIVIDUAL_FILES", "true").lower() == "true"
-    
-    save_ann_dataset(
-        data=data,
-        sample_names=sample_names,
-        out_h5ad_paths=out_h5ad_paths,
-        scratch_base=scratch_base,
-        update_individual_files=update_individual,
-        save_consolidated=save_consolidated,
-    )
     '''
 
     # 6) Cleanup temp directory when you're done with everything (only if we created one)
@@ -405,4 +438,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)   # or "forkserver"
+    import harmony_patch
+    harmony_patch.apply()
     main()

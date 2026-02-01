@@ -22,6 +22,14 @@ DEFAULT_LATENT_KEY = "nichecompass_latent"
 class TrialParams:
     encoder_input_key: str
     multimodal_layer_series: bool
+    # Hyperparameters that most directly affect the (target) multimodal
+    # contrastive loss used as the objective.
+    lambda_multimodal_contrastive_loss: float
+    multimodal_temperature: float
+    multimodal_contrastive_anneal: bool
+    contrastive_logits_pos_ratio: float
+    contrastive_logits_neg_ratio: float
+    multimodal_embedding_size: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -114,7 +122,7 @@ def build_model(
         conv_layer_encoder="gatv2conv",
         encoder_input_key=params.encoder_input_key,
         multimodal_layer_series=params.multimodal_layer_series,
-        multimodal_embedding_size=None,
+        multimodal_embedding_size=params.multimodal_embedding_size,
     )
 
 
@@ -162,11 +170,14 @@ def run_trial(
         lambda_chrom_access_recon=train_cfg.lambda_chrom_access_recon,
         lambda_l1_masked=train_cfg.lambda_l1_masked,
         lambda_l1_addon=train_cfg.lambda_l1_addon,
-        lambda_multimodal_contrastive_loss=train_cfg.lambda_multimodal_contrastive_loss,
+        lambda_multimodal_contrastive_loss=params.lambda_multimodal_contrastive_loss,
+        multimodal_temperature=params.multimodal_temperature,
+        multimodal_contrastive_anneal=params.multimodal_contrastive_anneal,
+        contrastive_logits_pos_ratio=params.contrastive_logits_pos_ratio,
+        contrastive_logits_neg_ratio=params.contrastive_logits_neg_ratio,
         edge_batch_size=train_cfg.edge_batch_size,
         use_cuda_if_available=train_cfg.use_cuda_if_available,
         n_sampled_neighbors=train_cfg.n_sampled_neighbors,
-        multimodal_contrastive_anneal=train_cfg.multimodal_contrastive_anneal,
         target_adata=target_rna,
         target_adata_atac=target_atac,
         target_holdout_frac=train_cfg.target_holdout_frac,

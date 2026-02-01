@@ -34,7 +34,10 @@ def parse_args() -> argparse.Namespace:
         "--n-trials",
         type=int,
         default=3,
-        help="Number of trials to run.",
+        help=(
+            "Max number of trials. With GridSampler the study stops after "
+            "all grid points are tried once (e.g. 4 trials for 2×2 search space)."
+        ),
     )
     parser.add_argument(
         "--storage",
@@ -89,6 +92,14 @@ def main() -> None:
     search_space = {
         "multimodal_layer_series": [True, False],
         "encoder_input_key": ["counts", "pseudocounts"],
+        # Contrastive-loss–relevant knobs (objective is target_multimodal_contrastive_loss)
+        "lambda_multimodal_contrastive_loss": [10.0, 30.0, 100.0, 300.0],
+        "multimodal_temperature": [0.1, 0.2, 0.5, 1.0],
+        "multimodal_contrastive_anneal": [False, True],
+        "contrastive_logits_pos_ratio": [0.0, 0.125, 0.25],
+        "contrastive_logits_neg_ratio": [0.0, 0.125, 0.25],
+        # Model capacity for multimodal fusion. None means "keep full GP size".
+        "multimodal_embedding_size": [None, 128, 256, 512],
     }
 
     if args.launch_workers:
@@ -111,6 +122,7 @@ def main() -> None:
             _launch_workers(args, cache_dir, parent_run_id, gpu_list)
         return
 
+    # GridSampler suggests each combination exactly once; study stops when grid is exhausted.
     sampler = optuna.samplers.GridSampler(search_space)
     study = optuna.create_study(
         study_name=args.study_name,
@@ -122,8 +134,10 @@ def main() -> None:
 
     if args.parent_run_id:
         mlflow.start_run(run_id=args.parent_run_id)
+        parent_run_id = args.parent_run_id
     else:
         mlflow.start_run(run_name=args.study_name)
+        parent_run_id = mlflow.active_run().info.run_id
         _log_parent_params(
             mlflow=mlflow,
             cache_dir=cache_dir,
@@ -141,6 +155,30 @@ def main() -> None:
                 "multimodal_layer_series",
                 search_space["multimodal_layer_series"],
             ),
+            lambda_multimodal_contrastive_loss=trial.suggest_categorical(
+                "lambda_multimodal_contrastive_loss",
+                search_space["lambda_multimodal_contrastive_loss"],
+            ),
+            multimodal_temperature=trial.suggest_categorical(
+                "multimodal_temperature",
+                search_space["multimodal_temperature"],
+            ),
+            multimodal_contrastive_anneal=trial.suggest_categorical(
+                "multimodal_contrastive_anneal",
+                search_space["multimodal_contrastive_anneal"],
+            ),
+            contrastive_logits_pos_ratio=trial.suggest_categorical(
+                "contrastive_logits_pos_ratio",
+                search_space["contrastive_logits_pos_ratio"],
+            ),
+            contrastive_logits_neg_ratio=trial.suggest_categorical(
+                "contrastive_logits_neg_ratio",
+                search_space["contrastive_logits_neg_ratio"],
+            ),
+            multimodal_embedding_size=trial.suggest_categorical(
+                "multimodal_embedding_size",
+                search_space["multimodal_embedding_size"],
+            ),
         )
         with mlflow.start_run(
             run_name=f"trial_{trial.number:04d}", nested=True
@@ -150,6 +188,7 @@ def main() -> None:
                 cache_dir=cache_dir,
                 train_cfg=train_cfg,
                 mlflow_experiment_id=experiment_id,
+                mlflow_parent_run_id=parent_run_id,
             )
 
     study.optimize(objective, n_trials=args.n_trials)

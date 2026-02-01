@@ -747,6 +747,14 @@ target_atac = fix_var_for_h5ad(target_atac)
 
 # try: target_rna.write_h5ad(os.path.join(model_folder_path, 'target_rna.h5ad')); print(os.path.join(model_folder_path, 'target_rna.h5ad'))
 
+#%% Create shallow references to pseudocounts in new layers
+
+adata.layers["pseudocounts"] = adata.X
+adata_atac.layers["pseudocounts"] = adata_atac.X
+
+target_rna.layers["pseudocounts"] = target_rna.X
+target_atac.layers["pseudocounts"] = target_atac.X
+
 #%% Initialize model
 
 model = CustomNicheCompass(
@@ -762,6 +770,7 @@ model = CustomNicheCompass(
     gp_sources_categories_mask_key=gp_sources_categories_mask_key,
     latent_key=latent_key,
     conv_layer_encoder=conv_layer_encoder,
+    encoder_input_key="pseudocounts",
     active_gp_thresh_ratio=active_gp_thresh_ratio,
 )
 

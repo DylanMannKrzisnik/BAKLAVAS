@@ -71,32 +71,36 @@ def main() -> None:
 
     train_cfg = TrainConfig()
 
-    def objective(trial: optuna.Trial) -> float:
-        params = TrialParams(
-            encoder_input_key=trial.suggest_categorical(
-                "encoder_input_key", search_space["encoder_input_key"]
-            ),
-            multimodal_layer_series=trial.suggest_categorical(
-                "multimodal_layer_series", search_space["multimodal_layer_series"]
-            ),
-        )
-        with mlflow.start_run(
-            run_name=f"trial_{trial.number:04d}", nested=True
-        ):
-            return run_trial(
-                params=params,
-                cache_dir=cache_dir,
-                train_cfg=train_cfg,
-                mlflow_experiment_id=experiment_id,
-            )
-
-    with mlflow.start_run(run_name=args.study_name):
+    with mlflow.start_run(run_name=args.study_name) as parent_run:
+        parent_run_id = parent_run.info.run_id
         mlflow.log_param("cache_dir", cache_dir)
         mlflow.log_param("study_name", args.study_name)
         mlflow.log_param("n_trials", args.n_trials)
         for key, values in search_space.items():
             mlflow.log_param(f"search_space_{key}", str(values))
         mlflow.log_params(asdict(train_cfg))
+
+        def objective(trial: optuna.Trial) -> float:
+            params = TrialParams(
+                encoder_input_key=trial.suggest_categorical(
+                    "encoder_input_key", search_space["encoder_input_key"]
+                ),
+                multimodal_layer_series=trial.suggest_categorical(
+                    "multimodal_layer_series",
+                    search_space["multimodal_layer_series"],
+                ),
+            )
+            with mlflow.start_run(
+                run_name=f"trial_{trial.number:04d}", nested=True
+            ):
+                return run_trial(
+                    params=params,
+                    cache_dir=cache_dir,
+                    train_cfg=train_cfg,
+                    mlflow_experiment_id=experiment_id,
+                    mlflow_parent_run_id=parent_run_id,
+                )
+
         study.optimize(objective, n_trials=args.n_trials)
 
 

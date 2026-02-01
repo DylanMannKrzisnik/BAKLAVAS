@@ -1,0 +1,188 @@
+import os
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
+
+import anndata as ad
+import mlflow
+
+from nichecompass_utils import CustomNicheCompass
+
+
+DEFAULT_COUNTS_KEY = "counts"
+DEFAULT_ADJ_KEY = "spatial_connectivities"
+DEFAULT_GP_NAMES_KEY = "nichecompass_gp_names"
+DEFAULT_ACTIVE_GP_NAMES_KEY = "nichecompass_active_gp_names"
+DEFAULT_GP_TARGETS_MASK_KEY = "nichecompass_gp_targets"
+DEFAULT_GP_TARGETS_CATEGORIES_MASK_KEY = "nichecompass_gp_targets_categories"
+DEFAULT_GP_SOURCES_MASK_KEY = "nichecompass_gp_sources"
+DEFAULT_GP_SOURCES_CATEGORIES_MASK_KEY = "nichecompass_gp_sources_categories"
+DEFAULT_LATENT_KEY = "nichecompass_latent"
+
+DEFAULT_TARGET_RNA_PATH = (
+    "/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/RNA/"
+    "mouse_rna_processed.h5ad"
+)
+DEFAULT_TARGET_ATAC_PATH = (
+    "/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/ATAC/"
+    "mouse_atac_processed.h5ad"
+)
+
+
+@dataclass(frozen=True)
+class TrialParams:
+    encoder_input_key: str
+    multimodal_layer_series: bool
+
+
+@dataclass(frozen=True)
+class TrainConfig:
+    n_epochs: int = 400
+    n_epochs_all_gps: int = 25
+    lr: float = 0.001
+    lambda_edge_recon: float = 500000.0
+    lambda_gene_expr_recon: float = 300.0
+    lambda_chrom_access_recon: float = 300.0
+    lambda_l1_masked: float = 0.0
+    lambda_l1_addon: float = 30.0
+    lambda_multimodal_contrastive_loss: float = 100.0
+    edge_batch_size: int = 64
+    use_cuda_if_available: bool = True
+    n_sampled_neighbors: int = 4
+    multimodal_contrastive_anneal: bool = False
+    target_holdout_frac: float = 0.1
+    target_holdout_n: Optional[int] = None
+    target_holdout_seed: int = 0
+    target_paired_data: bool = True
+    target_encoder_input_key: str = "pseudocounts"
+    target_counts_key: str = DEFAULT_COUNTS_KEY
+    log_target_multimodal_contrastive: bool = True
+    use_early_stopping: bool = False
+    verbose: bool = False
+
+
+def _find_latest_cache_dir(root: str) -> Optional[str]:
+    if not os.path.isdir(root):
+        return None
+    candidates = []
+    for entry in os.listdir(root):
+        path = os.path.join(root, entry, "model")
+        if os.path.isfile(os.path.join(path, "adata.h5ad")):
+            candidates.append(path)
+    if not candidates:
+        return None
+    return max(candidates, key=os.path.getmtime)
+
+
+def resolve_cache_dir(cache_dir: Optional[str]) -> str:
+    if cache_dir:
+        return cache_dir
+    default_root = (
+        "/home/mcb/users/dmannk/BAKLAVA_base/outputs/"
+        "nichecompass_mouse_brain_multimodal/artifacts/multimodal"
+    )
+    latest = _find_latest_cache_dir(default_root)
+    if latest is None:
+        raise FileNotFoundError(
+            "No cached model inputs found. Provide --cache-dir pointing to a "
+            "model folder containing adata.h5ad and adata_atac.h5ad."
+        )
+    return latest
+
+
+def load_cached_inputs(cache_dir: str) -> Tuple[ad.AnnData, ad.AnnData]:
+    adata_path = os.path.join(cache_dir, "adata.h5ad")
+    adata_atac_path = os.path.join(cache_dir, "adata_atac.h5ad")
+    if not os.path.isfile(adata_path) or not os.path.isfile(adata_atac_path):
+        raise FileNotFoundError(
+            "Cache dir must contain adata.h5ad and adata_atac.h5ad: "
+            f"{cache_dir}"
+        )
+    return ad.read_h5ad(adata_path), ad.read_h5ad(adata_atac_path)
+
+
+def build_model(
+    adata: ad.AnnData,
+    adata_atac: ad.AnnData,
+    params: TrialParams,
+) -> CustomNicheCompass:
+    return CustomNicheCompass(
+        adata,
+        adata_atac,
+        counts_key=DEFAULT_COUNTS_KEY,
+        adj_key=DEFAULT_ADJ_KEY,
+        gp_names_key=DEFAULT_GP_NAMES_KEY,
+        active_gp_names_key=DEFAULT_ACTIVE_GP_NAMES_KEY,
+        gp_targets_mask_key=DEFAULT_GP_TARGETS_MASK_KEY,
+        gp_targets_categories_mask_key=DEFAULT_GP_TARGETS_CATEGORIES_MASK_KEY,
+        gp_sources_mask_key=DEFAULT_GP_SOURCES_MASK_KEY,
+        gp_sources_categories_mask_key=DEFAULT_GP_SOURCES_CATEGORIES_MASK_KEY,
+        active_gp_thresh_ratio=0.01,
+        latent_key=DEFAULT_LATENT_KEY,
+        conv_layer_encoder="gatv2conv",
+        encoder_input_key=params.encoder_input_key,
+        multimodal_layer_series=params.multimodal_layer_series,
+        multimodal_embedding_size=None,
+    )
+
+
+def get_or_create_experiment_id(experiment_name: str) -> str:
+    experiment = mlflow.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        return mlflow.create_experiment(experiment_name)
+    return experiment.experiment_id
+
+
+def run_trial(
+    params: TrialParams,
+    cache_dir: str,
+    train_cfg: TrainConfig,
+    target_rna_path: str = DEFAULT_TARGET_RNA_PATH,
+    target_atac_path: str = DEFAULT_TARGET_ATAC_PATH,
+    mlflow_experiment_id: Optional[str] = None,
+) -> float:
+    adata, adata_atac = load_cached_inputs(cache_dir)
+    model = build_model(adata, adata_atac, params)
+
+    target_rna = ad.read_h5ad(target_rna_path)
+    target_atac = ad.read_h5ad(target_atac_path)
+
+    mlflow.log_param("encoder_input_key", params.encoder_input_key)
+    mlflow.log_param("multimodal_layer_series", params.multimodal_layer_series)
+
+    model.train(
+        n_epochs=train_cfg.n_epochs,
+        n_epochs_all_gps=train_cfg.n_epochs_all_gps,
+        lr=train_cfg.lr,
+        lambda_edge_recon=train_cfg.lambda_edge_recon,
+        lambda_gene_expr_recon=train_cfg.lambda_gene_expr_recon,
+        lambda_chrom_access_recon=train_cfg.lambda_chrom_access_recon,
+        lambda_l1_masked=train_cfg.lambda_l1_masked,
+        lambda_l1_addon=train_cfg.lambda_l1_addon,
+        lambda_multimodal_contrastive_loss=train_cfg.lambda_multimodal_contrastive_loss,
+        edge_batch_size=train_cfg.edge_batch_size,
+        use_cuda_if_available=train_cfg.use_cuda_if_available,
+        n_sampled_neighbors=train_cfg.n_sampled_neighbors,
+        multimodal_contrastive_anneal=train_cfg.multimodal_contrastive_anneal,
+        target_adata=target_rna,
+        target_adata_atac=target_atac,
+        target_holdout_frac=train_cfg.target_holdout_frac,
+        target_holdout_n=train_cfg.target_holdout_n,
+        target_holdout_seed=train_cfg.target_holdout_seed,
+        target_paired_data=train_cfg.target_paired_data,
+        target_encoder_input_key=train_cfg.target_encoder_input_key,
+        target_counts_key=train_cfg.target_counts_key,
+        log_target_multimodal_contrastive=train_cfg.log_target_multimodal_contrastive,
+        use_early_stopping=train_cfg.use_early_stopping,
+        verbose=train_cfg.verbose,
+        mlflow_experiment_id=mlflow_experiment_id,
+    )
+
+    logs = model.trainer.epoch_logs.get("target_multimodal_contrastive_loss", [])
+    if not logs:
+        raise RuntimeError(
+            "target_multimodal_contrastive_loss not logged. Ensure "
+            "log_target_multimodal_contrastive=True."
+        )
+    metric = float(logs[-1])
+    mlflow.log_metric("objective_target_multimodal_contrastive_loss", metric)
+    return metric

@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from dataclasses import asdict
 
 import mlflow
 import optuna
@@ -90,6 +91,12 @@ def main() -> None:
             )
 
     with mlflow.start_run(run_name=args.study_name):
+        mlflow.log_param("cache_dir", cache_dir)
+        mlflow.log_param("study_name", args.study_name)
+        mlflow.log_param("n_trials", args.n_trials)
+        for key, values in search_space.items():
+            mlflow.log_param(f"search_space_{key}", str(values))
+        mlflow.log_params(asdict(train_cfg))
         study.optimize(objective, n_trials=args.n_trials)
 
 

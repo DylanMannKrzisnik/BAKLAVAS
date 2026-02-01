@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import anndata as ad
@@ -149,8 +149,7 @@ def run_trial(
 
     target_rna, target_atac = load_cached_targets(cache_dir)
 
-    mlflow.log_param("encoder_input_key", params.encoder_input_key)
-    mlflow.log_param("multimodal_layer_series", params.multimodal_layer_series)
+    mlflow.log_params(asdict(params))
 
     model.train(
         n_epochs=train_cfg.n_epochs,

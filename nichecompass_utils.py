@@ -46,6 +46,7 @@ class CustomNicheCompass(NicheCompass):
                  adata: AnnData,
                  adata_atac: Optional[AnnData]=None,
                  counts_key: Optional[str]="counts",
+                 encoder_input_key: Optional[str]=None,
                  adj_key: str="spatial_connectivities",
                  gp_names_key: str="nichecompass_gp_names",
                  active_gp_names_key: str="nichecompass_active_gp_names",
@@ -106,6 +107,7 @@ class CustomNicheCompass(NicheCompass):
         self.adata = adata
         self.adata_atac = adata_atac
         self.counts_key_ = counts_key
+        self.encoder_input_key_ = encoder_input_key
         self.adj_key_ = adj_key
         self.gp_names_key_ = gp_names_key
         self.active_gp_names_key_ = active_gp_names_key
@@ -382,6 +384,17 @@ class CustomNicheCompass(NicheCompass):
                                  " normalized counts, make sure that "
                                  "´log_variational´ is ´False´.")
 
+        # Validate encoder input key (if provided)
+        if encoder_input_key is not None:
+            if encoder_input_key not in adata.layers:
+                raise ValueError(
+                    "Please specify an adequate ´encoder_input_key´. "
+                    "The key was not found in adata.layers.")
+            if adata_atac is not None and encoder_input_key not in adata_atac.layers:
+                raise ValueError(
+                    "Please specify an adequate ´encoder_input_key´. "
+                    "The key was not found in adata_atac.layers.")
+
         # Validate adjacency key
         if adj_key not in adata.obsp:
             raise ValueError("Please specify an adequate ´adj_key´. "
@@ -521,6 +534,7 @@ class CustomNicheCompass(NicheCompass):
             adata_atac=self.adata_atac,
             model=self.model,
             counts_key=self.counts_key_,
+            encoder_input_key=self.encoder_input_key_,
             adj_key=self.adj_key_,
             gp_targets_mask_key=self.gp_targets_mask_key_,
             gp_sources_mask_key=self.gp_sources_mask_key_,
@@ -629,6 +643,7 @@ class CustomNicheCompass(NicheCompass):
             adata: Optional[AnnData]=None,
             adata_atac: Optional[AnnData]=None,
             counts_key: Optional[str]="counts",
+            encoder_input_key: Optional[str]=None,
             adj_key: str="spatial_connectivities",
             cat_covariates_keys: Optional[List[str]]=None,
             paired_data: bool=True,
@@ -664,6 +679,8 @@ class CustomNicheCompass(NicheCompass):
             adata = self.adata
         if (adata_atac is None) & hasattr(self, "adata_atac"):
             adata_atac = self.adata_atac
+        if encoder_input_key is None:
+            encoder_input_key = self.encoder_input_key_
 
         # Create single dataloader containing entire dataset
         data_dict = prepare_data(
@@ -671,6 +688,7 @@ class CustomNicheCompass(NicheCompass):
             cat_covariates_label_encoders=self.model.cat_covariates_label_encoders_,
             adata_atac=adata_atac,
             counts_key=counts_key,
+            encoder_input_key=encoder_input_key,
             adj_key=adj_key,
             cat_covariates_keys=cat_covariates_keys,
             paired_data=paired_data,
@@ -828,6 +846,7 @@ class CustomNicheCompass(NicheCompass):
             paired_data: bool=True,
             only_active_gps: bool=True,
             node_batch_size: int=64,
+            encoder_input_key: Optional[str]=None,
             ) -> dict:
         """
         Get the omics decoder outputs.
@@ -840,6 +859,8 @@ class CustomNicheCompass(NicheCompass):
             adata = self.adata
         if (adata_atac is None) & hasattr(self, "adata_atac"):
             adata_atac = self.adata_atac
+        if encoder_input_key is None:
+            encoder_input_key = self.encoder_input_key_
 
         # Create single dataloader containing entire dataset
         data_dict = prepare_data(
@@ -847,6 +868,7 @@ class CustomNicheCompass(NicheCompass):
             cat_covariates_label_encoders=self.model.cat_covariates_label_encoders_,
             adata_atac=adata_atac,
             counts_key=self.counts_key_,
+            encoder_input_key=encoder_input_key,
             adj_key=self.adj_key_,
             cat_covariates_keys=self.cat_covariates_keys_,
             paired_data=paired_data,
@@ -912,7 +934,7 @@ class CustomTrainer(Trainer):
     Trainer that uses the project-specific prepare_data implementation.
     """
 
-    def __init__(self, *args, paired_data: bool=True, **kwargs):
+    def __init__(self, *args, paired_data: bool=True, encoder_input_key: Optional[str]=None, **kwargs):
         super().__init__(*args, **kwargs)
 
         data_dict = prepare_data(
@@ -920,6 +942,7 @@ class CustomTrainer(Trainer):
             cat_covariates_label_encoders=self.model.cat_covariates_label_encoders_,
             adata_atac=self.adata_atac,
             counts_key=self.counts_key,
+            encoder_input_key=encoder_input_key,
             adj_key=self.adj_key,
             cat_covariates_keys=self.cat_covariates_keys,
             paired_data=paired_data,
@@ -1499,7 +1522,8 @@ class CustomVGPGAE(VGPGAE):
             distributions if ´decoder == omics´, as well as ´mu´ and ´logstd´ 
             from the latent space distribution.
         """
-        x = data_batch.x # dim: n_obs x n_omics_features
+        x_input = data_batch.x # dim: n_obs x n_omics_features
+        x_counts = getattr(data_batch, "x_counts", x_input)
         edge_index = data_batch.edge_index # dim: 2 x n_edges (incl. all edges
                                            # of sampled graph)
         
@@ -1522,9 +1546,9 @@ class CustomVGPGAE(VGPGAE):
         # Logarithmitize omics feature vector (only) for encoder input for
         # numerical stability. This will not affect node labels.
         if self.log_variational_:
-            x_enc = torch.log(1 + x)
+            x_enc = torch.log(1 + x_input)
         else:
-            x_enc = x
+            x_enc = x_input
             
         # Get categorical covariates embedding
         if len(self.cat_covariates_cats_) > 0:
@@ -1675,22 +1699,22 @@ class CustomVGPGAE(VGPGAE):
                     
             output["node_labels"] = {}
 
-            # Get rna and atac part from omics feature vector
-            x_atac = x[:, self.n_output_genes_:]
-            x = x[:, :self.n_output_genes_]
+            # Get rna and atac part from omics feature vector (counts targets)
+            x_counts_atac = x_counts[:, self.n_output_genes_:]
+            x_counts_rna = x_counts[:, :self.n_output_genes_]
         
             # Compute aggregated neighborhood rna feature vector
             rna_node_label_aggregator_output = self.rna_node_label_aggregator(
-                    x=x,
+                    x=x_counts_rna,
                     edge_index=edge_index,
                     return_agg_weights=return_agg_weights)
             x_neighbors = rna_node_label_aggregator_output[0]
  
             # Retrieve rna node labels and only keep nodes in current node batch
             # and reconstructed features
-            assert x.size(1) == self.n_output_genes_
+            assert x_counts_rna.size(1) == self.n_output_genes_
             assert x_neighbors.size(1) == self.n_output_genes_
-            output["node_labels"]["target_rna"] = x[batch_idx][
+            output["node_labels"]["target_rna"] = x_counts_rna[batch_idx][
                 :, self.features_idx_dict_["target_reconstructed_rna_idx"]]
             output["node_labels"]["source_rna"] = x_neighbors[batch_idx][
                 :, self.features_idx_dict_["source_reconstructed_rna_idx"]]
@@ -1764,16 +1788,16 @@ class CustomVGPGAE(VGPGAE):
                 # Compute aggregated neighborhood atac feature vector
                 atac_node_label_aggregator_output = (
                     self.atac_node_label_aggregator(
-                        x=x_atac,
+                        x=x_counts_atac,
                         edge_index=edge_index,
                         return_agg_weights=return_agg_weights))
                 x_neighbors_atac = atac_node_label_aggregator_output[0]
 
                 # Retrieve node labels and only keep nodes in current node batch
                 # and reconstructed features
-                assert x_atac.size(1) == self.n_output_peaks_
+                assert x_counts_atac.size(1) == self.n_output_peaks_
                 assert x_neighbors_atac.size(1) == self.n_output_peaks_
-                output["node_labels"]["target_atac"] = x_atac[batch_idx][
+                output["node_labels"]["target_atac"] = x_counts_atac[batch_idx][
                     :, self.features_idx_dict_["target_reconstructed_atac_idx"]]  
                 output["node_labels"]["source_atac"] = x_neighbors_atac[batch_idx][
                     :, self.features_idx_dict_["source_reconstructed_atac_idx"]]
@@ -2074,15 +2098,16 @@ class CustomVGPGAE(VGPGAE):
                 node_batch=node_batch,
                 only_active_gps=only_active_gps)
 
-        x = node_batch.x  # dim: n_obs x n_omics_features
+        x_input = node_batch.x  # dim: n_obs x n_omics_features
+        x_counts = getattr(node_batch, "x_counts", x_input)
         edge_index = node_batch.edge_index
         batch_idx = slice(None, node_batch.batch_size)
 
         # Logarithmitize omics feature vector if done during training
         if self.log_variational_:
-            x_enc = torch.log(1 + x)
+            x_enc = torch.log(1 + x_input)
         else:
-            x_enc = x
+            x_enc = x_input
 
         # Get categorical covariate embeddings
         if len(self.cat_covariates_cats_) > 0:
@@ -2138,21 +2163,21 @@ class CustomVGPGAE(VGPGAE):
         output = {}
         output["node_labels"] = {}
 
-        # Get rna and atac part from omics feature vector
-        x_atac = x[:, self.n_output_genes_:]
-        x = x[:, :self.n_output_genes_]
+        # Get rna and atac part from omics feature vector (counts targets)
+        x_counts_atac = x_counts[:, self.n_output_genes_:]
+        x_counts_rna = x_counts[:, :self.n_output_genes_]
 
         # Compute aggregated neighborhood rna feature vector
         rna_node_label_aggregator_output = self.rna_node_label_aggregator(
-                x=x,
+                x=x_counts_rna,
                 edge_index=edge_index,
                 return_agg_weights=False)
         x_neighbors = rna_node_label_aggregator_output[0]
 
         # Retrieve rna node labels and only keep nodes in current node batch
-        assert x.size(1) == self.n_output_genes_
+        assert x_counts_rna.size(1) == self.n_output_genes_
         assert x_neighbors.size(1) == self.n_output_genes_
-        output["node_labels"]["target_rna"] = x[batch_idx]
+        output["node_labels"]["target_rna"] = x_counts_rna[batch_idx]
         output["node_labels"]["source_rna"] = x_neighbors[batch_idx]
 
         # Use observed library size as scaling factor for the NB means
@@ -2186,15 +2211,15 @@ class CustomVGPGAE(VGPGAE):
             # Compute aggregated neighborhood atac feature vector
             atac_node_label_aggregator_output = (
                 self.atac_node_label_aggregator(
-                    x=x_atac,
+                    x=x_counts_atac,
                     edge_index=edge_index,
                     return_agg_weights=False))
             x_neighbors_atac = atac_node_label_aggregator_output[0]
 
             # Retrieve node labels and only keep nodes in current node batch
-            assert x_atac.size(1) == self.n_output_peaks_
+            assert x_counts_atac.size(1) == self.n_output_peaks_
             assert x_neighbors_atac.size(1) == self.n_output_peaks_
-            output["node_labels"]["target_atac"] = x_atac[batch_idx][
+            output["node_labels"]["target_atac"] = x_counts_atac[batch_idx][
                 :, self.features_idx_dict_["target_reconstructed_atac_idx"]]
             output["node_labels"]["source_atac"] = x_neighbors_atac[batch_idx][
                 :, self.features_idx_dict_["source_reconstructed_atac_idx"]]
@@ -2342,24 +2367,47 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
                  cat_covariates_label_encoders: List[dict],
                  adata_atac: Optional[AnnData]=None,
                  counts_key: Optional[str]="counts",
+                 encoder_input_key: Optional[str]=None,
                  adj_key: str="spatial_connectivities",
                  edge_label_adj_key: str="edge_label_spatial_connectivities",
                  self_loops: bool=True,
                  cat_covariates_keys: Optional[List[str]]=None,
                  paired_data: bool=True):
-        if counts_key is None:
-            x_rna = adata.X
+        input_key = encoder_input_key if encoder_input_key is not None else counts_key
+
+        if input_key is None:
+            x_rna_input = adata.X
         else:
-            x_rna = adata.layers[counts_key]
+            x_rna_input = adata.layers[input_key]
+
+        if counts_key is None:
+            x_rna_counts = adata.X
+        else:
+            x_rna_counts = adata.layers[counts_key]
 
         # Store features in dense format
-        if sp.issparse(x_rna): 
-            self.x_rna = torch.tensor(x_rna.toarray())
+        if sp.issparse(x_rna_input):
+            self.x_rna = torch.tensor(x_rna_input.toarray())
         else:
-            self.x_rna = torch.tensor(x_rna)
+            self.x_rna = torch.tensor(x_rna_input)
+
+        if sp.issparse(x_rna_counts):
+            self.x_rna_counts = torch.tensor(x_rna_counts.toarray())
+        else:
+            self.x_rna_counts = torch.tensor(x_rna_counts)
 
         # Store ATAC features in dense format if provided
         if adata_atac is not None:
+            if input_key is None:
+                x_atac_input = adata_atac.X
+            else:
+                x_atac_input = adata_atac.layers[input_key]
+
+            if counts_key is None:
+                x_atac_counts = adata_atac.X
+            else:
+                x_atac_counts = adata_atac.layers[counts_key]
+
             if paired_data:
                 if ((adata.n_obs != adata_atac.n_obs) or
                     (not adata.obs_names.equals(adata_atac.obs_names))):
@@ -2368,11 +2416,18 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
                         "the same order when paired_data=True. Set "
                         "paired_data=False for unpaired forward passes.")
 
-                if sp.issparse(adata_atac.X):
-                    self.x_atac = torch.tensor(adata_atac.X.toarray())
+                if sp.issparse(x_atac_input):
+                    self.x_atac = torch.tensor(x_atac_input.toarray())
                 else:
-                    self.x_atac = torch.tensor(adata_atac.X)
+                    self.x_atac = torch.tensor(x_atac_input)
+
+                if sp.issparse(x_atac_counts):
+                    self.x_atac_counts = torch.tensor(x_atac_counts.toarray())
+                else:
+                    self.x_atac_counts = torch.tensor(x_atac_counts)
+
                 self.x = torch.cat((self.x_rna, self.x_atac), axis=1)
+                self.x_counts = torch.cat((self.x_rna_counts, self.x_atac_counts), axis=1)
                 self.modality_mask = torch.ones(
                     (self.x.size(0), 2), dtype=torch.bool)
             else:
@@ -2392,20 +2447,38 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
                     dtype=self.x_rna.dtype)
                 x_rna_full[rna_positions] = self.x_rna
 
-                if sp.issparse(adata_atac.X):
-                    x_atac = torch.tensor(adata_atac.X.toarray(),
+                if sp.issparse(x_atac_input):
+                    x_atac = torch.tensor(x_atac_input.toarray(),
                                           dtype=self.x_rna.dtype)
                 else:
-                    x_atac = torch.tensor(adata_atac.X,
+                    x_atac = torch.tensor(x_atac_input,
                                           dtype=self.x_rna.dtype)
                 x_atac_full = torch.zeros(
                     (n_obs_total, adata_atac.n_vars),
                     dtype=self.x_rna.dtype)
                 x_atac_full[atac_positions] = x_atac
 
+                x_rna_counts_full = torch.zeros(
+                    (n_obs_total, adata.n_vars),
+                    dtype=self.x_rna_counts.dtype)
+                x_rna_counts_full[rna_positions] = self.x_rna_counts
+
+                if sp.issparse(x_atac_counts):
+                    x_atac_counts = torch.tensor(x_atac_counts.toarray(),
+                                                 dtype=self.x_rna_counts.dtype)
+                else:
+                    x_atac_counts = torch.tensor(x_atac_counts,
+                                                 dtype=self.x_rna_counts.dtype)
+                x_atac_counts_full = torch.zeros(
+                    (n_obs_total, adata_atac.n_vars),
+                    dtype=self.x_rna_counts.dtype)
+                x_atac_counts_full[atac_positions] = x_atac_counts
+
                 self.x_rna = x_rna_full
                 self.x_atac = x_atac_full
                 self.x = torch.cat((self.x_rna, self.x_atac), axis=1)
+                self.x_counts = torch.cat(
+                    (x_rna_counts_full, x_atac_counts_full), axis=1)
 
                 modality_mask = torch.zeros((n_obs_total, 2), dtype=torch.bool)
                 modality_mask[rna_positions, 0] = True
@@ -2414,6 +2487,7 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
         else:
             self.x_atac = None
             self.x = self.x_rna
+            self.x_counts = self.x_rna_counts
             self.modality_mask = torch.stack(
                 (torch.ones(self.x.size(0), dtype=torch.bool),
                  torch.zeros(self.x.size(0), dtype=torch.bool)),
@@ -2498,7 +2572,7 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
                                                    dim=1)            
 
         self.n_node_features = self.x.size(1)
-        self.size_factors = self.x.sum(1) # fix for ATAC case
+        self.size_factors = self.x_counts.sum(1) # fix for ATAC case
 
     def __len__(self):
         """Return the number of observations stored in SpatialAnnTorchDataset"""
@@ -2509,6 +2583,7 @@ def prepare_data(adata: AnnData,
                  cat_covariates_label_encoders: List[dict],
                  adata_atac: Optional[AnnData]=None,
                  counts_key: Optional[str]="counts",
+                 encoder_input_key: Optional[str]=None,
                  adj_key: str="spatial_connectivities",
                  cat_covariates_keys: Optional[List[str]]=None,
                  paired_data: bool=True,
@@ -2524,6 +2599,7 @@ def prepare_data(adata: AnnData,
         adata=adata,
         adata_atac=adata_atac,
         counts_key=counts_key,
+        encoder_input_key=encoder_input_key,
         adj_key=adj_key,
         cat_covariates_keys=cat_covariates_keys,
         cat_covariates_label_encoders=cat_covariates_label_encoders,
@@ -2543,6 +2619,7 @@ def prepare_data(adata: AnnData,
     data.x_rna = dataset.x_rna
     if dataset.x_atac is not None:
         data.x_atac = dataset.x_atac
+    data.x_counts = dataset.x_counts
 
     data.modality_mask = dataset.modality_mask
 

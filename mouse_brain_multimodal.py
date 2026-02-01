@@ -768,10 +768,12 @@ model = CustomNicheCompass(
     gp_targets_categories_mask_key=gp_targets_categories_mask_key,
     gp_sources_mask_key=gp_sources_mask_key,
     gp_sources_categories_mask_key=gp_sources_categories_mask_key,
+    active_gp_thresh_ratio=active_gp_thresh_ratio,
     latent_key=latent_key,
     conv_layer_encoder=conv_layer_encoder,
     encoder_input_key="pseudocounts",
-    active_gp_thresh_ratio=active_gp_thresh_ratio,
+    multimodal_layer_series=True,
+    multimodal_embedding_size=None,
 )
 
 

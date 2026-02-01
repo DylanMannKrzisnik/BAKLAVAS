@@ -1560,6 +1560,8 @@ class CustomVGPGAE(VGPGAE):
 
         # Multimodal layer
         gp_embedding_size = self.n_prior_gp_ + self.n_addon_gp_
+        if self.multimodal_layer_series_ and self.multimodal_embedding_size_ is None:
+            self.multimodal_embedding_size_ = gp_embedding_size
         if self.multimodal_layer_series_:
             if self.multimodal_embedding_size_ == gp_embedding_size:
                 self.multimodal_encoder = torch.nn.Identity()

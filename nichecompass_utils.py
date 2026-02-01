@@ -518,6 +518,15 @@ class CustomNicheCompass(NicheCompass):
               edge_batch_size: int=256,
               node_batch_size: Optional[int]=None,
               paired_data: bool=True,
+              target_adata: Optional[AnnData]=None,
+              target_adata_atac: Optional[AnnData]=None,
+              target_holdout_frac: float=0.1,
+              target_holdout_n: Optional[int]=None,
+              target_holdout_seed: int=0,
+              target_paired_data: bool=True,
+              target_encoder_input_key: Optional[str]=None,
+              target_counts_key: Optional[str]=None,
+              log_target_multimodal_contrastive: bool=False,
               mlflow_experiment_id: Optional[str]=None,
               retrieve_cat_covariates_embeds: bool=False,
               retrieve_recon_edge_probs: bool=False,
@@ -544,6 +553,15 @@ class CustomNicheCompass(NicheCompass):
             edge_batch_size=edge_batch_size,
             node_batch_size=node_batch_size,
             paired_data=paired_data,
+            target_adata=target_adata,
+            target_adata_atac=target_adata_atac,
+            target_holdout_frac=target_holdout_frac,
+            target_holdout_n=target_holdout_n,
+            target_holdout_seed=target_holdout_seed,
+            target_paired_data=target_paired_data,
+            target_encoder_input_key=target_encoder_input_key,
+            target_counts_key=target_counts_key,
+            log_target_multimodal_contrastive=log_target_multimodal_contrastive,
             use_cuda_if_available=use_cuda_if_available,
             n_sampled_neighbors=n_sampled_neighbors,
             latent_dtype=latent_dtype,
@@ -934,7 +952,22 @@ class CustomTrainer(Trainer):
     Trainer that uses the project-specific prepare_data implementation.
     """
 
-    def __init__(self, *args, paired_data: bool=True, encoder_input_key: Optional[str]=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        paired_data: bool=True,
+        encoder_input_key: Optional[str]=None,
+        target_adata: Optional[AnnData]=None,
+        target_adata_atac: Optional[AnnData]=None,
+        target_holdout_frac: float=0.1,
+        target_holdout_n: Optional[int]=None,
+        target_holdout_seed: int=0,
+        target_paired_data: bool=True,
+        target_encoder_input_key: Optional[str]=None,
+        target_counts_key: Optional[str]=None,
+        log_target_multimodal_contrastive: bool=False,
+        **kwargs
+    ):
         super().__init__(*args, **kwargs)
 
         data_dict = prepare_data(
@@ -977,6 +1010,134 @@ class CustomTrainer(Trainer):
         self.edge_val_loader = loader_dict.pop("edge_val_loader", None)
         self.node_train_loader = loader_dict["node_train_loader"]
         self.node_val_loader = loader_dict.pop("node_val_loader", None)
+
+        self.log_target_multimodal_contrastive_ = log_target_multimodal_contrastive
+        self.target_node_loader = None
+        if (self.log_target_multimodal_contrastive_ and
+            target_adata is not None and
+            target_adata_atac is not None):
+            target_counts_key = (
+                self.counts_key if target_counts_key is None else target_counts_key)
+            if target_encoder_input_key is None:
+                target_encoder_input_key = encoder_input_key
+
+            rna, atac = self._subset_target_holdout(
+                target_adata=target_adata,
+                target_adata_atac=target_adata_atac,
+                paired_data=target_paired_data,
+                holdout_frac=target_holdout_frac,
+                holdout_n=target_holdout_n,
+                seed=target_holdout_seed,
+            )
+            if rna is not None and atac is not None:
+                target_data_dict = prepare_data(
+                    adata=rna,
+                    cat_covariates_label_encoders=self.model.cat_covariates_label_encoders_,
+                    adata_atac=atac,
+                    counts_key=target_counts_key,
+                    encoder_input_key=target_encoder_input_key,
+                    adj_key=self.adj_key,
+                    cat_covariates_keys=self.cat_covariates_keys,
+                    paired_data=True,
+                    edge_val_ratio=0.,
+                    edge_test_ratio=0.,
+                    node_val_ratio=0.,
+                    node_test_ratio=0.)
+                target_node_masked_data = target_data_dict["node_masked_data"]
+                target_loader_dict = initialize_dataloaders(
+                    node_masked_data=target_node_masked_data,
+                    edge_train_data=None,
+                    edge_val_data=None,
+                    edge_batch_size=None,
+                    node_batch_size=self.node_batch_size_,
+                    shuffle=False)
+                self.target_node_loader = target_loader_dict["node_train_loader"]
+
+    def _subset_target_holdout(
+        self,
+        target_adata: AnnData,
+        target_adata_atac: AnnData,
+        paired_data: bool,
+        holdout_frac: float,
+        holdout_n: Optional[int],
+        seed: int,
+    ) -> Tuple[Optional[AnnData], Optional[AnnData]]:
+        if paired_data:
+            shared = target_adata.obs_names.intersection(target_adata_atac.obs_names)
+        else:
+            shared = target_adata.obs_names.intersection(target_adata_atac.obs_names)
+            if len(shared) == 0:
+                warnings.warn(
+                    "Target holdout requires paired obs_names for "
+                    "multimodal contrastive logging; skipping target logging.")
+                return None, None
+
+        if holdout_n is None:
+            holdout_n = int(max(1, round(len(shared) * holdout_frac)))
+        holdout_n = min(holdout_n, len(shared))
+        rng = np.random.default_rng(seed)
+        holdout_obs = pd.Index(rng.choice(shared, size=holdout_n, replace=False))
+        return target_adata[holdout_obs].copy(), target_adata_atac[holdout_obs].copy()
+
+    @torch.no_grad()
+    def _log_target_multimodal_contrastive_loss(self, temperature: float) -> None:
+        if self.target_node_loader is None:
+            return
+        was_training = self.model.training
+        self.model.eval()
+
+        losses = []
+        for node_batch in self.target_node_loader:
+            node_batch = node_batch.to(self.device)
+            x_input = node_batch.x
+            if self.model.log_variational_:
+                x_enc = torch.log(1 + x_input)
+            else:
+                x_enc = x_input
+
+            x_rna = x_enc[:, :self.model.n_output_genes_]
+            x_atac = x_enc[:, self.model.n_output_genes_:]
+
+            if len(self.model.cat_covariates_cats_) > 0:
+                cat_covariates_embeds = []
+                for i in range(len(self.model.cat_covariates_embedders)):
+                    cat_covariates_embeds.append(
+                        self.model.cat_covariates_embedders[i](
+                            node_batch.cat_covariates_cats[:, i]))
+                cat_covariates_embed = torch.cat(cat_covariates_embeds, dim=1)
+            else:
+                cat_covariates_embed = None
+
+            hidden_rna = self.model.encoder_rna.forward_fc_only(
+                x=x_rna,
+                cat_covariates_embed=(
+                    cat_covariates_embed if "encoder" in
+                    self.model.cat_covariates_embeds_injection_ else None))
+            hidden_atac = self.model.encoder_atac.forward_fc_only(
+                x=x_atac,
+                cat_covariates_embed=(
+                    cat_covariates_embed if "encoder" in
+                    self.model.cat_covariates_embeds_injection_ else None))
+
+            emb_rna = self.model.multimodal_layer(
+                self.model._fc_hidden_to_multimodal_in(hidden_rna))
+            emb_atac = self.model.multimodal_layer(
+                self.model._fc_hidden_to_multimodal_in(hidden_atac))
+
+            emb_rna = F.normalize(emb_rna, p=2, dim=1)
+            emb_atac = F.normalize(emb_atac, p=2, dim=1)
+            similarity = torch.matmul(emb_rna, emb_atac.t())
+            loss = self.model.compute_multimodal_contrastive_loss(
+                similarity_matrix=similarity,
+                temperature=temperature)
+            losses.append(loss.item())
+
+        if losses:
+            self.iter_logs["target_multimodal_contrastive_loss"].append(
+                float(np.mean(losses)))
+
+        if was_training:
+            self.model.train()
 
     def _get_multimodal_contrastive_weight(self, increasing: bool=True) -> float:
         if (not self.multimodal_contrastive_anneal_) or self.n_epochs_ <= 1:
@@ -1164,6 +1325,22 @@ class CustomTrainer(Trainer):
                     if self.mlflow_experiment_id is not None:
                         mlflow.log_metric(key, epoch_avg_loss, step=self.epoch)
 
+            if self.log_target_multimodal_contrastive_:
+                self._log_target_multimodal_contrastive_loss(
+                    temperature=self.multimodal_temperature_)
+                if self.iter_logs["target_multimodal_contrastive_loss"]:
+                    epoch_avg_target = float(
+                        np.array(
+                            self.iter_logs["target_multimodal_contrastive_loss"]
+                        ).mean())
+                    self.epoch_logs["target_multimodal_contrastive_loss"].append(
+                        epoch_avg_target)
+                    if self.mlflow_experiment_id is not None:
+                        mlflow.log_metric(
+                            "target_multimodal_contrastive_loss",
+                            epoch_avg_target,
+                            step=self.epoch)
+
             if self.monitor_:
                 print_progress(self.epoch, self.epoch_logs, self.n_epochs_)
 
@@ -1342,6 +1519,26 @@ class EncoderWithFCHidden(Encoder):
             logstd = torch.cat((logstd, self.addon_conv_logstd(hidden, edge_index)), dim=1)
 
         return mu, logstd, hidden_fc
+
+    def forward_fc_only(
+        self,
+        x: torch.Tensor,
+        cat_covariates_embed: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if ((self.cat_covariates_embed_mode == "input") &
+            (cat_covariates_embed is not None)):
+            x = torch.cat((x, cat_covariates_embed), dim=1)
+
+        hidden = self.dropout(self.activation(self.fc_l1(x)))
+        if self.n_fc_layers == 2:
+            hidden = self.dropout(self.activation(self.fc_l2(hidden)))
+            hidden = self.fc_l2_bn(hidden)
+
+        if ((self.cat_covariates_embed_mode == "hidden") &
+            (cat_covariates_embed is not None)):
+            hidden = torch.cat((hidden, cat_covariates_embed), dim=1)
+
+        return hidden
 
 class CustomVGPGAE(VGPGAE):
     """

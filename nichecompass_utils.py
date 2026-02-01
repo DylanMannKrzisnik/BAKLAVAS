@@ -16,6 +16,7 @@ from collections import defaultdict
 
 import mlflow
 import numpy as np
+import pandas as pd
 import scipy.sparse as sp
 import torch
 import torch.nn.functional as F

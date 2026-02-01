@@ -5,7 +5,9 @@ import sys
 import mlflow
 import optuna
 
-sys.path.append(os.path.dirname(__file__))
+sys.path.append(
+    os.path.join(os.path.dirname(__file__), "..")
+)
 
 from hpo_mouse_brain_utils import (
     TrainConfig,
@@ -22,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--experiment-name",
-        default="nichecompass_mouse_brain_multimodal_hpo",
+        default="hpo_nichecompass_mouse_brain_multimodal",
         help="MLflow experiment name.",
     )
     parser.add_argument(

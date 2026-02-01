@@ -1089,44 +1089,17 @@ class CustomTrainer(Trainer):
         losses = []
         for node_batch in self.target_node_loader:
             node_batch = node_batch.to(self.device)
-            x_input = node_batch.x
-            if self.model.log_variational_:
-                x_enc = torch.log(1 + x_input)
-            else:
-                x_enc = x_input
+            node_output = self.model(
+                data_batch=node_batch,
+                decoder="omics",
+                use_only_active_gps=self.use_only_active_gps)
 
-            x_rna = x_enc[:, :self.model.n_output_genes_]
-            x_atac = x_enc[:, self.model.n_output_genes_:]
+            if ("mu_rna" not in node_output) or ("mu_atac" not in node_output):
+                continue
 
-            if len(self.model.cat_covariates_cats_) > 0:
-                cat_covariates_embeds = []
-                for i in range(len(self.model.cat_covariates_embedders)):
-                    cat_covariates_embeds.append(
-                        self.model.cat_covariates_embedders[i](
-                            node_batch.cat_covariates_cats[:, i]))
-                cat_covariates_embed = torch.cat(cat_covariates_embeds, dim=1)
-            else:
-                cat_covariates_embed = None
-
-            hidden_rna = self.model.encoder_rna.forward_fc_only(
-                x=x_rna,
-                cat_covariates_embed=(
-                    cat_covariates_embed if "encoder" in
-                    self.model.cat_covariates_embeds_injection_ else None))
-            hidden_atac = self.model.encoder_atac.forward_fc_only(
-                x=x_atac,
-                cat_covariates_embed=(
-                    cat_covariates_embed if "encoder" in
-                    self.model.cat_covariates_embeds_injection_ else None))
-
-            emb_rna = self.model.multimodal_layer(
-                self.model._fc_hidden_to_multimodal_in(hidden_rna))
-            emb_atac = self.model.multimodal_layer(
-                self.model._fc_hidden_to_multimodal_in(hidden_atac))
-
-            emb_rna = F.normalize(emb_rna, p=2, dim=1)
-            emb_atac = F.normalize(emb_atac, p=2, dim=1)
-            similarity = torch.matmul(emb_rna, emb_atac.t())
+            similarity = self.model.get_multimodal_similarity(
+                mu_rna=node_output["mu_rna"],
+                mu_atac=node_output["mu_atac"])
             loss = self.model.compute_multimodal_contrastive_loss(
                 similarity_matrix=similarity,
                 temperature=temperature)
@@ -1520,25 +1493,6 @@ class EncoderWithFCHidden(Encoder):
 
         return mu, logstd, hidden_fc
 
-    def forward_fc_only(
-        self,
-        x: torch.Tensor,
-        cat_covariates_embed: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        if ((self.cat_covariates_embed_mode == "input") &
-            (cat_covariates_embed is not None)):
-            x = torch.cat((x, cat_covariates_embed), dim=1)
-
-        hidden = self.dropout(self.activation(self.fc_l1(x)))
-        if self.n_fc_layers == 2:
-            hidden = self.dropout(self.activation(self.fc_l2(hidden)))
-            hidden = self.fc_l2_bn(hidden)
-
-        if ((self.cat_covariates_embed_mode == "hidden") &
-            (cat_covariates_embed is not None)):
-            hidden = torch.cat((hidden, cat_covariates_embed), dim=1)
-
-        return hidden
 
 class CustomVGPGAE(VGPGAE):
     """

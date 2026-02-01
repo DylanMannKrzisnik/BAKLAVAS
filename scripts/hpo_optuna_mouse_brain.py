@@ -36,8 +36,8 @@ def parse_args() -> argparse.Namespace:
         "--cache-dir",
         default=None,
         help=(
-            "Path to model cache dir containing adata.h5ad and adata_atac.h5ad. "
-            "If omitted, the latest outputs/.../multimodal/<timestamp>/model is used."
+            "Path to cache timestamp dir containing model/ and target_model/. "
+            "If omitted, the latest outputs/.../multimodal/<timestamp>/ is used."
         ),
     )
     parser.add_argument(

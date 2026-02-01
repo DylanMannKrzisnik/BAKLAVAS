@@ -18,16 +18,6 @@ DEFAULT_GP_SOURCES_MASK_KEY = "nichecompass_gp_sources"
 DEFAULT_GP_SOURCES_CATEGORIES_MASK_KEY = "nichecompass_gp_sources_categories"
 DEFAULT_LATENT_KEY = "nichecompass_latent"
 
-DEFAULT_TARGET_RNA_PATH = (
-    "/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/RNA/"
-    "mouse_rna_processed.h5ad"
-)
-DEFAULT_TARGET_ATAC_PATH = (
-    "/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/ATAC/"
-    "mouse_atac_processed.h5ad"
-)
-
-
 @dataclass(frozen=True)
 class TrialParams:
     encoder_input_key: str
@@ -65,8 +55,10 @@ def _find_latest_cache_dir(root: str) -> Optional[str]:
         return None
     candidates = []
     for entry in os.listdir(root):
-        path = os.path.join(root, entry, "model")
-        if os.path.isfile(os.path.join(path, "adata.h5ad")):
+        path = os.path.join(root, entry)
+        model_path = os.path.join(path, "model", "adata.h5ad")
+        target_path = os.path.join(path, "target_model", "target_adata.h5ad")
+        if os.path.isfile(model_path) and os.path.isfile(target_path):
             candidates.append(path)
     if not candidates:
         return None
@@ -84,18 +76,19 @@ def resolve_cache_dir(cache_dir: Optional[str]) -> str:
     if latest is None:
         raise FileNotFoundError(
             "No cached model inputs found. Provide --cache-dir pointing to a "
-            "model folder containing adata.h5ad and adata_atac.h5ad."
+            "timestamp folder containing model/adata.h5ad and "
+            "target_model/target_adata.h5ad."
         )
     return latest
 
 
 def load_cached_inputs(cache_dir: str) -> Tuple[ad.AnnData, ad.AnnData]:
-    adata_path = os.path.join(cache_dir, "adata.h5ad")
-    adata_atac_path = os.path.join(cache_dir, "adata_atac.h5ad")
+    adata_path = os.path.join(cache_dir, "model", "adata.h5ad")
+    adata_atac_path = os.path.join(cache_dir, "model", "adata_atac.h5ad")
     if not os.path.isfile(adata_path) or not os.path.isfile(adata_atac_path):
         raise FileNotFoundError(
-            "Cache dir must contain adata.h5ad and adata_atac.h5ad: "
-            f"{cache_dir}"
+            "Cache dir must contain model/adata.h5ad and "
+            f"model/adata_atac.h5ad: {cache_dir}"
         )
     return ad.read_h5ad(adata_path), ad.read_h5ad(adata_atac_path)
 
@@ -132,19 +125,29 @@ def get_or_create_experiment_id(experiment_name: str) -> str:
     return experiment.experiment_id
 
 
+def load_cached_targets(cache_dir: str) -> Tuple[ad.AnnData, ad.AnnData]:
+    target_rna_path = os.path.join(cache_dir, "target_model", "target_adata.h5ad")
+    target_atac_path = os.path.join(
+        cache_dir, "target_model", "target_adata_atac.h5ad"
+    )
+    if not os.path.isfile(target_rna_path) or not os.path.isfile(target_atac_path):
+        raise FileNotFoundError(
+            "Cache dir must contain target_model/target_adata.h5ad and "
+            f"target_model/target_adata_atac.h5ad: {cache_dir}"
+        )
+    return ad.read_h5ad(target_rna_path), ad.read_h5ad(target_atac_path)
+
+
 def run_trial(
     params: TrialParams,
     cache_dir: str,
     train_cfg: TrainConfig,
-    target_rna_path: str = DEFAULT_TARGET_RNA_PATH,
-    target_atac_path: str = DEFAULT_TARGET_ATAC_PATH,
     mlflow_experiment_id: Optional[str] = None,
 ) -> float:
     adata, adata_atac = load_cached_inputs(cache_dir)
     model = build_model(adata, adata_atac, params)
 
-    target_rna = ad.read_h5ad(target_rna_path)
-    target_atac = ad.read_h5ad(target_atac_path)
+    target_rna, target_atac = load_cached_targets(cache_dir)
 
     mlflow.log_param("encoder_input_key", params.encoder_input_key)
     mlflow.log_param("multimodal_layer_series", params.multimodal_layer_series)

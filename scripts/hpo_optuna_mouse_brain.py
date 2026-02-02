@@ -1,3 +1,4 @@
+#%%
 import argparse
 import os
 import subprocess
@@ -8,7 +9,7 @@ from typing import Any, List, Optional
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(notebook: bool = False) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Optuna HPO for NicheCompass mouse brain multimodal."
     )
@@ -70,11 +71,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Use an existing MLflow parent run id.",
     )
-    return parser.parse_args()
+    if notebook:
+        return parser.parse_known_args()[0]
+    else:
+        return parser.parse_args()
 
-
+#%%
 def main() -> None:
     args = parse_args()
+    #args = parse_args(notebook=True)
 
     if args.gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
@@ -279,6 +284,6 @@ def _launch_workers(
     for proc in procs:
         proc.wait()
 
-
+#%%
 if __name__ == "__main__":
     main()

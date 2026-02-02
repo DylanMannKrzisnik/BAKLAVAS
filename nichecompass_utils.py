@@ -976,6 +976,7 @@ class CustomTrainer(Trainer):
         log_target_multimodal_contrastive: bool=False,
         **kwargs
     ):
+        self.latent_dtype_ = kwargs.pop("latent_dtype", np.float64)
         super().__init__(*args, **kwargs)
 
         data_dict = prepare_data(
@@ -1020,15 +1021,20 @@ class CustomTrainer(Trainer):
         self.node_val_loader = loader_dict.pop("node_val_loader", None)
 
         self.log_target_multimodal_contrastive_ = log_target_multimodal_contrastive
-        self.target_node_loader = None
+        self.target_adata = target_adata
+        self.target_adata_atac = target_adata_atac
+        self.target_paired_data_ = target_paired_data
+        self.target_encoder_input_key_ = (
+            encoder_input_key if target_encoder_input_key is None
+            else target_encoder_input_key)
+        self.target_counts_key_ = (
+            self.counts_key if target_counts_key is None
+            else target_counts_key)
+        self.target_holdout_adata = None
+        self.target_holdout_adata_atac = None
         if (self.log_target_multimodal_contrastive_ and
             target_adata is not None and
             target_adata_atac is not None):
-            target_counts_key = (
-                self.counts_key if target_counts_key is None else target_counts_key)
-            if target_encoder_input_key is None:
-                target_encoder_input_key = encoder_input_key
-
             rna, atac = self._subset_target_holdout(
                 target_adata=target_adata,
                 target_adata_atac=target_adata_atac,
@@ -1038,28 +1044,8 @@ class CustomTrainer(Trainer):
                 seed=target_holdout_seed,
             )
             if rna is not None and atac is not None:
-                target_data_dict = prepare_data(
-                    adata=rna,
-                    cat_covariates_label_encoders=self.model.cat_covariates_label_encoders_,
-                    adata_atac=atac,
-                    counts_key=target_counts_key,
-                    encoder_input_key=target_encoder_input_key,
-                    adj_key=self.adj_key,
-                    cat_covariates_keys=self.cat_covariates_keys,
-                    paired_data=True,
-                    edge_val_ratio=0.,
-                    edge_test_ratio=0.,
-                    node_val_ratio=0.,
-                    node_test_ratio=0.)
-                target_node_masked_data = target_data_dict["node_masked_data"]
-                target_loader_dict = initialize_dataloaders(
-                    node_masked_data=target_node_masked_data,
-                    edge_train_data=None,
-                    edge_val_data=None,
-                    edge_batch_size=None,
-                    node_batch_size=self.node_batch_size_,
-                    shuffle=False)
-                self.target_node_loader = target_loader_dict["node_train_loader"]
+                self.target_holdout_adata = rna
+                self.target_holdout_adata_atac = atac
 
     def _subset_target_holdout(
         self,
@@ -1087,9 +1073,80 @@ class CustomTrainer(Trainer):
         holdout_obs = pd.Index(rng.choice(shared, size=holdout_n, replace=False))
         return target_adata[holdout_obs].copy(), target_adata_atac[holdout_obs].copy()
 
+    def _build_chunk_data(
+        self,
+        rna_chunk: AnnData,
+        atac_chunk: Optional[AnnData],
+        paired_data: bool,
+    ) -> Data:
+        dataset = CustomSpatialAnnTorchDataset(
+            adata=rna_chunk,
+            adata_atac=atac_chunk,
+            counts_key=self.target_counts_key_,
+            encoder_input_key=self.target_encoder_input_key_,
+            adj_key=self.adj_key,
+            cat_covariates_keys=self.cat_covariates_keys,
+            cat_covariates_label_encoders=self.model.cat_covariates_label_encoders_,
+            paired_data=paired_data)
+        data = Data(
+            x=dataset.x,
+            edge_index=dataset.edge_index,
+            edge_attr=dataset.edge_index.t())
+        data.x_counts = dataset.x_counts
+        data.modality_mask = dataset.modality_mask
+        if self.cat_covariates_keys is not None:
+            data.cat_covariates_cats = dataset.cat_covariates_cats
+        data.batch_size = data.num_nodes
+        return data
+
+    def _get_target_latent_embeddings(self, chunk_size: int=1000) -> Optional[np.ndarray]:
+        if self.target_adata is None:
+            return None
+
+        n_obs = self.target_adata.n_obs
+        if self.use_only_active_gps:
+            active_gp_mask = self.model.get_active_gp_mask()
+            n_gps = int(active_gp_mask.sum().item())
+        else:
+            n_gps = self.model.n_prior_gp_ + self.model.n_addon_gp_
+
+        clip_embeddings_rna = []
+        clip_embeddings_atac = []
+
+        model_dtype = next(self.model.parameters()).dtype
+        for rna_chunk, atac_chunk in zip(
+            self.target_adata.chunked_X(chunk_size),
+            self.target_adata_atac.chunked_X(chunk_size)
+            ):
+            
+            node_batch = self._build_chunk_data(
+                rna_chunk=rna_chunk,
+                atac_chunk=atac_chunk,
+                paired_data=paired_data)
+            node_batch = node_batch.to(self.device)
+            if node_batch.x.dtype != model_dtype:
+                node_batch.x = node_batch.x.to(model_dtype)
+
+            _, _, _, _, clip_embeddings_rna_batch, clip_embeddings_atac_batch = \
+                self.model.get_latent_representation(
+                    node_batch=node_batch,
+                    only_active_gps=self.use_only_active_gps,
+                    return_mu_std=True,
+                    separate_modalities=True,
+                    return_clip_embeddings=True)
+            clip_embeddings_rna.append(clip_embeddings_rna_batch.detach().cpu().numpy())
+            clip_embeddings_atac.append(clip_embeddings_atac_batch.detach().cpu().numpy())
+
+        clip_embeddings_rna = np.concatenate(clip_embeddings_rna, axis=0)
+        clip_embeddings_atac = np.concatenate(clip_embeddings_atac, axis=0)
+
+        self.target_adata.obsm[self.latent_key_] = clip_embeddings_rna
+        return clip_embeddings_rna, clip_embeddings_atac
+
     @torch.no_grad()
     def _log_target_paired_metrics_and_loss(self, temperature: float) -> None:
-        if self.target_node_loader is None:
+        if (self.target_holdout_adata is None or
+            self.target_holdout_adata_atac is None):
             return
         was_training = self.model.training
         self.model.eval()
@@ -1100,8 +1157,19 @@ class CustomTrainer(Trainer):
         mu_rna_parts: List[torch.Tensor] = []
         mu_atac_parts: List[torch.Tensor] = []
 
-        for node_batch in self.target_node_loader:
+        chunk_size = 1000
+        model_dtype = next(self.model.parameters()).dtype
+        for _, start, end in self.target_holdout_adata.chunk_X(
+            chunk_size, return_indices=True):
+            rna_chunk = self.target_holdout_adata[start:end].copy()
+            atac_chunk = self.target_holdout_adata_atac[start:end].copy()
+            node_batch = self._build_chunk_data(
+                rna_chunk=rna_chunk,
+                atac_chunk=atac_chunk,
+                paired_data=True)
             node_batch = node_batch.to(self.device)
+            if node_batch.x.dtype != model_dtype:
+                node_batch.x = node_batch.x.to(model_dtype)
             node_output = self.model(
                 data_batch=node_batch,
                 decoder="omics",
@@ -1110,14 +1178,8 @@ class CustomTrainer(Trainer):
             if ("mu_rna" not in node_output) or ("mu_atac" not in node_output):
                 continue
 
-            batch_size = getattr(node_batch, "batch_size", None)
-            if batch_size is None:
-                # Fallback: if batch_size is missing, use all nodes in the batch.
-                mu_rna_parts.append(node_output["mu_rna"])
-                mu_atac_parts.append(node_output["mu_atac"])
-            else:
-                mu_rna_parts.append(node_output["mu_rna"][:batch_size])
-                mu_atac_parts.append(node_output["mu_atac"][:batch_size])
+            mu_rna_parts.append(node_output["mu_rna"])
+            mu_atac_parts.append(node_output["mu_atac"])
 
         if mu_rna_parts and mu_atac_parts:
             mu_rna_all = torch.cat(mu_rna_parts, dim=0)
@@ -1156,37 +1218,32 @@ class CustomTrainer(Trainer):
     @torch.no_grad()
     def _log_target_unpaired_metrics(self) -> None:
 
-        if self.target_node_loader is None:
+        if self.target_adata is None:
+            return
+        if not hasattr(self, "batch_key_") or not hasattr(self, "label_key_"):
+            warnings.warn(
+                "Missing batch_key_/label_key_ for target benchmarking; "
+                "skipping target metrics.")
             return
         was_training = self.model.training
         self.model.eval()
 
-        metrics_dict = defaultdict(list)
-        for node_batch in self.target_node_loader:
-            node_batch = node_batch.to(self.device)
-            node_output = self.model(
-                data_batch=node_batch,
-                decoder="omics",
-                use_only_active_gps=self.use_only_active_gps)
-            if ("mu_rna" not in node_output) or ("mu_atac" not in node_output):
-                continue
+        self._get_target_latent_embeddings(chunk_size=1000)
 
-            ## need access to target anndata metadata to run benchmark_embeddings
-            results_dict = benchmark_embeddings(
-                adata=self.target_adata, # not currently available in the model
-                batch_key=self.batch_key_,
-                label_key=self.label_key_,
-                embedding_obsm_keys=[self.latent_key_],
-                n_jobs=6,
-            )
-            metrics_dict.update(results_dict)
-        if metrics_dict:
+        results_dict = benchmark_embeddings(
+            adata=self.target_adata,
+            batch_key=self.batch_key_,
+            label_key=self.label_key_,
+            embedding_obsm_keys=[self.latent_key_],
+            n_jobs=6,
+        )
+        if results_dict:
             self.iter_logs["target_foscttm"].append(
-                float(np.mean(metrics_dict["target_foscttm"])))
+                float(np.mean(results_dict["target_foscttm"])))
             self.iter_logs["target_batch_correction"].append(
-                float(np.mean(metrics_dict["target_batch_correction"])))
+                float(np.mean(results_dict["target_batch_correction"])))
             self.iter_logs["target_bio_conservation"].append(
-                float(np.mean(metrics_dict["target_bio_conservation"])))
+                float(np.mean(results_dict["target_bio_conservation"])))
 
         if was_training:
             self.model.train()
@@ -1421,6 +1478,8 @@ class CustomTrainer(Trainer):
             if self.log_target_multimodal_contrastive_:
                 self._log_target_paired_metrics_and_loss(
                     temperature=self.multimodal_temperature_)
+            if self.target_adata is not None:
+                self._log_target_unpaired_metrics()
 
             if self.monitor_:
                 print_progress(self.epoch, self.epoch_logs, self.n_epochs_)

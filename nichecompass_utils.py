@@ -35,6 +35,8 @@ from nichecompass.train import Trainer
 from nichecompass.train.metrics import eval_metrics
 from nichecompass.train.utils import _cycle_iterable, print_progress
 
+from evals_utils import cdist, foscttm_moscot, benchmark_embeddings
+
 # Isolate functions from dataprocessors to avoid circular imports
 edge_level_split = dataprocessors.edge_level_split
 node_level_split_mask = dataprocessors.node_level_split_mask
@@ -1118,6 +1120,76 @@ class CustomTrainer(Trainer):
         if was_training:
             self.model.train()
 
+    @torch.no_grad()
+    def _log_target_paired_metrics(self) -> None:
+
+        if self.target_node_loader is None:
+            return
+        was_training = self.model.training
+        self.model.eval()
+
+        foscttm = []
+        for node_batch in self.target_node_loader:
+            node_batch = node_batch.to(self.device)
+            node_output = self.model(
+                data_batch=node_batch,
+                decoder="omics",
+                use_only_active_gps=self.use_only_active_gps)
+
+            if ("mu_rna" not in node_output) or ("mu_atac" not in node_output):
+                continue
+
+            foscttm_ = foscttm_moscot(
+                node_output["mu_rna"].cpu().numpy(),
+                node_output["mu_atac"].cpu().numpy()
+                )
+            foscttm.append(foscttm_)
+
+        if foscttm:
+            self.iter_logs["target_foscttm"].append(
+                float(np.mean(foscttm)))
+
+        if was_training:
+            self.model.train()
+
+    @torch.no_grad()
+    def _log_target_unpaired_metrics(self) -> None:
+
+        if self.target_node_loader is None:
+            return
+        was_training = self.model.training
+        self.model.eval()
+
+        metrics_dict = defaultdict(list)
+        for node_batch in self.target_node_loader:
+            node_batch = node_batch.to(self.device)
+            node_output = self.model(
+                data_batch=node_batch,
+                decoder="omics",
+                use_only_active_gps=self.use_only_active_gps)
+            if ("mu_rna" not in node_output) or ("mu_atac" not in node_output):
+                continue
+
+            ## need access to target anndata metadata to run benchmark_embeddings
+            results_dict = benchmark_embeddings(
+                adata=self.target_adata, # not currently available in the model
+                batch_key=self.batch_key_,
+                label_key=self.label_key_,
+                embedding_obsm_keys=[self.latent_key_],
+                n_jobs=6,
+            )
+            metrics_dict.update(results_dict)
+        if metrics_dict:
+            self.iter_logs["target_foscttm"].append(
+                float(np.mean(metrics_dict["target_foscttm"])))
+            self.iter_logs["target_batch_correction"].append(
+                float(np.mean(metrics_dict["target_batch_correction"])))
+            self.iter_logs["target_bio_conservation"].append(
+                float(np.mean(metrics_dict["target_bio_conservation"])))
+
+        if was_training:
+            self.model.train()
+
     def _get_multimodal_contrastive_weight(self, increasing: bool=True) -> float:
         if (not self.multimodal_contrastive_anneal_) or self.n_epochs_ <= 1:
             return self.lambda_multimodal_contrastive_loss_
@@ -1360,6 +1432,8 @@ class CustomTrainer(Trainer):
                             "target_multimodal_contrastive_loss",
                             epoch_avg_target,
                             step=self.epoch)
+
+                self._log_target_metrics()
 
             if self.monitor_:
                 print_progress(self.epoch, self.epoch_logs, self.n_epochs_)

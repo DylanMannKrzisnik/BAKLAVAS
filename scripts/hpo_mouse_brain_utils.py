@@ -48,7 +48,7 @@ class TrainConfig:
     n_sampled_neighbors: int = 4
     multimodal_contrastive_anneal: bool = False
     target_holdout_frac: float = 0.1
-    target_holdout_n: Optional[int] = None
+    target_holdout_n: Optional[int] = 2000
     target_holdout_seed: int = 0
     target_paired_data: bool = True
     target_encoder_input_key: str = "pseudocounts"

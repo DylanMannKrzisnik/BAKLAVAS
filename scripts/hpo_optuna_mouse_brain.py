@@ -79,7 +79,7 @@ def parse_args(notebook: bool = False) -> argparse.Namespace:
 #%%
 def main() -> None:
     args = parse_args()
-    #args = parse_args(notebook=True)
+    #args = parse_args(notebook=True); args.study_prefix = "hpo_test"
 
     if args.gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
@@ -219,13 +219,14 @@ def main() -> None:
                 mlflow_experiment_id=experiment_id,
             )
 
+    #%%
     # catch=(Exception,) prevents the study from stopping if a trial fails (e.g. NaNs).
     study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,))
 
     if not args.parent_run_id:
         mlflow.end_run()
 
-
+#%%
 def _parse_gpus(gpus: str) -> List[str]:
     return [gpu.strip() for gpu in gpus.split(",") if gpu.strip()]
 

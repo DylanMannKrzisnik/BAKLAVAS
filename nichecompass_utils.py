@@ -974,6 +974,7 @@ class CustomTrainer(Trainer):
         target_encoder_input_key: Optional[str]=None,
         target_counts_key: Optional[str]=None,
         log_target_multimodal_contrastive: bool=False,
+        target_latent_key: str="nichecompass_latent",
         **kwargs
     ):
         self.latent_dtype_ = kwargs.pop("latent_dtype", np.float64)
@@ -1032,6 +1033,8 @@ class CustomTrainer(Trainer):
             else target_counts_key)
         self.target_holdout_adata = None
         self.target_holdout_adata_atac = None
+        self.target_latent_key = target_latent_key
+
         if (self.log_target_multimodal_contrastive_ and
             target_adata is not None and
             target_adata_atac is not None):
@@ -1098,27 +1101,27 @@ class CustomTrainer(Trainer):
             data.cat_covariates_cats = dataset.cat_covariates_cats
         data.batch_size = data.num_nodes
         return data
+    @torch.no_grad()
+    def _get_target_latent_embeddings(
+        self,
+        adata: AnnData,
+        adata_atac: Optional[AnnData],
+        paired_data: bool,
+        chunk_size: int=1000,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-    def _get_target_latent_embeddings(self, chunk_size: int=1000) -> Optional[np.ndarray]:
-        if self.target_adata is None:
-            return None
-
-        n_obs = self.target_adata.n_obs
-        if self.use_only_active_gps:
-            active_gp_mask = self.model.get_active_gp_mask()
-            n_gps = int(active_gp_mask.sum().item())
-        else:
-            n_gps = self.model.n_prior_gp_ + self.model.n_addon_gp_
-
+        mu_rna = []
+        mu_atac = []
         clip_embeddings_rna = []
         clip_embeddings_atac = []
 
         model_dtype = next(self.model.parameters()).dtype
-        for rna_chunk, atac_chunk in zip(
-            self.target_adata.chunked_X(chunk_size),
-            self.target_adata_atac.chunked_X(chunk_size)
-            ):
-            
+        for _, start, end in adata.chunked_X(chunk_size):
+            rna_chunk = adata[start:end].copy()
+            atac_chunk = adata_atac[start:end].copy() if adata_atac is not None else None
+            if paired_data:
+                assert rna_chunk.obs_names.equals(atac_chunk.obs_names), "RNA and ATAC chunks have different obs_names despite target data being paired"
+
             node_batch = self._build_chunk_data(
                 rna_chunk=rna_chunk,
                 atac_chunk=atac_chunk,
@@ -1127,90 +1130,60 @@ class CustomTrainer(Trainer):
             if node_batch.x.dtype != model_dtype:
                 node_batch.x = node_batch.x.to(model_dtype)
 
-            _, _, _, _, clip_embeddings_rna_batch, clip_embeddings_atac_batch = \
+            mu_rna_batch, _, mu_atac_batch, _, clip_embeddings_rna_batch, clip_embeddings_atac_batch = (
                 self.model.get_latent_representation(
                     node_batch=node_batch,
                     only_active_gps=self.use_only_active_gps,
                     return_mu_std=True,
                     separate_modalities=True,
                     return_clip_embeddings=True)
-            clip_embeddings_rna.append(clip_embeddings_rna_batch.detach().cpu().numpy())
-            clip_embeddings_atac.append(clip_embeddings_atac_batch.detach().cpu().numpy())
+            )
+            mu_rna.append(mu_rna_batch)
+            mu_atac.append(mu_atac_batch)
+            clip_embeddings_rna.append(clip_embeddings_rna_batch)
+            if clip_embeddings_atac_batch is not None:
+                clip_embeddings_atac.append(clip_embeddings_atac_batch)            
 
-        clip_embeddings_rna = np.concatenate(clip_embeddings_rna, axis=0)
-        clip_embeddings_atac = np.concatenate(clip_embeddings_atac, axis=0)
+        clip_embeddings_rna = torch.cat(clip_embeddings_rna, dim=0)
+        clip_embeddings_atac = torch.cat(clip_embeddings_atac, dim=0) if clip_embeddings_atac else None
+        mu_rna = torch.cat(mu_rna, dim=0)
+        mu_atac = torch.cat(mu_atac, dim=0)
 
-        self.target_adata.obsm[self.latent_key_] = clip_embeddings_rna
-        return clip_embeddings_rna, clip_embeddings_atac
+        return mu_rna, mu_atac, clip_embeddings_rna, clip_embeddings_atac
 
     @torch.no_grad()
-    def _log_target_paired_metrics_and_loss(self, temperature: float) -> None:
-        if (self.target_holdout_adata is None or
-            self.target_holdout_adata_atac is None):
-            return
+    def _log_target_paired_metrics_and_loss(
+        self,
+        temperature: float,
+        mu_rna: torch.Tensor, # would be better to pass either mu or clip_embeddings, but not both
+        mu_atac: torch.Tensor,
+        clip_embeddings_rna: torch.Tensor,
+        clip_embeddings_atac: torch.Tensor,
+    ) -> None:
+
         was_training = self.model.training
         self.model.eval()
 
-        # Compute target metrics once per epoch on the whole target set.
-        # We only keep the embeddings of the seed/input nodes in each sampled
-        # subgraph batch to avoid counting neighbor nodes multiple times.
-        mu_rna_parts: List[torch.Tensor] = []
-        mu_atac_parts: List[torch.Tensor] = []
+        similarity = self.model.get_multimodal_similarity( # requires mu, not clip_embeddings
+            mu_rna=mu_rna,
+            mu_atac=mu_atac)
+        loss = self.model.compute_multimodal_contrastive_loss(
+            similarity_matrix=similarity,
+            temperature=temperature)
 
-        chunk_size = 1000
-        model_dtype = next(self.model.parameters()).dtype
-        for _, start, end in self.target_holdout_adata.chunk_X(
-            chunk_size, return_indices=True):
-            rna_chunk = self.target_holdout_adata[start:end].copy()
-            atac_chunk = self.target_holdout_adata_atac[start:end].copy()
-            node_batch = self._build_chunk_data(
-                rna_chunk=rna_chunk,
-                atac_chunk=atac_chunk,
-                paired_data=True)
-            node_batch = node_batch.to(self.device)
-            if node_batch.x.dtype != model_dtype:
-                node_batch.x = node_batch.x.to(model_dtype)
-            node_output = self.model(
-                data_batch=node_batch,
-                decoder="omics",
-                use_only_active_gps=self.use_only_active_gps)
+        foscttm_full = foscttm_moscot(
+            clip_embeddings_rna.detach().cpu().numpy(),
+            clip_embeddings_atac.detach().cpu().numpy(),
+        )
+        foscttm_mean = float(np.asarray(foscttm_full).mean())
 
-            if ("mu_rna" not in node_output) or ("mu_atac" not in node_output):
-                continue
-
-            mu_rna_parts.append(node_output["mu_rna"])
-            mu_atac_parts.append(node_output["mu_atac"])
-
-        if mu_rna_parts and mu_atac_parts:
-            mu_rna_all = torch.cat(mu_rna_parts, dim=0)
-            mu_atac_all = torch.cat(mu_atac_parts, dim=0)
-
-            similarity = self.model.get_multimodal_similarity(
-                mu_rna=mu_rna_all,
-                mu_atac=mu_atac_all)
-            loss = self.model.compute_multimodal_contrastive_loss(
-                similarity_matrix=similarity,
-                temperature=temperature)
-
-            foscttm_full = foscttm_moscot(
-                mu_rna_all.detach().cpu().numpy(),
-                mu_atac_all.detach().cpu().numpy(),
-            )
-            foscttm_mean = float(np.asarray(foscttm_full).mean())
-
-            # Log directly at epoch granularity to avoid mixing with per-iter logs.
-            self.epoch_logs["target_multimodal_contrastive_loss"].append(
-                float(loss.item()))
-            self.epoch_logs["target_foscttm"].append(foscttm_mean)
-            if self.mlflow_experiment_id is not None:
-                mlflow.log_metric(
-                    "target_multimodal_contrastive_loss",
-                    float(loss.item()),
-                    step=self.epoch)
-                mlflow.log_metric(
-                    "target_foscttm",
-                    foscttm_mean,
-                    step=self.epoch)
+        # Log directly at epoch granularity to avoid mixing with per-iter logs.
+        self.epoch_logs["target_multimodal_contrastive_loss"].append(
+            float(loss.item()))
+        self.epoch_logs["target_foscttm"].append(foscttm_mean)
+        if self.mlflow_experiment_id is not None:
+            mlflow.log_metric("target_multimodal_contrastive_loss", float(loss.item()), step=self.epoch)
+            mlflow.log_metric("target_foscttm", foscttm_mean, step=self.epoch)
 
         if was_training:
             self.model.train()
@@ -1218,32 +1191,40 @@ class CustomTrainer(Trainer):
     @torch.no_grad()
     def _log_target_unpaired_metrics(self) -> None:
 
-        if self.target_adata is None:
-            return
-        if not hasattr(self, "batch_key_") or not hasattr(self, "label_key_"):
-            warnings.warn(
-                "Missing batch_key_/label_key_ for target benchmarking; "
-                "skipping target metrics.")
-            return
         was_training = self.model.training
         self.model.eval()
 
-        self._get_target_latent_embeddings(chunk_size=1000)
+        if self.target_latent_key not in self.target_holdout_adata.obsm:
+            warnings.warn(
+                "Target latent embeddings not found; skipping target metrics. "
+                "Run embedding extraction before metric logging.")
+            if was_training:
+                self.model.train()
+            return
+
+        ## cocnatenate target_holdout_adata and target_holdout_adata_atac
+        clip_embeddings_adata = AnnData(
+            X=np.concatenate([
+                self.target_holdout_adata.obsm["nichecompass_latent"],
+                self.target_holdout_adata_atac.obsm["nichecompass_latent"]
+            ], axis=0),
+            obs=pd.concat([
+                self.target_holdout_adata.obs.assign(modality="rna"),
+                self.target_holdout_adata_atac.obs.assign(modality="atac"),
+            ], axis=0),
+            #uns={"label_key": self.target_holdout_adata.uns['label_key']},
+            uns={"label_key": None},
+        )
 
         results_dict = benchmark_embeddings(
-            adata=self.target_adata,
-            batch_key=self.batch_key_,
-            label_key=self.label_key_,
-            embedding_obsm_keys=[self.latent_key_],
+            adata=clip_embeddings_adata,
+            batch_key="modality",
+            label_key=clip_embeddings_adata.uns['label_key'],
+            embedding_obsm_keys=["nichecompass_latent"],
             n_jobs=6,
         )
-        if results_dict:
-            self.iter_logs["target_foscttm"].append(
-                float(np.mean(results_dict["target_foscttm"])))
-            self.iter_logs["target_batch_correction"].append(
-                float(np.mean(results_dict["target_batch_correction"])))
-            self.iter_logs["target_bio_conservation"].append(
-                float(np.mean(results_dict["target_bio_conservation"])))
+        for key, value in results_dict.items():
+            self.epoch_logs[f"target_{key}".replace(" ", "_")].append(value)
 
         if was_training:
             self.model.train()
@@ -1475,10 +1456,32 @@ class CustomTrainer(Trainer):
                     if self.mlflow_experiment_id is not None:
                         mlflow.log_metric(key, epoch_avg_loss, step=self.epoch)
 
-            if self.log_target_multimodal_contrastive_:
+            # Fetch target embeddings once before any metrics are computed.
+            if (self.log_target_multimodal_contrastive_  and self.target_holdout_adata is not None and self.target_holdout_adata_atac is not None):
+
+                target_holdout_mu_rna, target_holdout_mu_atac, target_holdout_clip_embeddings_rna, target_holdout_clip_embeddings_atac = (
+                    self._get_target_latent_embeddings(
+                        adata=self.target_holdout_adata,
+                        adata_atac=self.target_holdout_adata_atac,
+                        paired_data=self.target_paired_data_,
+                        chunk_size=1000,
+                    )
+                )
+
+            # Compute metrics after embeddings are available.
+            if self.log_target_multimodal_contrastive_ and self.target_paired_data_:
                 self._log_target_paired_metrics_and_loss(
-                    temperature=self.multimodal_temperature_)
+                    temperature=self.multimodal_temperature_,
+                    mu_rna=target_holdout_mu_rna,
+                    mu_atac=target_holdout_mu_atac,
+                    clip_embeddings_rna=target_holdout_clip_embeddings_rna,
+                    clip_embeddings_atac=target_holdout_clip_embeddings_atac,
+                )
             if self.target_adata is not None:
+                self.target_holdout_adata.obsm[self.target_latent_key] = target_holdout_clip_embeddings_rna.detach().cpu().numpy()
+                if self.target_adata_atac is not None:
+                    self.target_holdout_adata_atac.obsm[self.target_latent_key] = target_holdout_clip_embeddings_atac.detach().cpu().numpy()
+
                 self._log_target_unpaired_metrics()
 
             if self.monitor_:
@@ -2273,7 +2276,7 @@ class CustomVGPGAE(VGPGAE):
             return_mu_std: bool=False,
             separate_modalities: bool=False,
             return_clip_embeddings: bool=False,
-            ):
+            ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Encode RNA + ATAC separately and combine latents via Gaussian product.
         

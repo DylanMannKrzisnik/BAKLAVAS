@@ -44,14 +44,41 @@ def benchmark_embeddings(
     embedding_obsm_keys: List[str],
     n_jobs: int=6,
 ) -> None:
-    bm = Benchmarker(
-        adata,
-        batch_key=batch_key,
-        label_key=label_key,
-        bio_conservation_metrics=BioConservation(),
-        batch_correction_metrics=BatchCorrection(),
-        embedding_obsm_keys=embedding_obsm_keys,
-        n_jobs=n_jobs,
-    )
+
+    adata.obsm["nichecompass_latent"] = adata.X
+
+    if label_key is None:
+
+        adata.obs["dummy_label"] = "all"
+
+        batch_metrics = BatchCorrection(
+            ilisi_knn=True,
+            pcr_comparison=True,
+            bras=False,
+            graph_connectivity=False,
+            kbet_per_label=False,
+        )
+
+        bm = Benchmarker(
+            adata=adata,
+            batch_key=batch_key,
+            label_key="dummy_label",          # must be a string key per API
+            embedding_obsm_keys=embedding_obsm_keys,
+            bio_conservation_metrics=None,    # ignore all BioConservation
+            batch_correction_metrics=batch_metrics,
+            n_jobs=n_jobs,
+        )
+    else:
+        bm = Benchmarker(
+            adata,
+            batch_key=batch_key,
+            label_key=label_key,
+            bio_conservation_metrics=BioConservation(),
+            batch_correction_metrics=BatchCorrection(),
+            embedding_obsm_keys=embedding_obsm_keys,
+            n_jobs=n_jobs,
+        )
+
     bm.benchmark()
-    return bm.results_dict
+
+    return bm.get_results().loc['nichecompass_latent']

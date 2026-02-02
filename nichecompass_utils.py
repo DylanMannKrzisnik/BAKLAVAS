@@ -1088,13 +1088,18 @@ class CustomTrainer(Trainer):
         return target_adata[holdout_obs].copy(), target_adata_atac[holdout_obs].copy()
 
     @torch.no_grad()
-    def _log_target_multimodal_contrastive_loss(self, temperature: float) -> None:
+    def _log_target_paired_metrics_and_loss(self, temperature: float) -> None:
         if self.target_node_loader is None:
             return
         was_training = self.model.training
         self.model.eval()
 
-        losses = []
+        # Compute target metrics once per epoch on the whole target set.
+        # We only keep the embeddings of the seed/input nodes in each sampled
+        # subgraph batch to avoid counting neighbor nodes multiple times.
+        mu_rna_parts: List[torch.Tensor] = []
+        mu_atac_parts: List[torch.Tensor] = []
+
         for node_batch in self.target_node_loader:
             node_batch = node_batch.to(self.device)
             node_output = self.model(
@@ -1105,49 +1110,45 @@ class CustomTrainer(Trainer):
             if ("mu_rna" not in node_output) or ("mu_atac" not in node_output):
                 continue
 
+            batch_size = getattr(node_batch, "batch_size", None)
+            if batch_size is None:
+                # Fallback: if batch_size is missing, use all nodes in the batch.
+                mu_rna_parts.append(node_output["mu_rna"])
+                mu_atac_parts.append(node_output["mu_atac"])
+            else:
+                mu_rna_parts.append(node_output["mu_rna"][:batch_size])
+                mu_atac_parts.append(node_output["mu_atac"][:batch_size])
+
+        if mu_rna_parts and mu_atac_parts:
+            mu_rna_all = torch.cat(mu_rna_parts, dim=0)
+            mu_atac_all = torch.cat(mu_atac_parts, dim=0)
+
             similarity = self.model.get_multimodal_similarity(
-                mu_rna=node_output["mu_rna"],
-                mu_atac=node_output["mu_atac"])
+                mu_rna=mu_rna_all,
+                mu_atac=mu_atac_all)
             loss = self.model.compute_multimodal_contrastive_loss(
                 similarity_matrix=similarity,
                 temperature=temperature)
-            losses.append(loss.item())
 
-        if losses:
-            self.iter_logs["target_multimodal_contrastive_loss"].append(
-                float(np.mean(losses)))
+            foscttm_full = foscttm_moscot(
+                mu_rna_all.detach().cpu().numpy(),
+                mu_atac_all.detach().cpu().numpy(),
+            )
+            foscttm_mean = float(np.asarray(foscttm_full).mean())
 
-        if was_training:
-            self.model.train()
-
-    @torch.no_grad()
-    def _log_target_paired_metrics(self) -> None:
-
-        if self.target_node_loader is None:
-            return
-        was_training = self.model.training
-        self.model.eval()
-
-        foscttm = []
-        for node_batch in self.target_node_loader:
-            node_batch = node_batch.to(self.device)
-            node_output = self.model(
-                data_batch=node_batch,
-                decoder="omics",
-                use_only_active_gps=self.use_only_active_gps)
-
-            if ("mu_rna" not in node_output) or ("mu_atac" not in node_output):
-                continue
-
-            foscttm_ = foscttm_moscot(
-                node_output["mu_rna"].cpu().numpy(),
-                node_output["mu_atac"].cpu().numpy()
-                )
-            foscttm.append(foscttm_)
-
-        if foscttm:
-            self.iter_logs["target_foscttm"].append(
-                float(np.mean(foscttm)))
+            # Log directly at epoch granularity to avoid mixing with per-iter logs.
+            self.epoch_logs["target_multimodal_contrastive_loss"].append(
+                float(loss.item()))
+            self.epoch_logs["target_foscttm"].append(foscttm_mean)
+            if self.mlflow_experiment_id is not None:
+                mlflow.log_metric(
+                    "target_multimodal_contrastive_loss",
+                    float(loss.item()),
+                    step=self.epoch)
+                mlflow.log_metric(
+                    "target_foscttm",
+                    foscttm_mean,
+                    step=self.epoch)
 
         if was_training:
             self.model.train()
@@ -1418,22 +1419,8 @@ class CustomTrainer(Trainer):
                         mlflow.log_metric(key, epoch_avg_loss, step=self.epoch)
 
             if self.log_target_multimodal_contrastive_:
-                self._log_target_multimodal_contrastive_loss(
+                self._log_target_paired_metrics_and_loss(
                     temperature=self.multimodal_temperature_)
-                if self.iter_logs["target_multimodal_contrastive_loss"]:
-                    epoch_avg_target = float(
-                        np.array(
-                            self.iter_logs["target_multimodal_contrastive_loss"]
-                        ).mean())
-                    self.epoch_logs["target_multimodal_contrastive_loss"].append(
-                        epoch_avg_target)
-                    if self.mlflow_experiment_id is not None:
-                        mlflow.log_metric(
-                            "target_multimodal_contrastive_loss",
-                            epoch_avg_target,
-                            step=self.epoch)
-
-                self._log_target_metrics()
 
             if self.monitor_:
                 print_progress(self.epoch, self.epoch_logs, self.n_epochs_)

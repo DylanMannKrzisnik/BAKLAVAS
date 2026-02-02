@@ -16,6 +16,7 @@ from collections import defaultdict
 
 import mlflow
 import numpy as np
+import pandas as pd
 import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
@@ -531,6 +532,7 @@ class CustomNicheCompass(NicheCompass):
               target_counts_key: Optional[str]=None,
               log_target_multimodal_contrastive: bool=False,
               mlflow_experiment_id: Optional[str]=None,
+              mlflow_parent_run_id: Optional[str]=None,
               retrieve_cat_covariates_embeds: bool=False,
               retrieve_recon_edge_probs: bool=False,
               retrieve_agg_weights: bool=False,
@@ -621,7 +623,8 @@ class CustomNicheCompass(NicheCompass):
             l1_targets_mask=l1_targets_mask,
             l1_sources_mask=l1_sources_mask,
             lambda_l1_addon=lambda_l1_addon,
-            mlflow_experiment_id=mlflow_experiment_id)
+            mlflow_experiment_id=mlflow_experiment_id,
+            mlflow_parent_run_id=mlflow_parent_run_id)
         
         self.node_batch_size_ = self.trainer.node_batch_size_
         
@@ -1146,7 +1149,8 @@ class CustomTrainer(Trainer):
               l1_targets_mask: Optional[torch.Tensor]=None,
               l1_sources_mask: Optional[torch.Tensor]=None,
               lambda_l1_addon: float=0.,
-              mlflow_experiment_id: Optional[str]=None):
+              mlflow_experiment_id: Optional[str]=None,
+              mlflow_parent_run_id: Optional[str]=None):
         """
         Train the CustomNicheCompass model.
         """
@@ -1174,13 +1178,53 @@ class CustomTrainer(Trainer):
         self.l1_sources_mask = l1_sources_mask
         self.lambda_l1_addon_ = lambda_l1_addon
         self.mlflow_experiment_id = mlflow_experiment_id
+        self.mlflow_parent_run_id = mlflow_parent_run_id
 
         print("\n--- MODEL TRAINING ---")
 
         if self.mlflow_experiment_id is not None:
-            for attr, attr_value in self._get_public_attributes().items():
-                mlflow.log_param(attr, attr_value)
-            self.model.log_module_hyperparams_to_mlflow()
+            # Log hyperparameters to parent run if requested (e.g. HPO study run),
+            # so the child run only has trial params and metrics.
+            if self.mlflow_parent_run_id is not None:
+                # MLflow does not allow switching the "active run" while a nested
+                # run is active. Instead, we route param logging directly to the
+                # parent run via MlflowClient, while keeping the child run active
+                # for metrics/artifacts.
+                from mlflow.tracking import MlflowClient
+
+                client = MlflowClient()
+                # Avoid crashing on repeated trials (MLflow params are immutable).
+                existing_params = dict(client.get_run(self.mlflow_parent_run_id).data.params)
+
+                orig_log_param = mlflow.log_param
+                orig_log_params = mlflow.log_params
+
+                def _log_param_to_parent(key, value, *args, **kwargs):
+                    # Only log if key not already present on parent.
+                    if key in existing_params:
+                        return
+                    client.log_param(self.mlflow_parent_run_id, key, str(value))
+                    existing_params[key] = str(value)
+
+                def _log_params_to_parent(d, *args, **kwargs):
+                    for k, v in d.items():
+                        _log_param_to_parent(k, v)
+
+                try:
+                    mlflow.log_param = _log_param_to_parent
+                    mlflow.log_params = _log_params_to_parent
+                    for attr, attr_value in self._get_public_attributes().items():
+                        mlflow.log_param(attr, attr_value)
+                    # This method likely uses mlflow.log_param internally; the
+                    # monkeypatch above routes those params to the parent run.
+                    self.model.log_module_hyperparams_to_mlflow()
+                finally:
+                    mlflow.log_param = orig_log_param
+                    mlflow.log_params = orig_log_params
+            else:
+                for attr, attr_value in self._get_public_attributes().items():
+                    mlflow.log_param(attr, attr_value)
+                self.model.log_module_hyperparams_to_mlflow()
 
         start_time = time.time()
         self.epoch_logs = defaultdict(list)
@@ -1560,7 +1604,10 @@ class CustomVGPGAE(VGPGAE):
 
         # Multimodal layer
         gp_embedding_size = self.n_prior_gp_ + self.n_addon_gp_
-        if self.multimodal_layer_series_ and self.multimodal_embedding_size_ is None:
+        # If no explicit multimodal embedding size is provided, default to the
+        # full GP embedding size (i.e. keep dimensionality). This avoids
+        # constructing layers with out_features=None.
+        if self.multimodal_embedding_size_ is None:
             self.multimodal_embedding_size_ = gp_embedding_size
         if self.multimodal_layer_series_:
             if self.multimodal_embedding_size_ == gp_embedding_size:

@@ -34,8 +34,8 @@ class TrialParams:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    n_epochs: int = 10
-    n_epochs_all_gps: int = 10
+    n_epochs: int = 3
+    n_epochs_all_gps: int = 3
     lr: float = 0.001
     lambda_edge_recon: float = 500000.0
     lambda_gene_expr_recon: float = 300.0
@@ -151,7 +151,6 @@ def run_trial(
     cache_dir: str,
     train_cfg: TrainConfig,
     mlflow_experiment_id: Optional[str] = None,
-    mlflow_parent_run_id: Optional[str] = None,
 ) -> float:
     adata, adata_atac = load_cached_inputs(cache_dir)
     model = build_model(adata, adata_atac, params)
@@ -190,7 +189,6 @@ def run_trial(
         use_early_stopping=train_cfg.use_early_stopping,
         verbose=train_cfg.verbose,
         mlflow_experiment_id=mlflow_experiment_id,
-        mlflow_parent_run_id=mlflow_parent_run_id,
     )
 
     logs = model.trainer.epoch_logs.get("target_multimodal_contrastive_loss", [])

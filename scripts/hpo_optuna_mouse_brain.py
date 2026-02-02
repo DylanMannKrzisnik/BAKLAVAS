@@ -36,12 +36,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--n-trials",
+        "--n-trials-per-gpu",
         type=int,
         default=3,
         help=(
-            "Max number of trials. With GridSampler the study stops after "
-            "all grid points are tried once (e.g. 4 trials for 2×2 search space)."
+            "Max number of trials per GPU worker. With GridSampler the study "
+            "stops after all grid points are tried once (e.g. 4 trials for "
+            "2×2 search space)."
         ),
     )
     parser.add_argument(
@@ -107,7 +108,7 @@ def main() -> None:
         # Contrastive-loss–relevant knobs (objective is target_multimodal_contrastive_loss)
         "lambda_multimodal_contrastive_loss": [10.0, 30.0, 100.0, 300.0],
         "multimodal_temperature": [0.1, 0.2, 0.5, 1.0],
-        "multimodal_contrastive_anneal": [False, True],
+        "multimodal_contrastive_anneal": [False], # [False, True],
         "contrastive_logits_pos_ratio": [0.0, 0.125, 0.25],
         "contrastive_logits_neg_ratio": [0.0, 0.125, 0.25],
         # Model capacity for multimodal fusion. None means "keep full GP size".
@@ -121,6 +122,12 @@ def main() -> None:
             raise ValueError("--storage is required when using --launch-workers.")
 
         gpu_list = _parse_gpus(args.gpus)
+        total_trials = args.n_trials_per_gpu * len(gpu_list)
+        print(
+            f"Launching {len(gpu_list)} workers; "
+            f"n_trials_per_gpu={args.n_trials_per_gpu}; "
+            f"total_trials={total_trials}"
+        )
         with mlflow.start_run(run_name=study_name) as parent_run:
             parent_run_id = parent_run.info.run_id
             _log_parent_params(
@@ -130,7 +137,7 @@ def main() -> None:
                 train_cfg=train_cfg,
                 search_space=search_space,
                 study_name=study_name,
-                extra={"n_workers": len(gpu_list)},
+                extra={"n_workers": len(gpu_list), "total_trials": total_trials},
             )
             _launch_workers(args, cache_dir, parent_run_id, gpu_list, study_name)
         return
@@ -151,6 +158,8 @@ def main() -> None:
     else:
         mlflow.start_run(run_name=study_name)
         parent_run_id = mlflow.active_run().info.run_id
+        total_trials = args.n_trials_per_gpu
+        print(f"Single worker; n_trials_per_gpu={total_trials}; total_trials={total_trials}")
         _log_parent_params(
             mlflow=mlflow,
             cache_dir=cache_dir,
@@ -158,6 +167,7 @@ def main() -> None:
             train_cfg=train_cfg,
             search_space=search_space,
             study_name=study_name,
+            extra={"total_trials": total_trials},
         )
 
     def objective(trial: optuna.Trial) -> float:
@@ -202,11 +212,10 @@ def main() -> None:
                 cache_dir=cache_dir,
                 train_cfg=train_cfg,
                 mlflow_experiment_id=experiment_id,
-                mlflow_parent_run_id=parent_run_id,
             )
 
     # catch=(Exception,) prevents the study from stopping if a trial fails (e.g. NaNs).
-    study.optimize(objective, n_trials=args.n_trials, catch=(Exception,))
+    study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,))
 
     if not args.parent_run_id:
         mlflow.end_run()
@@ -227,7 +236,7 @@ def _log_parent_params(
 ) -> None:
     mlflow.log_param("cache_dir", cache_dir)
     mlflow.log_param("study_name", study_name)
-    mlflow.log_param("n_trials", args.n_trials)
+    mlflow.log_param("n_trials_per_gpu", args.n_trials_per_gpu)
     mlflow.log_param("storage", args.storage)
     for key, values in search_space.items():
         mlflow.log_param(f"search_space_{key}", str(values))
@@ -245,6 +254,8 @@ def _launch_workers(
 ) -> None:
     procs = []
     for gpu in gpus:
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = gpu
         cmd = [
             sys.executable,
             os.path.abspath(__file__),
@@ -252,8 +263,8 @@ def _launch_workers(
             args.experiment_name,
             "--study-name",
             study_name,
-            "--n-trials",
-            str(args.n_trials),
+            "--n-trials-per-gpu",
+            str(args.n_trials_per_gpu),
             "--storage",
             args.storage,
             "--parent-run-id",
@@ -263,7 +274,7 @@ def _launch_workers(
         ]
         if cache_dir:
             cmd.extend(["--cache-dir", cache_dir])
-        procs.append(subprocess.Popen(cmd))
+        procs.append(subprocess.Popen(cmd, env=env))
 
     for proc in procs:
         proc.wait()

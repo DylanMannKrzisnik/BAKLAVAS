@@ -34,8 +34,8 @@ class TrialParams:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    n_epochs: int = 3
-    n_epochs_all_gps: int = 3
+    n_epochs: int = 10
+    n_epochs_all_gps: int = 10
     lr: float = 0.001
     lambda_edge_recon: float = 500000.0
     lambda_gene_expr_recon: float = 300.0

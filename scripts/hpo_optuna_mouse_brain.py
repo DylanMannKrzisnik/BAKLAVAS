@@ -18,9 +18,14 @@ def parse_args() -> argparse.Namespace:
         help="MLflow experiment name.",
     )
     parser.add_argument(
+        "--study-name-prefix",
+        default="hpo",
+        help="Prefix for Optuna study name (used when --study-name is not set).",
+    )
+    parser.add_argument(
         "--study-name",
-        default="hpo_multimodal_layer_series_encoder_input",
-        help="Optuna study name.",
+        default=None,
+        help="Full Optuna study name. If set (e.g. by launcher), overrides prefix+timestamp.",
     )
     parser.add_argument(
         "--cache-dir",
@@ -75,6 +80,7 @@ def main() -> None:
 
     import mlflow
     import optuna
+    import datetime
 
     from hpo_mouse_brain_utils import (
         TrainConfig,
@@ -87,6 +93,12 @@ def main() -> None:
     cache_dir = resolve_cache_dir(args.cache_dir)
     mlflow.set_experiment(args.experiment_name)
     experiment_id = get_or_create_experiment_id(args.experiment_name)
+    if args.study_name:
+        study_name = args.study_name
+    else:
+        now = datetime.datetime.now()
+        timestamp = now.strftime("%d%m%Y_%H%M%S")
+        study_name = f"{args.study_name_prefix}_{timestamp}"
 
     train_cfg = TrainConfig()
     search_space = {
@@ -109,7 +121,7 @@ def main() -> None:
             raise ValueError("--storage is required when using --launch-workers.")
 
         gpu_list = _parse_gpus(args.gpus)
-        with mlflow.start_run(run_name=args.study_name) as parent_run:
+        with mlflow.start_run(run_name=study_name) as parent_run:
             parent_run_id = parent_run.info.run_id
             _log_parent_params(
                 mlflow=mlflow,
@@ -117,15 +129,16 @@ def main() -> None:
                 args=args,
                 train_cfg=train_cfg,
                 search_space=search_space,
+                study_name=study_name,
                 extra={"n_workers": len(gpu_list)},
             )
-            _launch_workers(args, cache_dir, parent_run_id, gpu_list)
+            _launch_workers(args, cache_dir, parent_run_id, gpu_list, study_name)
         return
 
     # GridSampler suggests each combination exactly once; study stops when grid is exhausted.
     sampler = optuna.samplers.GridSampler(search_space)
     study = optuna.create_study(
-        study_name=args.study_name,
+        study_name=study_name,
         direction="minimize",
         sampler=sampler,
         storage=args.storage,
@@ -136,7 +149,7 @@ def main() -> None:
         mlflow.start_run(run_id=args.parent_run_id)
         parent_run_id = args.parent_run_id
     else:
-        mlflow.start_run(run_name=args.study_name)
+        mlflow.start_run(run_name=study_name)
         parent_run_id = mlflow.active_run().info.run_id
         _log_parent_params(
             mlflow=mlflow,
@@ -144,6 +157,7 @@ def main() -> None:
             args=args,
             train_cfg=train_cfg,
             search_space=search_space,
+            study_name=study_name,
         )
 
     def objective(trial: optuna.Trial) -> float:
@@ -207,10 +221,11 @@ def _log_parent_params(
     args: argparse.Namespace,
     train_cfg: Any,
     search_space: dict,
+    study_name: str,
     extra: Optional[dict] = None,
 ) -> None:
     mlflow.log_param("cache_dir", cache_dir)
-    mlflow.log_param("study_name", args.study_name)
+    mlflow.log_param("study_name", study_name)
     mlflow.log_param("n_trials", args.n_trials)
     mlflow.log_param("storage", args.storage)
     for key, values in search_space.items():
@@ -225,6 +240,7 @@ def _launch_workers(
     cache_dir: str,
     parent_run_id: str,
     gpus: List[str],
+    study_name: str,
 ) -> None:
     procs = []
     for gpu in gpus:
@@ -234,7 +250,7 @@ def _launch_workers(
             "--experiment-name",
             args.experiment_name,
             "--study-name",
-            args.study_name,
+            study_name,
             "--n-trials",
             str(args.n_trials),
             "--storage",

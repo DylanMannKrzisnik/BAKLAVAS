@@ -142,7 +142,7 @@ def main() -> None:
         direction="minimize",
         sampler=sampler,
         storage=args.storage,
-        load_if_exists=True,
+        load_if_exists=True, # if study already exists, load it and continue trial count from there
     )
 
     if args.parent_run_id:
@@ -205,7 +205,8 @@ def main() -> None:
                 mlflow_parent_run_id=parent_run_id,
             )
 
-    study.optimize(objective, n_trials=args.n_trials)
+    # catch=(Exception,) prevents the study from stopping if a trial fails (e.g. NaNs).
+    study.optimize(objective, n_trials=args.n_trials, catch=(Exception,))
 
     if not args.parent_run_id:
         mlflow.end_run()

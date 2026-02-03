@@ -86,6 +86,7 @@ def main() -> None:
 
     import mlflow
     import optuna
+    from optuna.integration.mlflow import MLflowCallback
     import datetime
 
     from hpo_mouse_brain_utils import (
@@ -146,6 +147,9 @@ def main() -> None:
             )
             _launch_workers(args, cache_dir, parent_run_id, gpu_list, study_name)
         return
+
+    # Setup the callback
+    mlflc = MLflowCallback(metric_name="target_multimodal_contrastive_loss")
 
     # GridSampler suggests each combination exactly once; study stops when grid is exhausted.
     sampler = optuna.samplers.GridSampler(search_space)
@@ -221,7 +225,11 @@ def main() -> None:
 
     #%%
     # catch=(Exception,) prevents the study from stopping if a trial fails (e.g. NaNs).
-    study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,))
+    study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,), callbacks=[mlflc])
+
+    # Calculate importance
+    importance_fig = optuna.visualization.plot_param_importances(study)
+    mlflow.log_figure(importance_fig, "hyperparameter_importance.png")
 
     if not args.parent_run_id:
         mlflow.end_run()

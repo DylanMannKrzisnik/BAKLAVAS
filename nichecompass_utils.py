@@ -1181,6 +1181,7 @@ class CustomTrainer(Trainer):
         self.epoch_logs["target_multimodal_contrastive_loss"].append(
             float(loss.item()))
         self.epoch_logs["target_foscttm"].append(foscttm_mean)
+
         if self.mlflow_experiment_id is not None:
             mlflow.log_metric("target_multimodal_contrastive_loss", float(loss.item()), step=self.epoch)
             mlflow.log_metric("target_foscttm", foscttm_mean, step=self.epoch)
@@ -1225,6 +1226,10 @@ class CustomTrainer(Trainer):
         )
         for key, value in results_dict.items():
             self.epoch_logs[f"target_{key}".replace(" ", "_")].append(value)
+
+        if self.mlflow_experiment_id is not None:
+            for key, value in results_dict.items():
+                mlflow.log_metric(f"target_{key}".replace(" ", "_"), value, step=self.epoch)
 
         if was_training:
             self.model.train()
@@ -1470,19 +1475,29 @@ class CustomTrainer(Trainer):
 
             # Compute metrics after embeddings are available.
             if self.log_target_multimodal_contrastive_ and self.target_paired_data_:
+
                 self._log_target_paired_metrics_and_loss(
-                    temperature=self.multimodal_temperature_,
-                    mu_rna=target_holdout_mu_rna,
-                    mu_atac=target_holdout_mu_atac,
-                    clip_embeddings_rna=target_holdout_clip_embeddings_rna,
-                    clip_embeddings_atac=target_holdout_clip_embeddings_atac,
+                        temperature=self.multimodal_temperature_,
+                        mu_rna=target_holdout_mu_rna,
+                        mu_atac=target_holdout_mu_atac,
+                        clip_embeddings_rna=target_holdout_clip_embeddings_rna,
+                        clip_embeddings_atac=target_holdout_clip_embeddings_atac,
                 )
+
             if self.target_adata is not None:
                 self.target_holdout_adata.obsm[self.target_latent_key] = target_holdout_clip_embeddings_rna.detach().cpu().numpy()
                 if self.target_adata_atac is not None:
                     self.target_holdout_adata_atac.obsm[self.target_latent_key] = target_holdout_clip_embeddings_atac.detach().cpu().numpy()
 
                 self._log_target_unpaired_metrics()
+
+            ## create and log compound metric
+            compound_metric = self.epoch_logs.copy()
+            # remove all items with keys containing 'loss'
+            for key_ in [key for key in list(compound_metric.keys()) if 'loss' in key]:
+                compound_metric.pop(key_)
+            compound_metric = np.sum([values[-1] for values in compound_metric.values()]) / len(compound_metric)
+            self.epoch_logs["compound_metric"].append(compound_metric)
 
             if self.monitor_:
                 print_progress(self.epoch, self.epoch_logs, self.n_epochs_)

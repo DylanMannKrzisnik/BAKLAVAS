@@ -7,7 +7,7 @@ override behavior from the NicheCompass package (e.g., custom VGPGAE forward).
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional, Tuple
+from typing import List, Literal, Optional, Tuple, Union 
 
 import math
 import time
@@ -35,7 +35,7 @@ from nichecompass.train import Trainer
 from nichecompass.train.metrics import eval_metrics
 from nichecompass.train.utils import _cycle_iterable, print_progress
 
-from evals_utils import cdist, foscttm_moscot, benchmark_embeddings
+from evals_utils import foscttm_moscot, benchmark_embeddings
 
 # Isolate functions from dataprocessors to avoid circular imports
 edge_level_split = dataprocessors.edge_level_split
@@ -1753,6 +1753,18 @@ class CustomVGPGAE(VGPGAE):
         else:
             self.encoder_atac = None
 
+        def _disable_add_self_loops(encoder: Optional[torch.nn.Module]) -> None:
+            if encoder is None:
+                return
+            for attr in ("conv_l1", "conv_mu", "conv_logstd",
+                         "addon_conv_mu", "addon_conv_logstd"):
+                conv = getattr(encoder, attr, None)
+                if conv is not None and hasattr(conv, "add_self_loops"):
+                    conv.add_self_loops = False
+
+        _disable_add_self_loops(self.encoder_rna)
+        _disable_add_self_loops(self.encoder_atac)
+
         # Multimodal layer
         gp_embedding_size = self.n_prior_gp_ + self.n_addon_gp_
         # If no explicit multimodal embedding size is provided, default to the
@@ -1781,6 +1793,143 @@ class CustomVGPGAE(VGPGAE):
             self.multimodal_layer = torch.nn.Linear(
                 gp_embedding_size,
                 self.multimodal_embedding_size_)
+
+    @torch.no_grad()
+    def get_active_gp_mask(
+            self,
+            abs_gp_weights_agg_mode: Literal["sum",
+                                             "nzmeans",
+                                             "sum+nzmeans",
+                                             "nzmedians",
+                                             "sum+nzmedians"]="sum+nzmeans",
+            return_gp_weights: bool=False,
+            normalize_gp_weights_with_features_scale_factors: bool=False,
+            ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Get a mask of active gene programs based on the rna decoder gene weights
+        of gene programs. Active gene programs are gene programs whose absolute
+        gene weights aggregated over all genes are greater than
+        ´self.active_gp_thresh_ratio_´ times the absolute gene weights
+        aggregation of the gene program with the maximum value across all gene
+        programs. Depending on ´abs_gp_weights_agg_mode´, the aggregation will
+        be either a sum of absolute gene weights (prioritizes gene programs that
+        reconstruct many genes) or a mean of non-zero absolute gene weights
+        (normalizes for the number of genes that a gene program reconstructs) or
+        a combination of the two.
+
+        Parameters
+        ----------
+        abs_gp_weights_agg_mode:
+            If ´sum´, uses sums of absolute gp weights for aggregation and
+            active gp determination. If ´nzmeans´, uses means of non-zero
+            absolute gp weights for aggregation and active gp determination. If
+            ´sum+nzmeans´, uses a combination of sums and means of non-zero
+            absolute gp weights for aggregation and active gp determination.
+        return_gp_weights:
+            If ´True´, in addition return the rna decoder gene weights of the
+            active gene programs.
+
+        Returns
+        ----------
+        active_gp_mask:
+            Boolean tensor of gene programs which contains `True` for active
+            gene programs and `False` for inactive gene programs.
+        active_gp_weights:
+            Tensor containing the rna decoder gene weights of active gene
+            programs.
+        """
+        device = next(self.parameters()).device
+
+        active_gp_mask = torch.zeros(self.n_prior_gp_ + self.n_addon_gp_,
+                                     dtype=torch.bool,
+                                     device=device)
+
+        if self.active_gp_type_ == "mixed":
+            gp_types = ["all"]
+        elif (self.n_addon_gp_ > 0):
+            gp_types = ["masked", "addon"]
+        else:
+            gp_types = ["masked"]
+
+        for gp_type in gp_types:
+            gp_weights = self.get_gp_weights(only_masked_features=False,
+                                             gp_type=gp_type)[0]
+
+            # Get index of gps based on ´gp_type´
+            if gp_type == "masked":
+                gp_idx = slice(None, self.n_prior_gp_)
+            elif gp_type == "addon":
+                gp_idx = slice(self.n_prior_gp_, None)
+            elif gp_type == "all":
+                gp_idx = slice(None, None)
+
+            # Normalize gp weights with features scale factors
+            if normalize_gp_weights_with_features_scale_factors:
+                gp_weights_normalized = (gp_weights /
+                                         self.features_scale_factors_[:, None].to(device))
+            else:
+                gp_weights_normalized = gp_weights
+
+            # Normalize gp weights with running mean absolute gp scores
+            gp_weights_normalized = (self.running_mean_abs_mu[gp_idx] *
+                                     gp_weights_normalized)
+
+            # Aggregate absolute normalized gp weights based on
+            # ´abs_gp_weights_agg_mode´ and calculate thresholds of aggregated
+            # absolute normalized gp weights and get active gp mask and (optionally)
+            # active gp weights
+            abs_gp_weights_sums = gp_weights_normalized.norm(p=1, dim=0)
+            if abs_gp_weights_agg_mode in ["sum", "sum+nzmeans", "sum+nzmedians"]:
+                max_abs_gp_weights_sum = abs_gp_weights_sums.amax()
+                min_abs_gp_weights_sum_thresh = (self.active_gp_thresh_ratio_ *
+                                                max_abs_gp_weights_sum)
+                active_gp_mask[gp_idx] = active_gp_mask[gp_idx] | (
+                    abs_gp_weights_sums >= min_abs_gp_weights_sum_thresh)
+
+            if abs_gp_weights_agg_mode in ["nzmeans", "sum+nzmeans"]:
+                abs_gp_weights_nzmeans = (
+                    abs_gp_weights_sums /
+                    torch.count_nonzero(gp_weights_normalized, dim=0))
+                abs_gp_weights_nzmeans = torch.nan_to_num(abs_gp_weights_nzmeans)
+                max_abs_gp_weights_nzmean = abs_gp_weights_nzmeans.amax()
+                min_abs_gp_weights_nzmean_thresh = (self.active_gp_thresh_ratio_ *
+                                                    max_abs_gp_weights_nzmean)
+                if abs_gp_weights_agg_mode == "nzmeans":
+                    active_gp_mask[gp_idx] = active_gp_mask[gp_idx] | (
+                        abs_gp_weights_nzmeans >=
+                        min_abs_gp_weights_nzmean_thresh)
+                elif abs_gp_weights_agg_mode == "sum+nzmeans":
+                    # Combine active gp mask
+                    active_gp_mask[gp_idx] = active_gp_mask[gp_idx] | (
+                        abs_gp_weights_nzmeans >=
+                        min_abs_gp_weights_nzmean_thresh)
+            if abs_gp_weights_agg_mode in ["nzmedians", "sum+nzmedians"]:
+                zero_mask = (gp_weights_normalized == 0)
+                abs_gp_weights_normalized_with_nan = torch.where(
+                    zero_mask,
+                    torch.tensor(float("nan")),
+                    torch.abs(gp_weights_normalized),
+                )
+                abs_gp_weights_nzmedians = torch.nanmedian(
+                    abs_gp_weights_normalized_with_nan, dim=0).values
+                abs_gp_weights_nzmedians = torch.nan_to_num(abs_gp_weights_nzmedians)
+                max_abs_gp_weights_nzmedian = torch.max(abs_gp_weights_nzmedians)
+                min_abs_gp_weights_nzmedian_thresh = (0.01 *
+                                                      max_abs_gp_weights_nzmedian)
+                if abs_gp_weights_agg_mode == "nzmedians":
+                    active_gp_mask[gp_idx] = active_gp_mask[gp_idx] | (
+                        abs_gp_weights_nzmedians >=
+                        min_abs_gp_weights_nzmedian_thresh)
+                elif abs_gp_weights_agg_mode == "sum+nzmedians":
+                    # Combine active gp mask
+                    active_gp_mask[gp_idx] = active_gp_mask[gp_idx] | (
+                        abs_gp_weights_nzmedians >=
+                        min_abs_gp_weights_nzmedian_thresh)
+        if return_gp_weights:
+            active_gp_weights = gp_weights[:, active_gp_mask]
+            return active_gp_mask, active_gp_weights
+        else:
+            return active_gp_mask
 
 
     def multiply_gaussians_log_space(self,

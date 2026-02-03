@@ -1509,6 +1509,9 @@ class CustomTrainer(Trainer):
             ])
             self.epoch_logs["compound_metric"].append(compound_metric)
 
+            if self.mlflow_experiment_id is not None:
+                mlflow.log_metric("compound_metric", compound_metric, step=self.epoch)
+
             if self.monitor_:
                 print_progress(self.epoch, self.epoch_logs, self.n_epochs_)
 

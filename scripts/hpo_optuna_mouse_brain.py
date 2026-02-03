@@ -154,7 +154,7 @@ def main() -> None:
 
     train_cfg = TrainConfig()
     search_space = {
-        "multimodal_layer_series": [True, False],
+        "multimodal_layer_series": [False],
         "encoder_input_key": ["counts", "pseudocounts"],
         # Contrastive-loss–relevant knobs (objective is target_multimodal_contrastive_loss)
         "lambda_multimodal_contrastive_loss": [10.0, 30.0, 100.0, 300.0],

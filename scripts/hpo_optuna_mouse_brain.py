@@ -137,14 +137,20 @@ def main() -> None:
                 )
 
     cache_dir = resolve_cache_dir(args.cache_dir)
-    mlflow.set_experiment(args.experiment_name)
-    experiment_id = get_or_create_experiment_id(args.experiment_name)
     if args.study_name:
         study_name = args.study_name
     else:
         now = datetime.datetime.now()
         timestamp = now.strftime("%d%m%Y_%H%M%S")
         study_name = f"{args.study_name_prefix}_{timestamp}"
+        
+    mlflow_artifact_dir = os.path.join(cache_dir, "mlflow_artifacts", study_name)
+    os.makedirs(mlflow_artifact_dir, exist_ok=True)
+    mlflow.set_experiment(args.experiment_name)
+    experiment_id = get_or_create_experiment_id(
+        args.experiment_name,
+        artifact_location=os.path.abspath(mlflow_artifact_dir),
+    )
 
     train_cfg = TrainConfig()
     search_space = {
@@ -191,7 +197,7 @@ def main() -> None:
     sampler = optuna.samplers.GridSampler(search_space)
     study = optuna.create_study(
         study_name=study_name,
-        direction="minimize",
+        direction="maximize",
         sampler=sampler,
         storage=args.storage,
         load_if_exists=True, # if study already exists, load it and continue trial count from there
@@ -261,6 +267,7 @@ def main() -> None:
                 cache_dir=cache_dir,
                 train_cfg=train_cfg,
                 mlflow_experiment_id=experiment_id,
+                optimization_metric="compound_metric",
             )
 
     #%%
@@ -268,8 +275,10 @@ def main() -> None:
     study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,))
 
     # Calculate importance
-    if total_trials > 1:
+    try:
         _log_param_importances_to_mlflow(study)
+    except Exception as e:
+        print(f"Error logging parameter importance: {e}")
 
     if not args.parent_run_id:
         mlflow.end_run()

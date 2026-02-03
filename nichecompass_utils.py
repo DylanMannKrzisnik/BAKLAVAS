@@ -1177,14 +1177,17 @@ class CustomTrainer(Trainer):
         )
         foscttm_mean = float(np.asarray(foscttm_full).mean())
 
+        # calculate 1 - FOSCTTM, such that the higher the better
+        one_m_foscttm = 1 - foscttm_mean
+
         # Log directly at epoch granularity to avoid mixing with per-iter logs.
         self.epoch_logs["target_multimodal_contrastive_loss"].append(
             float(loss.item()))
-        self.epoch_logs["target_foscttm"].append(foscttm_mean)
+        self.epoch_logs["target_one_minus_foscttm"].append(one_m_foscttm)
 
         if self.mlflow_experiment_id is not None:
             mlflow.log_metric("target_multimodal_contrastive_loss", float(loss.item()), step=self.epoch)
-            mlflow.log_metric("target_foscttm", foscttm_mean, step=self.epoch)
+            mlflow.log_metric("target_one_minus_foscttm", one_m_foscttm, step=self.epoch)
 
         if was_training:
             self.model.train()
@@ -1493,13 +1496,17 @@ class CustomTrainer(Trainer):
 
             ## create and log compound metric
             compound_metric = self.epoch_logs.copy()
-            # remove 'compound_metric' itself
-            if "compound_metric" in compound_metric:
+            '''
+            if "compound_metric" in compound_metric: # remove 'compound_metric' itself
                 compound_metric.pop("compound_metric")
-            # remove all items with keys containing 'loss'
-            for key_ in [key for key in list(compound_metric.keys()) if 'loss' in key]:
+            for key_ in [key for key in list(compound_metric.keys()) if 'loss' in key]: # remove all items with keys containing 'loss'
                 compound_metric.pop(key_)
             compound_metric = np.sum([values[-1] for values in compound_metric.values()]) / len(compound_metric)
+            '''
+            compound_metric = np.mean([
+                self.epoch_logs["target_one_minus_foscttm"][-1],
+                self.epoch_logs["target_iLISI"][-1]
+            ])
             self.epoch_logs["compound_metric"].append(compound_metric)
 
             if self.monitor_:

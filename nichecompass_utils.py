@@ -1956,9 +1956,12 @@ class CustomVGPGAE(VGPGAE):
                 self.multimodal_decoder = torch.nn.Identity()
                 self.multimodal_layer = torch.nn.Identity()
             else:
-                self.multimodal_encoder = torch.nn.Linear(
-                    gp_embedding_size,
-                    self.multimodal_embedding_size_)
+                self.multimodal_encoder = torch.nn.Sequential(
+                    torch.nn.Linear(
+                        gp_embedding_size,
+                        self.multimodal_embedding_size_),
+                    torch.nn.BatchNorm1d(self.multimodal_embedding_size_)
+                )
                 self.multimodal_decoder = torch.nn.Linear(
                     self.multimodal_embedding_size_,
                     gp_embedding_size)
@@ -1968,9 +1971,12 @@ class CustomVGPGAE(VGPGAE):
         else:
             self.multimodal_encoder = None
             self.multimodal_decoder = None
-            self.multimodal_layer = torch.nn.Linear(
-                gp_embedding_size,
-                self.multimodal_embedding_size_)
+            self.multimodal_layer = torch.nn.Sequential(
+                torch.nn.Linear(
+                    gp_embedding_size,
+                    self.multimodal_embedding_size_),
+                torch.nn.BatchNorm1d(self.multimodal_embedding_size_)
+            )
 
     @torch.no_grad()
     def get_active_gp_mask(

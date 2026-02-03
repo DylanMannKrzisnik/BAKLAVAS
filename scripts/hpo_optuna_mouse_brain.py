@@ -39,7 +39,7 @@ def parse_args(notebook: bool = False) -> argparse.Namespace:
     parser.add_argument(
         "--n-trials-per-gpu",
         type=int,
-        default=3,
+        default=2,
         help=(
             "Max number of trials per GPU worker. With GridSampler the study "
             "stops after all grid points are tried once (e.g. 4 trials for "
@@ -79,14 +79,13 @@ def parse_args(notebook: bool = False) -> argparse.Namespace:
 #%%
 def main() -> None:
     args = parse_args()
-    #args = parse_args(notebook=True); args.study_prefix = "hpo_test"
+    #args = parse_args(notebook=True); args.study_name_prefix = "hpo_test"; args.experiment_name = "hpo_test"
 
     if args.gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
 
     import mlflow
     import optuna
-    from optuna.integration.mlflow import MLflowCallback
     import datetime
 
     from hpo_mouse_brain_utils import (
@@ -96,6 +95,46 @@ def main() -> None:
         resolve_cache_dir,
         run_trial,
     )
+
+    def _log_param_importances_to_mlflow(study: "optuna.Study") -> None:
+        """
+        Log Optuna parameter importance figure(s) to the active MLflow run.
+
+        - Prefer Plotly (Optuna default). Try to log PNG; if Plotly image export
+          dependencies (e.g. kaleido) are missing, fall back to logging HTML.
+        - If Plotly plotting fails entirely, fall back to matplotlib if available.
+        """
+        # Plotly figure (preferred).
+        try:
+            importance_fig = optuna.visualization.plot_param_importances(study)
+            try:
+                mlflow.log_figure(importance_fig, "hyperparameter_importance.png")
+            except Exception as png_err:
+                # Common case: Plotly static export not available (kaleido missing).
+                mlflow.log_text(
+                    importance_fig.to_html(), "hyperparameter_importance.html"
+                )
+                mlflow.log_text(
+                    repr(png_err), "hyperparameter_importance_png_error.txt"
+                )
+            return
+        except Exception as plotly_err:
+            # Matplotlib fallback (more reliable for PNG in many environments).
+            try:
+                from optuna.visualization.matplotlib import plot_param_importances
+
+                ax = plot_param_importances(study)
+                # Fix clipping of long labels (common in Matplotlib)
+                ax.figure.tight_layout()
+                mlflow.log_figure(ax.figure, "hyperparameter_importance.png")
+                return
+            except Exception as mpl_err:
+                mlflow.log_text(
+                    "Failed to create/log param importance figure.\n"
+                    f"Plotly error: {repr(plotly_err)}\n"
+                    f"Matplotlib error: {repr(mpl_err)}\n",
+                    "hyperparameter_importance_error.txt",
+                )
 
     cache_dir = resolve_cache_dir(args.cache_dir)
     mlflow.set_experiment(args.experiment_name)
@@ -147,9 +186,6 @@ def main() -> None:
             )
             _launch_workers(args, cache_dir, parent_run_id, gpu_list, study_name)
         return
-
-    # Setup the callback
-    mlflc = MLflowCallback(metric_name="target_multimodal_contrastive_loss")
 
     # GridSampler suggests each combination exactly once; study stops when grid is exhausted.
     sampler = optuna.samplers.GridSampler(search_space)
@@ -215,7 +251,11 @@ def main() -> None:
         )
         with mlflow.start_run(
             run_name=f"trial_{trial.number:04d}", nested=True
-        ):
+        ) as child_run:
+            # Link Optuna <-> MLflow for easy cross-referencing.
+            trial.set_user_attr("mlflow_run_id", child_run.info.run_id)
+            mlflow.set_tag("optuna_trial_number", trial.number)
+            mlflow.set_tag("optuna_study_name", study.study_name)
             return run_trial(
                 params=params,
                 cache_dir=cache_dir,
@@ -225,11 +265,11 @@ def main() -> None:
 
     #%%
     # catch=(Exception,) prevents the study from stopping if a trial fails (e.g. NaNs).
-    study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,), callbacks=[mlflc])
+    study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,))
 
     # Calculate importance
-    importance_fig = optuna.visualization.plot_param_importances(study)
-    mlflow.log_figure(importance_fig, "hyperparameter_importance.png")
+    if total_trials > 1:
+        _log_param_importances_to_mlflow(study)
 
     if not args.parent_run_id:
         mlflow.end_run()

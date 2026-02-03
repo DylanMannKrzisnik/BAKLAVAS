@@ -1493,6 +1493,9 @@ class CustomTrainer(Trainer):
 
             ## create and log compound metric
             compound_metric = self.epoch_logs.copy()
+            # remove 'compound_metric' itself
+            if "compound_metric" in compound_metric:
+                compound_metric.pop("compound_metric")
             # remove all items with keys containing 'loss'
             for key_ in [key for key in list(compound_metric.keys()) if 'loss' in key]:
                 compound_metric.pop(key_)

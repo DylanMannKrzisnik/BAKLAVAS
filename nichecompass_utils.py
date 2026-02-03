@@ -22,11 +22,11 @@ import torch
 import torch.nn.functional as F
 from anndata import AnnData
 from torch_geometric.data import Data
+from torch_geometric.loader import LinkNeighborLoader, NeighborLoader
 from torch_geometric.utils import add_self_loops, remove_self_loops
 
 from nichecompass.data import (SpatialAnnTorchDataset,
-                               dataprocessors,
-                               initialize_dataloaders)
+                               dataprocessors)
 from nichecompass.data.utils import encode_labels, sparse_mx_to_sparse_tensor
 from nichecompass.models import NicheCompass
 from nichecompass.modules import VGPGAE
@@ -40,6 +40,124 @@ from evals_utils import foscttm_moscot, benchmark_embeddings
 # Isolate functions from dataprocessors to avoid circular imports
 edge_level_split = dataprocessors.edge_level_split
 node_level_split_mask = dataprocessors.node_level_split_mask
+
+
+def initialize_dataloaders(node_masked_data: Data,
+                           edge_train_data: Optional[Data]=None,
+                           edge_val_data: Optional[Data]=None,
+                           edge_batch_size: Optional[int]=64,
+                           node_batch_size: int=64,
+                           n_direct_neighbors: int=-1,
+                           n_hops: int=1,
+                           shuffle: bool=True,
+                           edges_directed: bool=False,
+                           neg_edge_sampling_ratio: float=1.,
+                           pin_memory: bool=False,
+                           num_workers: int=0,
+                           persistent_workers: bool=False,
+                           prefetch_factor: int=2) -> dict:
+    """
+    Initialize edge-level and node-level training and validation dataloaders.
+
+    Parameters
+    ----------
+    node_masked_data:
+        PyG Data object with node-level split masks.
+    edge_train_data:
+        PyG Data object containing the edge-level training set.
+    edge_val_data:
+        PyG Data object containing the edge-level validation set.
+    edge_batch_size:
+        Batch size for the edge-level dataloaders.
+    node_batch_size:
+        Batch size for the node-level dataloaders.
+    n_direct_neighbors:
+        Number of sampled direct neighbors of the current batch nodes to be 
+        included in the batch. Defaults to ´-1´, which means to include all 
+        direct neighbors.
+    n_hops:
+        Number of neighbor hops / levels for neighbor sampling of nodes to be 
+        included in the current batch. E.g. ´2´ means to not only include 
+        sampled direct neighbors of current batch nodes but also sampled 
+        neighbors of the direct neighbors.
+    shuffle:
+        If `True`, shuffle the dataloaders.
+    edges_directed:
+        If `False`, both symmetric edge index pairs are included in the same 
+        edge-level batch (1 edge has 2 symmetric edge index pairs).
+    neg_edge_sampling_ratio:
+        Negative sampling ratio of edges. This is currently implemented in an
+        approximate way, i.e. negative edges may contain false negatives.
+    pin_memory:
+        If `True`, pin CPU memory for faster host→device copies.
+    num_workers:
+        Number of worker processes for data loading.
+    persistent_workers:
+        Keep workers alive between epochs (only valid when num_workers > 0).
+    prefetch_factor:
+        Number of batches prefetched per worker (only valid when num_workers > 0).
+
+    Returns
+    ----------
+    loader_dict:
+        Dictionary containing training and validation PyG LinkNeighborLoader 
+        (for edge reconstruction) and NeighborLoader (for gene expression 
+        reconstruction) objects.
+    """
+    loader_dict = {}
+
+    loader_kwargs = {
+        "pin_memory": pin_memory,
+        "num_workers": num_workers,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    # Node-level dataloaders
+    loader_dict["node_train_loader"] = NeighborLoader(
+        node_masked_data,
+        num_neighbors=[n_direct_neighbors] * n_hops,
+        batch_size=node_batch_size,
+        directed=False,
+        shuffle=shuffle,
+        input_nodes=node_masked_data.train_mask,
+        **loader_kwargs)
+    if node_masked_data.val_mask.sum() != 0:
+        loader_dict["node_val_loader"] = NeighborLoader(
+            node_masked_data,
+            num_neighbors=[n_direct_neighbors] * n_hops,
+            batch_size=node_batch_size,
+            directed=False,
+            shuffle=shuffle,
+            input_nodes=node_masked_data.val_mask,
+            **loader_kwargs)
+        
+    # Edge-level dataloaders
+    if edge_train_data is not None:
+        loader_dict["edge_train_loader"] = LinkNeighborLoader(
+            edge_train_data,
+            num_neighbors=[n_direct_neighbors] * n_hops,
+            batch_size=edge_batch_size,
+            edge_label=None, # will automatically be added as 1 for all edges
+            edge_label_index=edge_train_data.edge_label_index[:, edge_train_data.edge_label.bool()], # limit the edges to the ones from the edge_label_adj
+            directed=edges_directed,
+            shuffle=shuffle,
+            neg_sampling_ratio=neg_edge_sampling_ratio,
+            **loader_kwargs)
+    if edge_val_data is not None and edge_val_data.edge_label.sum() != 0:
+        loader_dict["edge_val_loader"] = LinkNeighborLoader(
+            edge_val_data,
+            num_neighbors=[n_direct_neighbors] * n_hops,
+            batch_size=edge_batch_size,
+            edge_label=None, # will automatically be added as 1 for all edges
+            edge_label_index=edge_val_data.edge_label_index[:, edge_val_data.edge_label.bool()], # limit the edges to the ones from the edge_label_adj
+            directed=edges_directed,
+            shuffle=shuffle,
+            neg_sampling_ratio=neg_edge_sampling_ratio,
+            **loader_kwargs)
+
+    return loader_dict
 
 class CustomNicheCompass(NicheCompass):
     """
@@ -729,7 +847,8 @@ class CustomNicheCompass(NicheCompass):
             edge_val_data=None,
             edge_batch_size=None,
             node_batch_size=node_batch_size,
-            shuffle=False)
+            shuffle=False,
+            pin_memory=(device.type == "cuda"))
         node_loader = loader_dict["node_train_loader"]
 
         # Get number of gene programs
@@ -776,7 +895,7 @@ class CustomNicheCompass(NicheCompass):
         for i, node_batch in enumerate(node_loader):
             n_obs_before_batch = i * node_batch_size
             n_obs_after_batch = n_obs_before_batch + node_batch.batch_size
-            node_batch = node_batch.to(device)
+            node_batch = node_batch.to(device, non_blocking=True)
             # Ensure node_batch.x has the same dtype as the model
             if node_batch.x.dtype != model_dtype:
                 node_batch.x = node_batch.x.to(model_dtype)
@@ -909,7 +1028,8 @@ class CustomNicheCompass(NicheCompass):
             edge_val_data=None,
             edge_batch_size=None,
             node_batch_size=node_batch_size,
-            shuffle=False)
+            shuffle=False,
+            pin_memory=(device.type == "cuda"))
         node_loader = loader_dict["node_train_loader"]
 
         n_obs = node_masked_data.num_nodes
@@ -931,7 +1051,7 @@ class CustomNicheCompass(NicheCompass):
         for i, node_batch in enumerate(node_loader):
             n_obs_before_batch = i * node_batch_size
             n_obs_after_batch = n_obs_before_batch + node_batch.batch_size
-            node_batch = node_batch.to(device)
+            node_batch = node_batch.to(device, non_blocking=True)
             # Ensure node_batch.x has the same dtype as the model
             if node_batch.x.dtype != model_dtype:
                 node_batch.x = node_batch.x.to(model_dtype)
@@ -1015,7 +1135,8 @@ class CustomTrainer(Trainer):
             n_direct_neighbors=self.n_sampled_neighbors_,
             n_hops=self.loaders_n_hops_,
             edges_directed=False,
-            neg_edge_sampling_ratio=1.)
+            neg_edge_sampling_ratio=1.,
+            pin_memory=(self.device.type == "cuda"))
         self.edge_train_loader = loader_dict["edge_train_loader"]
         self.edge_val_loader = loader_dict.pop("edge_val_loader", None)
         self.node_train_loader = loader_dict["node_train_loader"]
@@ -1096,7 +1217,8 @@ class CustomTrainer(Trainer):
             edge_index=dataset.edge_index,
             edge_attr=dataset.edge_index.t())
         data.x_counts = dataset.x_counts
-        data.modality_mask = dataset.modality_mask
+        if dataset.modality_mask is not None:
+            data.modality_mask = dataset.modality_mask
         if self.cat_covariates_keys is not None:
             data.cat_covariates_cats = dataset.cat_covariates_cats
         data.batch_size = data.num_nodes
@@ -1126,7 +1248,7 @@ class CustomTrainer(Trainer):
                 rna_chunk=rna_chunk,
                 atac_chunk=atac_chunk,
                 paired_data=paired_data)
-            node_batch = node_batch.to(self.device)
+            node_batch = node_batch.to(self.device, non_blocking=True)
             if node_batch.x.dtype != model_dtype:
                 node_batch.x = node_batch.x.to(model_dtype)
 
@@ -1373,17 +1495,29 @@ class CustomTrainer(Trainer):
             self.iter_logs = defaultdict(list)
             self.iter_logs["n_train_iter"] = 0
             self.iter_logs["n_val_iter"] = 0
+            if not self.verbose_:
+                # Avoid calling `.item()` every iteration (forces GPU sync).
+                self.iter_logs["train_global_loss_sum"] = torch.zeros(
+                    (), device=self.device
+                )
+                self.iter_logs["train_optim_loss_sum"] = torch.zeros(
+                    (), device=self.device
+                )
+                self.iter_logs["train_multimodal_contrastive_loss_sum"] = torch.zeros(
+                    (), device=self.device
+                )
+                self.iter_logs["train_multimodal_contrastive_loss_count"] = 0
 
             for edge_train_data_batch, node_train_data_batch in zip(
                     self.edge_train_loader,
                     _cycle_iterable(self.node_train_loader)):
-                node_train_data_batch = node_train_data_batch.to(self.device)
+                node_train_data_batch = node_train_data_batch.to(self.device, non_blocking=True)
                 node_train_model_output = self.model(
                     data_batch=node_train_data_batch,
                     decoder="omics",
                     use_only_active_gps=self.use_only_active_gps)
 
-                edge_train_data_batch = edge_train_data_batch.to(self.device)
+                edge_train_data_batch = edge_train_data_batch.to(self.device, non_blocking=True)
                 edge_train_model_output = self.model(
                     data_batch=edge_train_data_batch,
                     decoder="graph",
@@ -1417,14 +1551,14 @@ class CustomTrainer(Trainer):
                     for key, value in train_loss_dict.items():
                         self.iter_logs[f"train_{key}"].append(value.item())
                 else:
-                    self.iter_logs["train_global_loss"].append(
-                        train_global_loss.item())
-                    self.iter_logs["train_optim_loss"].append(
-                        train_optim_loss.item())
+                    self.iter_logs["train_global_loss_sum"] += train_global_loss.detach()
+                    self.iter_logs["train_optim_loss_sum"] += train_optim_loss.detach()
                     # Always log multimodal_contrastive_loss if present
                     if "multimodal_contrastive_loss" in train_loss_dict:
-                        self.iter_logs["train_multimodal_contrastive_loss"].append(
-                            train_loss_dict["multimodal_contrastive_loss"].item())
+                        self.iter_logs["train_multimodal_contrastive_loss_sum"] += (
+                            train_loss_dict["multimodal_contrastive_loss"].detach()
+                        )
+                        self.iter_logs["train_multimodal_contrastive_loss_count"] += 1
                 self.iter_logs["n_train_iter"] += 1
 
                 self.optimizer.zero_grad()
@@ -1446,23 +1580,57 @@ class CustomTrainer(Trainer):
                 warnings.warn("You have specified an edge validation set but no"
                               " node validation set. Skipping validation...")
 
-            for key in self.iter_logs:
-                if key.startswith("train"):
-                    epoch_avg_loss = (
-                        np.array(self.iter_logs[key]).sum() /
-                        self.iter_logs["n_train_iter"])
-                    self.epoch_logs[key].append(epoch_avg_loss)
-                    # Log training losses to MLflow
+            if self.verbose_:
+                for key in self.iter_logs:
+                    if key.startswith("train"):
+                        epoch_avg_loss = (
+                            np.array(self.iter_logs[key]).sum() /
+                            self.iter_logs["n_train_iter"])
+                        self.epoch_logs[key].append(epoch_avg_loss)
+                        # Log training losses to MLflow
+                        if self.mlflow_experiment_id is not None:
+                            mlflow.log_metric(key, epoch_avg_loss, step=self.epoch)
+                    if key.startswith("val"):
+                        epoch_avg_loss = (
+                            np.array(self.iter_logs[key]).sum() /
+                            self.iter_logs["n_val_iter"])
+                        self.epoch_logs[key].append(epoch_avg_loss)
+                        # Log validation losses to MLflow
+                        if self.mlflow_experiment_id is not None:
+                            mlflow.log_metric(key, epoch_avg_loss, step=self.epoch)
+            else:
+                n_train = max(1, int(self.iter_logs["n_train_iter"]))
+                train_global_loss = (self.iter_logs["train_global_loss_sum"] / n_train).item()
+                train_optim_loss = (self.iter_logs["train_optim_loss_sum"] / n_train).item()
+                self.epoch_logs["train_global_loss"].append(train_global_loss)
+                self.epoch_logs["train_optim_loss"].append(train_optim_loss)
+                if self.mlflow_experiment_id is not None:
+                    mlflow.log_metric("train_global_loss", train_global_loss, step=self.epoch)
+                    mlflow.log_metric("train_optim_loss", train_optim_loss, step=self.epoch)
+
+                mmc_count = int(self.iter_logs.get("train_multimodal_contrastive_loss_count", 0))
+                if mmc_count > 0:
+                    train_mmc_loss = (self.iter_logs["train_multimodal_contrastive_loss_sum"] / mmc_count).item()
+                    self.epoch_logs["train_multimodal_contrastive_loss"].append(train_mmc_loss)
                     if self.mlflow_experiment_id is not None:
-                        mlflow.log_metric(key, epoch_avg_loss, step=self.epoch)
-                if key.startswith("val"):
-                    epoch_avg_loss = (
-                        np.array(self.iter_logs[key]).sum() /
-                        self.iter_logs["n_val_iter"])
-                    self.epoch_logs[key].append(epoch_avg_loss)
-                    # Log validation losses to MLflow
+                        mlflow.log_metric("train_multimodal_contrastive_loss", train_mmc_loss, step=self.epoch)
+
+                n_val = int(self.iter_logs.get("n_val_iter", 0))
+                if n_val > 0 and "val_global_loss_sum" in self.iter_logs:
+                    val_global_loss = (self.iter_logs["val_global_loss_sum"] / n_val).item()
+                    val_optim_loss = (self.iter_logs["val_optim_loss_sum"] / n_val).item()
+                    self.epoch_logs["val_global_loss"].append(val_global_loss)
+                    self.epoch_logs["val_optim_loss"].append(val_optim_loss)
                     if self.mlflow_experiment_id is not None:
-                        mlflow.log_metric(key, epoch_avg_loss, step=self.epoch)
+                        mlflow.log_metric("val_global_loss", val_global_loss, step=self.epoch)
+                        mlflow.log_metric("val_optim_loss", val_optim_loss, step=self.epoch)
+
+                    val_mmc_count = int(self.iter_logs.get("val_multimodal_contrastive_loss_count", 0))
+                    if val_mmc_count > 0:
+                        val_mmc_loss = (self.iter_logs["val_multimodal_contrastive_loss_sum"] / val_mmc_count).item()
+                        self.epoch_logs["val_multimodal_contrastive_loss"].append(val_mmc_loss)
+                        if self.mlflow_experiment_id is not None:
+                            mlflow.log_metric("val_multimodal_contrastive_loss", val_mmc_loss, step=self.epoch)
 
             # Fetch target embeddings once before any metrics are computed.
             if (self.log_target_multimodal_contrastive_  and self.target_holdout_adata is not None and self.target_holdout_adata_atac is not None):
@@ -1547,16 +1715,24 @@ class CustomTrainer(Trainer):
         edge_incl_val_accumulated = np.array([])
 
         multimodal_contrastive_weight = self._get_multimodal_contrastive_weight()
+        if not self.verbose_:
+            # Avoid per-iteration `.item()` calls (GPU sync).
+            self.iter_logs["val_global_loss_sum"] = torch.zeros((), device=self.device)
+            self.iter_logs["val_optim_loss_sum"] = torch.zeros((), device=self.device)
+            self.iter_logs["val_multimodal_contrastive_loss_sum"] = torch.zeros(
+                (), device=self.device
+            )
+            self.iter_logs["val_multimodal_contrastive_loss_count"] = 0
 
         for edge_val_data_batch, node_val_data_batch in zip(
                 self.edge_val_loader, _cycle_iterable(self.node_val_loader)):
-            node_val_data_batch = node_val_data_batch.to(self.device)
+            node_val_data_batch = node_val_data_batch.to(self.device, non_blocking=True)
             node_val_model_output = self.model(
                 data_batch=node_val_data_batch,
                 decoder="omics",
                 use_only_active_gps=self.use_only_active_gps)
 
-            edge_val_data_batch = edge_val_data_batch.to(self.device)
+            edge_val_data_batch = edge_val_data_batch.to(self.device, non_blocking=True)
             edge_val_model_output = self.model(
                 data_batch=edge_val_data_batch,
                 decoder="graph",
@@ -1587,12 +1763,14 @@ class CustomTrainer(Trainer):
                 for key, value in val_loss_dict.items():
                     self.iter_logs[f"val_{key}"].append(value.item())
             else:
-                self.iter_logs["val_global_loss"].append(val_global_loss.item())
-                self.iter_logs["val_optim_loss"].append(val_optim_loss.item())
+                self.iter_logs["val_global_loss_sum"] += val_global_loss.detach()
+                self.iter_logs["val_optim_loss_sum"] += val_optim_loss.detach()
                 # Always log multimodal_contrastive_loss if present
                 if "multimodal_contrastive_loss" in val_loss_dict:
-                    self.iter_logs["val_multimodal_contrastive_loss"].append(
-                        val_loss_dict["multimodal_contrastive_loss"].item())
+                    self.iter_logs["val_multimodal_contrastive_loss_sum"] += (
+                        val_loss_dict["multimodal_contrastive_loss"].detach()
+                    )
+                    self.iter_logs["val_multimodal_contrastive_loss_count"] += 1
             self.iter_logs["n_val_iter"] += 1
 
             edge_recon_probs_val = torch.sigmoid(
@@ -1976,23 +2154,20 @@ class CustomVGPGAE(VGPGAE):
         only_rna = has_rna & ~has_atac
         only_atac = ~has_rna & has_atac
 
+        # Avoid Python control flow on GPU tensors (`if both.any():`), which can
+        # force expensive device synchronization. Use purely tensorized logic.
+        mu_both, logstd_both = self.multiply_gaussians_log_space(
+            mu_rna, logstd_rna, mu_atac, logstd_atac)
+
         mu = torch.zeros_like(mu_rna)
         logstd = torch.zeros_like(logstd_rna)
 
-        if both.any():
-            mu_both, logstd_both = self.multiply_gaussians_log_space(
-                mu_rna[both],
-                logstd_rna[both],
-                mu_atac[both],
-                logstd_atac[both])
-            mu[both] = mu_both
-            logstd[both] = logstd_both
-        if only_rna.any():
-            mu[only_rna] = mu_rna[only_rna]
-            logstd[only_rna] = logstd_rna[only_rna]
-        if only_atac.any():
-            mu[only_atac] = mu_atac[only_atac]
-            logstd[only_atac] = logstd_atac[only_atac]
+        mu = torch.where(both[:, None], mu_both, mu)
+        logstd = torch.where(both[:, None], logstd_both, logstd)
+        mu = torch.where(only_rna[:, None], mu_rna, mu)
+        logstd = torch.where(only_rna[:, None], logstd_rna, logstd)
+        mu = torch.where(only_atac[:, None], mu_atac, mu)
+        logstd = torch.where(only_atac[:, None], logstd_atac, logstd)
 
         return mu, logstd
 
@@ -2963,8 +3138,10 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
 
                 self.x = torch.cat((self.x_rna, self.x_atac), axis=1)
                 self.x_counts = torch.cat((self.x_rna_counts, self.x_atac_counts), axis=1)
-                self.modality_mask = torch.ones(
-                    (self.x.size(0), 2), dtype=torch.bool)
+                # For paired data, every observation has both modalities, so we
+                # can omit the modality mask and take the fast path in
+                # posterior-combining logic.
+                self.modality_mask = None
             else:
                 rna_obs = adata.obs_names
                 atac_obs = adata_atac.obs_names
@@ -3156,7 +3333,8 @@ def prepare_data(adata: AnnData,
         data.x_atac = dataset.x_atac
     data.x_counts = dataset.x_counts
 
-    data.modality_mask = dataset.modality_mask
+    if dataset.modality_mask is not None:
+        data.modality_mask = dataset.modality_mask
 
     if cat_covariates_keys is not None:
         data.cat_covariates_cats = dataset.cat_covariates_cats

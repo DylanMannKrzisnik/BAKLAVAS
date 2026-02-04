@@ -27,6 +27,14 @@
 
 # ## 1. Setup
 
+#%% Load environment variables
+from dotenv import load_dotenv, dotenv_values
+load_dotenv()
+
+from pprint import pprint
+print("Loaded environment variables from .env or env:", end="\n\n")
+pprint(dotenv_values())
+
 #%% 1.1 Import Libraries
 
 import os

@@ -1229,7 +1229,7 @@ class CustomTrainer(Trainer):
         adata: AnnData,
         adata_atac: Optional[AnnData],
         paired_data: bool,
-        chunk_size: int=1000,
+        chunk_size: int=500,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         mu_rna = []

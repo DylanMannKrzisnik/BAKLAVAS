@@ -290,7 +290,6 @@ def main() -> None:
                 optimization_metric="compound_metric",
             )
 
-    #%%
     # catch=(Exception,) prevents the study from stopping if a trial fails (e.g. NaNs).
     study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,))
 

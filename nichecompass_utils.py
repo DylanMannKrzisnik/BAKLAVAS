@@ -1223,6 +1223,7 @@ class CustomTrainer(Trainer):
             data.cat_covariates_cats = dataset.cat_covariates_cats
         data.batch_size = data.num_nodes
         return data
+
     @torch.no_grad()
     def _get_target_latent_embeddings(
         self,
@@ -1232,8 +1233,10 @@ class CustomTrainer(Trainer):
         chunk_size: int=500,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        mu_rna = []
-        mu_atac = []
+        was_training = self.model.training
+        if was_training:
+            self.model.eval()
+
         clip_embeddings_rna = []
         clip_embeddings_atac = []
 
@@ -1252,7 +1255,7 @@ class CustomTrainer(Trainer):
             if node_batch.x.dtype != model_dtype:
                 node_batch.x = node_batch.x.to(model_dtype)
 
-            mu_rna_batch, _, mu_atac_batch, _, clip_embeddings_rna_batch, clip_embeddings_atac_batch = (
+            _, _, _, _, clip_embeddings_rna_batch, clip_embeddings_atac_batch = (
                 self.model.get_latent_representation(
                     node_batch=node_batch,
                     only_active_gps=self.use_only_active_gps,
@@ -1260,40 +1263,43 @@ class CustomTrainer(Trainer):
                     separate_modalities=True,
                     return_clip_embeddings=True)
             )
-            mu_rna.append(mu_rna_batch)
-            mu_atac.append(mu_atac_batch)
-            clip_embeddings_rna.append(clip_embeddings_rna_batch)
+
+            ## evaluate multimodal contrastive loss on target data
+            similarity = self.model.get_multimodal_similarity(
+                clip_embeddings_rna=clip_embeddings_rna_batch,
+                clip_embeddings_atac=clip_embeddings_atac_batch)
+
+            loss = self.model.compute_multimodal_contrastive_loss(
+                similarity_matrix=similarity,
+                temperature=self.multimodal_temperature_)
+
+            self.epoch_logs["target_multimodal_contrastive_loss"].append(float(loss.item()))
+            if self.mlflow_experiment_id is not None:
+                mlflow.log_metric("target_multimodal_contrastive_loss", float(loss.item()), step=self.epoch)
+
+            ## store clip embeddings
+            clip_embeddings_rna.append(clip_embeddings_rna_batch.detach().cpu().numpy())
             if clip_embeddings_atac_batch is not None:
-                clip_embeddings_atac.append(clip_embeddings_atac_batch)            
+                clip_embeddings_atac.append(clip_embeddings_atac_batch.detach().cpu().numpy())            
 
-        clip_embeddings_rna = torch.cat(clip_embeddings_rna, dim=0)
-        clip_embeddings_atac = torch.cat(clip_embeddings_atac, dim=0) if clip_embeddings_atac else None
-        mu_rna = torch.cat(mu_rna, dim=0)
-        mu_atac = torch.cat(mu_atac, dim=0)
+        clip_embeddings_rna = np.concatenate(clip_embeddings_rna, axis=0)
+        clip_embeddings_atac = np.concatenate(clip_embeddings_atac, axis=0) if clip_embeddings_atac else None
 
-        return mu_rna, mu_atac, clip_embeddings_rna, clip_embeddings_atac
+        if was_training:
+            self.model.train()
 
-    @torch.no_grad()
-    def _log_target_paired_metrics_and_loss(
+        return clip_embeddings_rna, clip_embeddings_atac
+
+    def _log_target_paired_metrics(
         self,
         temperature: float,
         clip_embeddings_rna: torch.Tensor,
         clip_embeddings_atac: torch.Tensor,
     ) -> None:
 
-        was_training = self.model.training
-        self.model.eval()
-
-        similarity = self.model.get_multimodal_similarity(
-            clip_embeddings_rna=clip_embeddings_rna,
-            clip_embeddings_atac=clip_embeddings_atac)
-        loss = self.model.compute_multimodal_contrastive_loss(
-            similarity_matrix=similarity,
-            temperature=temperature)
-
         foscttm_full = foscttm_moscot(
-            clip_embeddings_rna.detach().cpu().numpy(),
-            clip_embeddings_atac.detach().cpu().numpy(),
+            clip_embeddings_rna,
+            clip_embeddings_atac,
         )
         foscttm_mean = float(np.asarray(foscttm_full).mean())
 
@@ -1301,29 +1307,16 @@ class CustomTrainer(Trainer):
         one_m_foscttm = 1 - foscttm_mean
 
         # Log directly at epoch granularity to avoid mixing with per-iter logs.
-        self.epoch_logs["target_multimodal_contrastive_loss"].append(
-            float(loss.item()))
         self.epoch_logs["target_one_minus_foscttm"].append(one_m_foscttm)
-
         if self.mlflow_experiment_id is not None:
-            mlflow.log_metric("target_multimodal_contrastive_loss", float(loss.item()), step=self.epoch)
             mlflow.log_metric("target_one_minus_foscttm", one_m_foscttm, step=self.epoch)
 
-        if was_training:
-            self.model.train()
-
-    @torch.no_grad()
     def _log_target_unpaired_metrics(self) -> None:
-
-        was_training = self.model.training
-        self.model.eval()
 
         if self.target_latent_key not in self.target_holdout_adata.obsm:
             warnings.warn(
                 "Target latent embeddings not found; skipping target metrics. "
                 "Run embedding extraction before metric logging.")
-            if was_training:
-                self.model.train()
             return
 
         ## cocnatenate target_holdout_adata and target_holdout_adata_atac
@@ -1353,9 +1346,6 @@ class CustomTrainer(Trainer):
         if self.mlflow_experiment_id is not None:
             for key, value in results_dict.items():
                 mlflow.log_metric(f"target_{key}".replace(" ", "_"), value, step=self.epoch)
-
-        if was_training:
-            self.model.train()
 
     def _get_multimodal_contrastive_weight(self, increasing: bool=True) -> float:
         if (not self.multimodal_contrastive_anneal_) or self.n_epochs_ <= 1:
@@ -1637,28 +1627,28 @@ class CustomTrainer(Trainer):
             # Fetch target embeddings once before any metrics are computed.
             if (self.log_target_multimodal_contrastive_  and self.target_holdout_adata is not None and self.target_holdout_adata_atac is not None):
 
-                target_holdout_mu_rna, target_holdout_mu_atac, target_holdout_clip_embeddings_rna, target_holdout_clip_embeddings_atac = (
+                target_holdout_clip_embeddings_rna, target_holdout_clip_embeddings_atac = (
                     self._get_target_latent_embeddings(
                         adata=self.target_holdout_adata,
                         adata_atac=self.target_holdout_adata_atac,
                         paired_data=self.target_paired_data_,
-                        chunk_size=1000,
+                        chunk_size=500,
                     )
                 )
 
             # Compute metrics after embeddings are available.
             if self.log_target_multimodal_contrastive_ and self.target_paired_data_:
 
-                self._log_target_paired_metrics_and_loss(
+                self._log_target_paired_metrics(
                         temperature=self.multimodal_temperature_,
                         clip_embeddings_rna=target_holdout_clip_embeddings_rna,
                         clip_embeddings_atac=target_holdout_clip_embeddings_atac,
                 )
 
             if self.target_adata is not None:
-                self.target_holdout_adata.obsm[self.target_latent_key] = target_holdout_clip_embeddings_rna.detach().cpu().numpy()
+                self.target_holdout_adata.obsm[self.target_latent_key] = target_holdout_clip_embeddings_rna
                 if self.target_adata_atac is not None:
-                    self.target_holdout_adata_atac.obsm[self.target_latent_key] = target_holdout_clip_embeddings_atac.detach().cpu().numpy()
+                    self.target_holdout_adata_atac.obsm[self.target_latent_key] = target_holdout_clip_embeddings_atac
 
                 self._log_target_unpaired_metrics()
 
@@ -3031,8 +3021,8 @@ class CustomVGPGAE(VGPGAE):
 
     def get_multimodal_similarity(
             self,
-            clip_embeddings_rna: Optional[torch.Tensor]=None,
-            clip_embeddings_atac: Optional[torch.Tensor]=None,
+            clip_embeddings_rna: torch.Tensor,
+            clip_embeddings_atac: torch.Tensor,
             ) -> torch.Tensor:
         """
         Compute cross-modal similarity using *precomputed* CLIP embeddings.
@@ -3044,10 +3034,6 @@ class CustomVGPGAE(VGPGAE):
         projected embeddings (e.g. from `forward()` output or from
         `get_latent_representation(..., return_clip_embeddings=True)`).
         """
-        if clip_embeddings_rna is None or clip_embeddings_atac is None:
-            raise ValueError(
-                "clip_embeddings_rna and clip_embeddings_atac must be provided; "
-                "get_multimodal_similarity no longer computes them from mu.")
 
         clip_rna_normed = F.normalize(clip_embeddings_rna, p=2, dim=1)
         clip_atac_normed = F.normalize(clip_embeddings_atac, p=2, dim=1)

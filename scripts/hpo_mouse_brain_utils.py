@@ -34,8 +34,8 @@ class TrialParams:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    n_epochs: int = 3
-    n_epochs_all_gps: int = 3
+    n_epochs: int = 100
+    n_epochs_all_gps: int = 100
     lr: float = 0.001
     lambda_edge_recon: float = 500000.0
     lambda_gene_expr_recon: float = 300.0
@@ -48,7 +48,7 @@ class TrainConfig:
     n_sampled_neighbors: int = 4
     multimodal_contrastive_anneal: bool = False
     target_holdout_frac: float = 0.1
-    target_holdout_n: Optional[int] = None
+    target_holdout_n: Optional[int] = 2000
     target_holdout_seed: int = 0
     target_paired_data: bool = True
     target_encoder_input_key: str = "pseudocounts"
@@ -126,10 +126,15 @@ def build_model(
     )
 
 
-def get_or_create_experiment_id(experiment_name: str) -> str:
+def get_or_create_experiment_id(
+    experiment_name: str,
+    artifact_location: Optional[str] = None,
+) -> str:
     experiment = mlflow.get_experiment_by_name(experiment_name)
     if experiment is None:
-        return mlflow.create_experiment(experiment_name)
+        return mlflow.create_experiment(
+            experiment_name, artifact_location=artifact_location
+        )
     return experiment.experiment_id
 
 
@@ -151,6 +156,7 @@ def run_trial(
     cache_dir: str,
     train_cfg: TrainConfig,
     mlflow_experiment_id: Optional[str] = None,
+    optimization_metric: str = "compound_metric",
 ) -> float:
     adata, adata_atac = load_cached_inputs(cache_dir)
     model = build_model(adata, adata_atac, params)
@@ -191,12 +197,11 @@ def run_trial(
         mlflow_experiment_id=mlflow_experiment_id,
     )
 
-    logs = model.trainer.epoch_logs.get("target_multimodal_contrastive_loss", [])
+    logs = model.trainer.epoch_logs.get(optimization_metric, [])
     if not logs:
         raise RuntimeError(
-            "target_multimodal_contrastive_loss not logged. Ensure "
+            f"{optimization_metric} not logged. Ensure "
             "log_target_multimodal_contrastive=True."
         )
     metric = float(logs[-1])
-    mlflow.log_metric("objective_target_multimodal_contrastive_loss", metric)
     return metric

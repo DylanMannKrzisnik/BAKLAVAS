@@ -1,14 +1,16 @@
+#%%
 import argparse
 import os
 import subprocess
 import sys
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, List, Optional
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(notebook: bool = False) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Optuna HPO for NicheCompass mouse brain multimodal."
     )
@@ -38,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-trials-per-gpu",
         type=int,
-        default=3,
+        default=2,
         help=(
             "Max number of trials per GPU worker. With GridSampler the study "
             "stops after all grid points are tried once (e.g. 4 trials for "
@@ -70,11 +72,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Use an existing MLflow parent run id.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--mlflow-base-dir",
+        default=None,
+        help=(
+            "Base directory for MLflow tracking DB and artifacts (e.g. BAKLAVA_base). "
+            "If set, one SQLite DB and one artifact tree are used so 'mlflow ui' can "
+            "load all runs from one place. Also respects MLFLOW_BASE_DIR env var."
+        ),
+    )
+    if notebook:
+        return parser.parse_known_args()[0]
+    else:
+        return parser.parse_args()
 
-
+#%%
 def main() -> None:
     args = parse_args()
+    #args = parse_args(notebook=True); args.study_name_prefix = "hpo_test"; args.experiment_name = "hpo_test"
 
     if args.gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
@@ -91,9 +106,40 @@ def main() -> None:
         run_trial,
     )
 
+    def _log_param_importances_to_mlflow(study: "optuna.Study") -> None:
+        """
+        Log Optuna parameter importance figure(s) to the active MLflow run.
+
+        - Prefer Plotly (Optuna default). Try to log PNG; if Plotly image export
+          dependencies (e.g. kaleido) are missing, fall back to logging HTML.
+        - If Plotly plotting fails entirely, fall back to matplotlib if available.
+        """
+        # Plotly figure (preferred).
+        try:
+            importance_fig = optuna.visualization.plot_param_importances(study)
+            try:
+                mlflow.log_figure(importance_fig, "hyperparameter_importance.png")
+            except Exception:
+                # Common case: Plotly static export not available (e.g. kaleido missing).
+                mlflow.log_text(
+                    importance_fig.to_html(), "hyperparameter_importance.html"
+                )
+            return
+        except Exception as plotly_err:
+            # Matplotlib fallback (more reliable for PNG in many environments).
+            try:
+                from optuna.visualization.matplotlib import plot_param_importances
+
+                ax = plot_param_importances(study)
+                # Fix clipping of long labels (common in Matplotlib)
+                ax.figure.tight_layout()
+                mlflow.log_figure(ax.figure, "hyperparameter_importance.png")
+                return
+            except Exception:
+                # Neither Plotly nor Matplotlib succeeded; skip logging.
+                pass
+
     cache_dir = resolve_cache_dir(args.cache_dir)
-    mlflow.set_experiment(args.experiment_name)
-    experiment_id = get_or_create_experiment_id(args.experiment_name)
     if args.study_name:
         study_name = args.study_name
     else:
@@ -101,9 +147,34 @@ def main() -> None:
         timestamp = now.strftime("%d%m%Y_%H%M%S")
         study_name = f"{args.study_name_prefix}_{timestamp}"
 
+    # Keep MLflow in ONE place so "mlflow ui" consistently shows all runs.
+    # Default: directory above the repo (i.e., BAKLAVA_base), but can be overridden
+    # via --mlflow-base-dir or MLFLOW_BASE_DIR.
+    #
+    # Run the UI with:
+    #   mlflow ui --backend-store-uri sqlite:////<mlflow_base_dir>/mlflow_tracking/mlflow.db
+    default_base_dir = str(Path(__file__).resolve().parents[2])
+    mlflow_base_dir = args.mlflow_base_dir or os.environ.get("MLFLOW_BASE_DIR") or default_base_dir
+    mlflow_base_dir = os.path.abspath(mlflow_base_dir)
+
+    mlflow_tracking_dir = os.path.join(mlflow_base_dir, "mlflow_tracking")
+    os.makedirs(mlflow_tracking_dir, exist_ok=True)
+    mlflow_db_path = os.path.join(mlflow_tracking_dir, "mlflow.db")
+    mlflow.set_tracking_uri(f"sqlite:///{mlflow_db_path}")
+    print(f"MLflow backend-store-uri: sqlite:////{mlflow_db_path.lstrip('/')}")
+
+    mlflow_artifact_dir = os.path.join(mlflow_base_dir, "mlflow_artifacts", study_name)
+    os.makedirs(mlflow_artifact_dir, exist_ok=True)
+    experiment_id = get_or_create_experiment_id(
+        args.experiment_name,
+        artifact_location=os.path.abspath(mlflow_artifact_dir),
+    )
+    # Now that the experiment exists (with the desired artifact location), activate it.
+    mlflow.set_experiment(args.experiment_name)
+
     train_cfg = TrainConfig()
     search_space = {
-        "multimodal_layer_series": [True, False],
+        "multimodal_layer_series": [False],
         "encoder_input_key": ["counts", "pseudocounts"],
         # Contrastive-loss–relevant knobs (objective is target_multimodal_contrastive_loss)
         "lambda_multimodal_contrastive_loss": [10.0, 30.0, 100.0, 300.0],
@@ -146,7 +217,7 @@ def main() -> None:
     sampler = optuna.samplers.GridSampler(search_space)
     study = optuna.create_study(
         study_name=study_name,
-        direction="minimize",
+        direction="maximize",
         sampler=sampler,
         storage=args.storage,
         load_if_exists=True, # if study already exists, load it and continue trial count from there
@@ -206,21 +277,33 @@ def main() -> None:
         )
         with mlflow.start_run(
             run_name=f"trial_{trial.number:04d}", nested=True
-        ):
+        ) as child_run:
+            # Link Optuna <-> MLflow for easy cross-referencing.
+            trial.set_user_attr("mlflow_run_id", child_run.info.run_id)
+            mlflow.set_tag("optuna_trial_number", trial.number)
+            mlflow.set_tag("optuna_study_name", study.study_name)
             return run_trial(
                 params=params,
                 cache_dir=cache_dir,
                 train_cfg=train_cfg,
                 mlflow_experiment_id=experiment_id,
+                optimization_metric="compound_metric",
             )
 
+    #%%
     # catch=(Exception,) prevents the study from stopping if a trial fails (e.g. NaNs).
     study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,))
+
+    # Calculate importance
+    try:
+        _log_param_importances_to_mlflow(study)
+    except Exception as e:
+        print(f"Error logging parameter importance: {e}")
 
     if not args.parent_run_id:
         mlflow.end_run()
 
-
+#%%
 def _parse_gpus(gpus: str) -> List[str]:
     return [gpu.strip() for gpu in gpus.split(",") if gpu.strip()]
 
@@ -252,10 +335,13 @@ def _launch_workers(
     gpus: List[str],
     study_name: str,
 ) -> None:
+    mlflow_base = args.mlflow_base_dir or os.environ.get("MLFLOW_BASE_DIR") or ""
     procs = []
     for gpu in gpus:
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu
+        if mlflow_base:
+            env["MLFLOW_BASE_DIR"] = mlflow_base
         cmd = [
             sys.executable,
             os.path.abspath(__file__),
@@ -272,6 +358,8 @@ def _launch_workers(
             "--gpu",
             gpu,
         ]
+        if args.mlflow_base_dir:
+            cmd.extend(["--mlflow-base-dir", args.mlflow_base_dir])
         if cache_dir:
             cmd.extend(["--cache-dir", cache_dir])
         procs.append(subprocess.Popen(cmd, env=env))
@@ -279,6 +367,6 @@ def _launch_workers(
     for proc in procs:
         proc.wait()
 
-
+#%%
 if __name__ == "__main__":
     main()

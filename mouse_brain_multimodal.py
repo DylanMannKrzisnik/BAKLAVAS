@@ -27,6 +27,14 @@
 
 # ## 1. Setup
 
+#%% Load environment variables
+from dotenv import load_dotenv, dotenv_values
+load_dotenv()
+
+from pprint import pprint
+print("Loaded environment variables from .env or env:", end="\n\n")
+pprint(dotenv_values())
+
 #%% 1.1 Import Libraries
 
 import os
@@ -819,7 +827,7 @@ with mlflow.start_run(run_name=current_timestamp):
                 target_adata=target_rna,
                 target_adata_atac=target_atac,
                 target_holdout_frac=0.1,
-                target_holdout_n=None,
+                target_holdout_n=500,
                 target_holdout_seed=0,
                 target_paired_data=True,
                 target_encoder_input_key='pseudocounts',

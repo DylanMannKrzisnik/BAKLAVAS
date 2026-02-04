@@ -1517,14 +1517,6 @@ class CustomTrainer(Trainer):
                     decoder="omics",
                     use_only_active_gps=self.use_only_active_gps)
 
-                # multimodal embeddings model output
-                if self.multimodal_layer_series_:
-                    clip_embeddings_rna = self.multimodal_encoder(node_train_model_output["mu_rna"])
-                    clip_embeddings_atac = self.multimodal_encoder(node_train_model_output["mu_atac"])
-                else:
-                    clip_embeddings_rna = self.multimodal_layer(node_train_model_output["mu_rna"])
-                    clip_embeddings_atac = self.multimodal_layer(node_train_model_output["mu_atac"])
-
                 # edge-level model output
                 edge_train_data_batch = edge_train_data_batch.to(self.device, non_blocking=True)
                 edge_train_model_output = self.model(

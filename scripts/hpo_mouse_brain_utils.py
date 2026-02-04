@@ -42,9 +42,9 @@ class TrainConfig:
     lambda_chrom_access_recon: float = 300.0
     lambda_l1_masked: float = 0.0
     lambda_l1_addon: float = 30.0
-    lambda_multimodal_contrastive_loss: float = 100.0
+    lambda_multimodal_contrastive_loss: float = 100000.0
     edge_batch_size: int = 64
-    node_batch_size: int = 64
+    node_batch_size: int = 256
     use_cuda_if_available: bool = True
     n_sampled_neighbors: int = 4
     multimodal_contrastive_anneal: bool = False
@@ -182,6 +182,7 @@ def run_trial(
         contrastive_logits_pos_ratio=params.contrastive_logits_pos_ratio,
         contrastive_logits_neg_ratio=params.contrastive_logits_neg_ratio,
         edge_batch_size=train_cfg.edge_batch_size,
+        node_batch_size=train_cfg.node_batch_size,
         use_cuda_if_available=train_cfg.use_cuda_if_available,
         n_sampled_neighbors=train_cfg.n_sampled_neighbors,
         target_adata=target_rna,

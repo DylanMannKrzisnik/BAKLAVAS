@@ -112,18 +112,19 @@ latent_key = "nichecompass_latent"
 
 # Architecture
 active_gp_thresh_ratio = 0.01
-conv_layer_encoder = "gatv2conv" # default is "gatv2conv", change to "gcnconv" if not enough compute and memory
+conv_layer_encoder = "gcnconv" # default is "gatv2conv", change to "gcnconv" if not enough compute and memory
 
 # Trainer
-n_epochs = 400
-n_epochs_all_gps = 25
+n_epochs = 5
+n_epochs_all_gps = 5
 lr = 0.001
 lambda_edge_recon = 500000.
 lambda_gene_expr_recon = 300.
 lambda_chrom_access_recon = 300.
 lambda_l1_masked = 0. # prior GP  regularization
 lambda_l1_addon = 30. # de novo GP regularization
-edge_batch_size = 64 # increase if more memory available or decrease to save memory
+edge_batch_size = 256 # increase if more memory available or decrease to save memory
+node_batch_size = 800 # increase if more memory available or decrease to save memory
 use_cuda_if_available = True
 
 ### Analysis ###
@@ -205,564 +206,574 @@ if not os.path.exists(os.path.join(so_data_folder_path, 'spatial_atac_rna_seq_mo
 #     - CollecTRI (Transcriptional Regulation GPs)
 #     - NicheNet (Combined Interaction GPs)
 
+#%% Load data from cached model
+
+from scripts.hpo_mouse_brain_utils import resolve_cache_dir, load_cached_inputs, load_cached_targets
+
+cache_dir = resolve_cache_dir(None)
+adata, adata_atac = load_cached_inputs(cache_dir)
+target_rna, target_atac = load_cached_targets(cache_dir)
+
+source_name = "cached_data"
+target_name = "cached_data"
 
 #%% 2.1 Create Prior Knowledge Gene Program (GP) Mask
 
-
-# Retrieve OmniPath GPs (source: ligand genes; target: receptor genes)
-omnipath_gp_dict = extract_gp_dict_from_omnipath_lr_interactions(
-    species=species,
-    load_from_disk=False,
-    save_to_disk=True,
-    lr_network_file_path=omnipath_lr_network_file_path,
-    gene_orthologs_mapping_file_path=gene_orthologs_mapping_file_path,
-    plot_gp_gene_count_distributions=True,
-    gp_gene_count_distributions_save_path=f"{figure_folder_path}" \
-                                           "/omnipath_gp_gene_count_distributions.svg")
-
-
-# Display example OmniPath GP
-omnipath_gp_names = list(omnipath_gp_dict.keys())
-random.shuffle(omnipath_gp_names)
-omnipath_gp_name = omnipath_gp_names[0]
-print(f"{omnipath_gp_name}: {omnipath_gp_dict[omnipath_gp_name]}")
-
-#%% Retrieve NicheNet GPs (source: ligand genes; target: receptor genes, target genes)
-
-save_load_kwargs = {
-    'lr_network_file_path': nichenet_lr_network_file_path,
-    'ligand_target_matrix_file_path': nichenet_ligand_target_matrix_file_path,
-    'gene_orthologs_mapping_file_path': gene_orthologs_mapping_file_path,
-}
-
-## check if files exist
-if os.path.exists(nichenet_lr_network_file_path):
-    save_load_kwargs.update({
-        'load_from_disk': True,
-        'save_to_disk': False,
-    })
-else:
-    save_load_kwargs.update({
-        'save_to_disk': True,
-        'load_from_disk': False,
-    })
-
-## extract GP dict
-nichenet_gp_dict = extract_gp_dict_from_nichenet_lrt_interactions(
-    species=species,
-    version="v2",
-    keep_target_genes_ratio=1.,
-    max_n_target_genes_per_gp=250,
-    plot_gp_gene_count_distributions=True,
-    **save_load_kwargs)
-
-
-# Display example NicheNet GP
-nichenet_gp_names = list(nichenet_gp_dict.keys())
-random.shuffle(nichenet_gp_names)
-nichenet_gp_name = nichenet_gp_names[0]
-print(f"{nichenet_gp_name}: {nichenet_gp_dict[nichenet_gp_name]}")
-
-
-#%% Retrieve MEBOCOST GPs (source: enzyme genes; target: sensor genes)
-
-mebocost_gp_dict = extract_gp_dict_from_mebocost_ms_interactions(
-    dir_path=mebocost_enzyme_sensor_interactions_folder_path,
-    species=species,
-    plot_gp_gene_count_distributions=True)
-
-# Display example MEBOCOST GP
-mebocost_gp_names = list(mebocost_gp_dict.keys())
-random.shuffle(mebocost_gp_names)
-mebocost_gp_name = mebocost_gp_names[0]
-print(f"{mebocost_gp_name}: {mebocost_gp_dict[mebocost_gp_name]}")
-
-
-#%% Retrieve CollecTRI GPs (source: -; target: transcription factor genes, target genes)
-
-collectri_gp_dict = extract_gp_dict_from_collectri_tf_network(
+'''
+    # Retrieve OmniPath GPs (source: ligand genes; target: receptor genes)
+    omnipath_gp_dict = extract_gp_dict_from_omnipath_lr_interactions(
         species=species,
-        tf_network_file_path=collectri_tf_network_file_path,
         load_from_disk=False,
         save_to_disk=True,
+        lr_network_file_path=omnipath_lr_network_file_path,
+        gene_orthologs_mapping_file_path=gene_orthologs_mapping_file_path,
+        plot_gp_gene_count_distributions=True,
+        gp_gene_count_distributions_save_path=f"{figure_folder_path}" \
+                                            "/omnipath_gp_gene_count_distributions.svg")
+
+
+    # Display example OmniPath GP
+    omnipath_gp_names = list(omnipath_gp_dict.keys())
+    random.shuffle(omnipath_gp_names)
+    omnipath_gp_name = omnipath_gp_names[0]
+    print(f"{omnipath_gp_name}: {omnipath_gp_dict[omnipath_gp_name]}")
+
+    #%% Retrieve NicheNet GPs (source: ligand genes; target: receptor genes, target genes)
+
+    save_load_kwargs = {
+        'lr_network_file_path': nichenet_lr_network_file_path,
+        'ligand_target_matrix_file_path': nichenet_ligand_target_matrix_file_path,
+        'gene_orthologs_mapping_file_path': gene_orthologs_mapping_file_path,
+    }
+
+    ## check if files exist
+    if os.path.exists(nichenet_lr_network_file_path):
+        save_load_kwargs.update({
+            'load_from_disk': True,
+            'save_to_disk': False,
+        })
+    else:
+        save_load_kwargs.update({
+            'save_to_disk': True,
+            'load_from_disk': False,
+        })
+
+    ## extract GP dict
+    nichenet_gp_dict = extract_gp_dict_from_nichenet_lrt_interactions(
+        species=species,
+        version="v2",
+        keep_target_genes_ratio=1.,
+        max_n_target_genes_per_gp=250,
+        plot_gp_gene_count_distributions=True,
+        **save_load_kwargs)
+
+
+    # Display example NicheNet GP
+    nichenet_gp_names = list(nichenet_gp_dict.keys())
+    random.shuffle(nichenet_gp_names)
+    nichenet_gp_name = nichenet_gp_names[0]
+    print(f"{nichenet_gp_name}: {nichenet_gp_dict[nichenet_gp_name]}")
+
+
+    #%% Retrieve MEBOCOST GPs (source: enzyme genes; target: sensor genes)
+
+    mebocost_gp_dict = extract_gp_dict_from_mebocost_ms_interactions(
+        dir_path=mebocost_enzyme_sensor_interactions_folder_path,
+        species=species,
         plot_gp_gene_count_distributions=True)
 
-
-# Display example CollecTRI GP
-collectri_gp_names = list(collectri_gp_dict.keys())
-random.shuffle(collectri_gp_names)
-collectri_gp_name = collectri_gp_names[0]
-print(f"{collectri_gp_name}: {collectri_gp_dict[collectri_gp_name]}")
-
-
-#%% Filter and combine GPs
-
-gp_dicts = [omnipath_gp_dict, nichenet_gp_dict, mebocost_gp_dict, collectri_gp_dict]
-combined_gp_dict = filter_and_combine_gp_dict_gps_v2(
-    gp_dicts,
-    verbose=True)
-
-print(f"Number of gene programs after filtering and combining: "
-      f"{len(combined_gp_dict)}.")
+    # Display example MEBOCOST GP
+    mebocost_gp_names = list(mebocost_gp_dict.keys())
+    random.shuffle(mebocost_gp_names)
+    mebocost_gp_name = mebocost_gp_names[0]
+    print(f"{mebocost_gp_name}: {mebocost_gp_dict[mebocost_gp_name]}")
 
 
-#%% 2.2 Load source data
+    #%% Retrieve CollecTRI GPs (source: -; target: transcription factor genes, target genes)
 
-# - NicheCompass expects a precomputed spatial adjacency matrix stored in 'adata.obsp[adj_key]'.
-# - The user can customize the spatial neighbor graph construction based on the biological question of interest.
-# - In the multimodal setting, we will provide one adata object per modality to NicheCompass.
-
-
-# Read data
-adata = sc.read_h5ad(
-        f"{so_data_folder_path}/{dataset}.h5ad")
-adata_atac = sc.read_h5ad(
-        f"{so_data_folder_path}/{dataset}_atac.h5ad")
-
-# Load and add cell type annotations
-cell_type_df = pd.read_csv(f"{so_data_folder_path}/{dataset}_cell_type_annotations.csv", index_col=0)
-cell_type_df.rename({"predicted.celltype": cell_type_key}, axis=1, inplace=True)
-cell_type_df.drop("ATAC_clusters", axis=1, inplace=True)
-adata.obs = adata.obs.merge(cell_type_df, left_index=True, right_index=True, how="left")
+    collectri_gp_dict = extract_gp_dict_from_collectri_tf_network(
+            species=species,
+            tf_network_file_path=collectri_tf_network_file_path,
+            load_from_disk=False,
+            save_to_disk=True,
+            plot_gp_gene_count_distributions=True)
 
 
-#%% Compute spatial neighborhood
-
-sq.gr.spatial_neighbors(adata,
-                        coord_type="generic",
-                        spatial_key=spatial_key,
-                        n_neighs=n_neighbors)
-
-# Make adjacency matrix symmetric
-adata.obsp[adj_key] = (
-    adata.obsp[adj_key].maximum(
-        adata.obsp[adj_key].T))
+    # Display example CollecTRI GP
+    collectri_gp_names = list(collectri_gp_dict.keys())
+    random.shuffle(collectri_gp_names)
+    collectri_gp_name = collectri_gp_names[0]
+    print(f"{collectri_gp_name}: {collectri_gp_dict[collectri_gp_name]}")
 
 
-#%% 2.3 Filter Genes & Peaks
+    #%% Filter and combine GPs
 
-if filter_genes:
-    print("Filtering genes...")
-    # Filter genes and only keep ligand, receptor, enzyme, sensor, and
-    # the 'n_svg' spatially variable genes
-    gp_dict_genes = get_unique_genes_from_gp_dict(
-        gp_dict=combined_gp_dict,
-            retrieved_gene_entities=["sources", "targets"])
-    print(f"Starting with {len(adata.var_names)} genes.")
-    min_cells = int(adata.shape[0] * min_cell_gene_thresh_ratio)
-    sc.pp.filter_genes(adata, min_cells=min_cells)
-    print(f"Keeping {len(adata.var_names)} genes after filtering genes with "
-          f"counts in less than {int(adata.shape[0] * min_cell_gene_thresh_ratio)} cells.")
-    
-    # Identify spatially variable genes
-    sq.gr.spatial_autocorr(adata, mode="moran", genes=adata.var_names)
-    svg_genes = adata.uns["moranI"].index[:n_svg].tolist()
-    adata.var["spatially_variable"] = adata.var_names.isin(svg_genes)
-    adata = adata[:, adata.var["spatially_variable"] == True]
-    print(f"Keeping {len(adata.var_names)} spatially variable genes.")
-    
-if filter_peaks:
-    print("\nFiltering peaks...")
-    print(f"Starting with {len(adata_atac.var_names)} peaks.")
-    # Filter out peaks that are rarely detected to reduce GPU footprint of model
-    min_cells = int(adata_atac.shape[0] * min_cell_peak_thresh_ratio)
-    sc.pp.filter_genes(adata_atac, min_cells=min_cells)
-    print(f"Keeping {len(adata_atac.var_names)} peaks after filtering peaks with "
-          f"counts in less than {int(adata_atac.shape[0] * min_cell_peak_thresh_ratio)} cells.")
-    
-    # Filter spatially variable peaks
-    adata_atac.obsp["spatial_connectivities"] = adata.obsp["spatial_connectivities"]
-    adata_atac.obsp["spatial_distances"] = adata.obsp["spatial_distances"]
+    gp_dicts = [omnipath_gp_dict, nichenet_gp_dict, mebocost_gp_dict, collectri_gp_dict]
+    combined_gp_dict = filter_and_combine_gp_dict_gps_v2(
+        gp_dicts,
+        verbose=True)
 
-    sq.gr.spatial_autocorr(adata_atac,
-                           mode="moran",
-                           genes=adata_atac.var_names)
-    sv_peaks = adata_atac.uns["moranI"].index[:n_svp].tolist()
-    adata_atac.var["spatially_variable"] = adata_atac.var_names.isin(sv_peaks)
-    adata_atac = adata_atac[:, adata_atac.var["spatially_variable"] == True]
-    print(f"Keeping {len(adata_atac.var_names)} peaks after filtering spatially variable "
-          f"peaks.")
-
-print("\n WARNING: genes currently not filtered by GP, 'gp_dict_genes' not used.")
+    print(f"Number of gene programs after filtering and combining: "
+        f"{len(combined_gp_dict)}.")
 
 
-#%% 2.4 Annotate Genes & Peaks
+    #%% 2.2 Load source data
 
-# Next we will add positional annotations to genes and peaks to be able to match spatially proximal peaks to genes.
-
-adata, adata_atac = get_gene_annotations(
-    adata=adata,
-    adata_atac=adata_atac,
-    gtf_file_path=gtf_file_path)
+    # - NicheCompass expects a precomputed spatial adjacency matrix stored in 'adata.obsp[adj_key]'.
+    # - The user can customize the spatial neighbor graph construction based on the biological question of interest.
+    # - In the multimodal setting, we will provide one adata object per modality to NicheCompass.
 
 
-# Display gene annotations
-print(adata.var[["chrom", "chromStart", "chromEnd"]])
+    # Read data
+    adata = sc.read_h5ad(
+            f"{so_data_folder_path}/{dataset}.h5ad")
+    adata_atac = sc.read_h5ad(
+            f"{so_data_folder_path}/{dataset}_atac.h5ad")
 
-# Display peak annotations
-print(adata_atac.var[["chrom", "chromStart", "chromEnd"]])
-
-#%% 2.7 Explore Data
-
-cell_type_colors = create_new_color_dict(
-    adata=adata,
-    skip_default_colors=50,
-    cat_key=cell_type_key)
-
-print(f"Number of nodes (observations): {adata.layers['counts'].shape[0]}")
-print(f"Number of gene node features: {adata.layers['counts'].shape[1]}")
-print(f"Number of peak node features: {adata_atac.layers['counts'].shape[1]}")
-
-# Visualize spot-level annotated data in physical space
-sc.pl.spatial(adata,
-              color=cell_type_key,
-              palette=cell_type_colors,
-              spot_size=spot_size)
+    # Load and add cell type annotations
+    cell_type_df = pd.read_csv(f"{so_data_folder_path}/{dataset}_cell_type_annotations.csv", index_col=0)
+    cell_type_df.rename({"predicted.celltype": cell_type_key}, axis=1, inplace=True)
+    cell_type_df.drop("ATAC_clusters", axis=1, inplace=True)
+    adata.obs = adata.obs.merge(cell_type_df, left_index=True, right_index=True, how="left")
 
 
-#%% Load target data
+    #%% Compute spatial neighborhood
 
-def load_easysci_sll_data():
+    sq.gr.spatial_neighbors(adata,
+                            coord_type="generic",
+                            spatial_key=spatial_key,
+                            n_neighs=n_neighbors)
 
-    target_rna = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/RNA/mouse_rna_processed.h5ad")
-    target_atac = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/ATAC/mouse_atac_processed.h5ad")
+    # Make adjacency matrix symmetric
+    adata.obsp[adj_key] = (
+        adata.obsp[adj_key].maximum(
+            adata.obsp[adj_key].T))
 
-    mginfo = mg.MyGeneInfo()
-    results = mginfo.querymany(
-        target_rna.var["gene_id_no_version"].tolist(),
-        scopes="ensembl.gene",
-        species="mouse",
-        fields="symbol",
-        as_dataframe=True,
-    )
-    results = results.reset_index().drop_duplicates(subset='query') # remove duplicate genes
-    assert results.groupby('query')['symbol'].nunique().le(1).all(), "Multiple symbols still found for some genes"
 
-    target_rna.var = target_rna.var.merge(results, left_on="gene_id_no_version", right_on="query", how="left")
-    target_rna.var.loc[target_rna.var['symbol'].isna(), 'symbol'] = target_rna.var.loc[target_rna.var['symbol'].isna(), 'query']
-    target_rna.var.set_index("symbol", inplace=True)
+    #%% 2.3 Filter Genes & Peaks
 
-    ## remove duplicate genes (again)
-    target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep='first')]
-    assert target_rna.var_names.is_unique, "Target RNA data must have unique gene names"
+    if filter_genes:
+        print("Filtering genes...")
+        # Filter genes and only keep ligand, receptor, enzyme, sensor, and
+        # the 'n_svg' spatially variable genes
+        gp_dict_genes = get_unique_genes_from_gp_dict(
+            gp_dict=combined_gp_dict,
+                retrieved_gene_entities=["sources", "targets"])
+        print(f"Starting with {len(adata.var_names)} genes.")
+        min_cells = int(adata.shape[0] * min_cell_gene_thresh_ratio)
+        sc.pp.filter_genes(adata, min_cells=min_cells)
+        print(f"Keeping {len(adata.var_names)} genes after filtering genes with "
+            f"counts in less than {int(adata.shape[0] * min_cell_gene_thresh_ratio)} cells.")
+        
+        # Identify spatially variable genes
+        sq.gr.spatial_autocorr(adata, mode="moran", genes=adata.var_names)
+        svg_genes = adata.uns["moranI"].index[:n_svg].tolist()
+        adata.var["spatially_variable"] = adata.var_names.isin(svg_genes)
+        adata = adata[:, adata.var["spatially_variable"] == True]
+        print(f"Keeping {len(adata.var_names)} spatially variable genes.")
+        
+    if filter_peaks:
+        print("\nFiltering peaks...")
+        print(f"Starting with {len(adata_atac.var_names)} peaks.")
+        # Filter out peaks that are rarely detected to reduce GPU footprint of model
+        min_cells = int(adata_atac.shape[0] * min_cell_peak_thresh_ratio)
+        sc.pp.filter_genes(adata_atac, min_cells=min_cells)
+        print(f"Keeping {len(adata_atac.var_names)} peaks after filtering peaks with "
+            f"counts in less than {int(adata_atac.shape[0] * min_cell_peak_thresh_ratio)} cells.")
+        
+        # Filter spatially variable peaks
+        adata_atac.obsp["spatial_connectivities"] = adata.obsp["spatial_connectivities"]
+        adata_atac.obsp["spatial_distances"] = adata.obsp["spatial_distances"]
 
-    target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].str.split('-').tolist()
+        sq.gr.spatial_autocorr(adata_atac,
+                            mode="moran",
+                            genes=adata_atac.var_names)
+        sv_peaks = adata_atac.uns["moranI"].index[:n_svp].tolist()
+        adata_atac.var["spatially_variable"] = adata_atac.var_names.isin(sv_peaks)
+        adata_atac = adata_atac[:, adata_atac.var["spatially_variable"] == True]
+        print(f"Keeping {len(adata_atac.var_names)} peaks after filtering spatially variable "
+            f"peaks.")
 
-    return target_rna, target_atac
+    print("\n WARNING: genes currently not filtered by GP, 'gp_dict_genes' not used.")
 
-def load_10x_mouse_brain_ad_data(
-    data_dir: Optional[str] = None,
-    base_name: str = "Multiome_RNA_ATAC_Mouse_Brain_Alzheimers_AppNote",
-) -> tuple:
-    """
-    Load processed RNA and ATAC data from 10x Multiome Mouse Brain Alzheimers AppNote.
 
-    Expects the following files in `data_dir` (downloaded as per 10x output):
-    - {base_name}_filtered_feature_bc_matrix.h5  (required)
-    - {base_name}_atac_peaks.bed                  (optional, for peak coordinates in ATAC var)
-    - {base_name}_atac_peak_annotation.tsv        (optional, for peak annotations in ATAC var)
+    #%% 2.4 Annotate Genes & Peaks
 
-    Returns
-    -------
-    tuple of (adata_rna, adata_atac)
-        RNA and ATAC AnnData objects with shared obs (cells). Raw counts in .layers["counts"] and .X.
-    """
-    if data_dir is None:
-        data_dir = os.path.join(BAKLAVA_ROOT, "..", "data", "10x_mouse_brain_AD")
-    data_dir = os.path.abspath(data_dir)
-    h5_path = os.path.join(data_dir, f"{base_name}_filtered_feature_bc_matrix.h5")
-    if not os.path.isfile(h5_path):
-        raise FileNotFoundError(
-            f"10x filtered feature-barcode matrix not found: {h5_path}. "
-            "Download it from 10x (e.g. filtered_feature_bc_matrix.h5) into data_dir."
+    # Next we will add positional annotations to genes and peaks to be able to match spatially proximal peaks to genes.
+
+    adata, adata_atac = get_gene_annotations(
+        adata=adata,
+        adata_atac=adata_atac,
+        gtf_file_path=gtf_file_path)
+
+
+    # Display gene annotations
+    print(adata.var[["chrom", "chromStart", "chromEnd"]])
+
+    # Display peak annotations
+    print(adata_atac.var[["chrom", "chromStart", "chromEnd"]])
+
+    #%% 2.7 Explore Data
+
+    cell_type_colors = create_new_color_dict(
+        adata=adata,
+        skip_default_colors=50,
+        cat_key=cell_type_key)
+
+    print(f"Number of nodes (observations): {adata.layers['counts'].shape[0]}")
+    print(f"Number of gene node features: {adata.layers['counts'].shape[1]}")
+    print(f"Number of peak node features: {adata_atac.layers['counts'].shape[1]}")
+
+    # Visualize spot-level annotated data in physical space
+    sc.pl.spatial(adata,
+                color=cell_type_key,
+                palette=cell_type_colors,
+                spot_size=spot_size)
+
+
+    #%% Load target data
+
+    def load_easysci_sll_data():
+
+        target_rna = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/RNA/mouse_rna_processed.h5ad")
+        target_atac = ad.read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/EasySci_SLL/mouse/ATAC/mouse_atac_processed.h5ad")
+
+        mginfo = mg.MyGeneInfo()
+        results = mginfo.querymany(
+            target_rna.var["gene_id_no_version"].tolist(),
+            scopes="ensembl.gene",
+            species="mouse",
+            fields="symbol",
+            as_dataframe=True,
         )
+        results = results.reset_index().drop_duplicates(subset='query') # remove duplicate genes
+        assert results.groupby('query')['symbol'].nunique().le(1).all(), "Multiple symbols still found for some genes"
 
-    # Read full multiome matrix (Gene Expression + Peaks); gex_only=False keeps both modalities
-    adata_full = sc.read_10x_h5(h5_path, gex_only=False)
-    # 10x multiome var has 'feature_types': "Gene Expression" vs "Peaks"
-    ft_col = "feature_types" if "feature_types" in adata_full.var.columns else "feature_type"
-    if ft_col not in adata_full.var.columns:
-        raise ValueError(
-            f"Expected feature type column '{ft_col}' in 10x multiome var. "
-            f"Columns: {list(adata_full.var.columns)}"
-        )
+        target_rna.var = target_rna.var.merge(results, left_on="gene_id_no_version", right_on="query", how="left")
+        target_rna.var.loc[target_rna.var['symbol'].isna(), 'symbol'] = target_rna.var.loc[target_rna.var['symbol'].isna(), 'query']
+        target_rna.var.set_index("symbol", inplace=True)
 
-    is_gex = adata_full.var[ft_col].astype(str).str.strip().str.lower().eq("gene expression")
-    is_peaks = adata_full.var[ft_col].astype(str).str.strip().str.lower().eq("peaks")
+        ## remove duplicate genes (again)
+        target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep='first')]
+        assert target_rna.var_names.is_unique, "Target RNA data must have unique gene names"
 
-    adata_rna = adata_full[:, is_gex].copy()
-    adata_atac = adata_full[:, is_peaks].copy()
+        target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].str.split('-').tolist()
 
-    # Drop the feature type column from each modality's var so we don't duplicate
-    for a in (adata_rna, adata_atac):
-        if ft_col in a.var.columns:
-            a.var = a.var.drop(columns=[ft_col])
+        return target_rna, target_atac
 
-    # Store raw counts in .layers["counts"] for compatibility with counts_key
-    adata_rna.layers["counts"] = adata_rna.X.copy()
-    adata_atac.layers["counts"] = adata_atac.X.copy()
+    def load_10x_mouse_brain_ad_data(
+        data_dir: Optional[str] = None,
+        base_name: str = "Multiome_RNA_ATAC_Mouse_Brain_Alzheimers_AppNote",
+    ) -> tuple:
+        """
+        Load processed RNA and ATAC data from 10x Multiome Mouse Brain Alzheimers AppNote.
 
-    # Optionally add ATAC peak coordinates and annotations from BED / peak_annotation.tsv
-    peaks_bed_path = os.path.join(data_dir, f"{base_name}_atac_peaks.bed")
-    peak_ann_path = os.path.join(data_dir, f"{base_name}_atac_peak_annotation.tsv")
-    if os.path.isfile(peaks_bed_path):
-        bed = pd.read_csv(
-            peaks_bed_path,
-            sep="\t",
-            header=None,
-            usecols=[0, 1, 2],
-            names=["chrom", "chromStart", "chromEnd"],
-        )
-        # 10x peak names are "chr1-123-456"; BED order may match var order
-        peak_id_bed = bed["chrom"].astype(str) + "-" + bed["chromStart"].astype(str) + "-" + bed["chromEnd"].astype(str)
-        if adata_atac.n_vars == len(peak_id_bed) and (adata_atac.var_names == peak_id_bed.values).all():
-            adata_atac.var["chrom"] = bed["chrom"].values
-            adata_atac.var["chromStart"] = bed["chromStart"].values
-            adata_atac.var["chromEnd"] = bed["chromEnd"].values
+        Expects the following files in `data_dir` (downloaded as per 10x output):
+        - {base_name}_filtered_feature_bc_matrix.h5  (required)
+        - {base_name}_atac_peaks.bed                  (optional, for peak coordinates in ATAC var)
+        - {base_name}_atac_peak_annotation.tsv        (optional, for peak annotations in ATAC var)
+
+        Returns
+        -------
+        tuple of (adata_rna, adata_atac)
+            RNA and ATAC AnnData objects with shared obs (cells). Raw counts in .layers["counts"] and .X.
+        """
+        if data_dir is None:
+            data_dir = os.path.join(BAKLAVA_ROOT, "..", "data", "10x_mouse_brain_AD")
+        data_dir = os.path.abspath(data_dir)
+        h5_path = os.path.join(data_dir, f"{base_name}_filtered_feature_bc_matrix.h5")
+        if not os.path.isfile(h5_path):
+            raise FileNotFoundError(
+                f"10x filtered feature-barcode matrix not found: {h5_path}. "
+                "Download it from 10x (e.g. filtered_feature_bc_matrix.h5) into data_dir."
+            )
+
+        # Read full multiome matrix (Gene Expression + Peaks); gex_only=False keeps both modalities
+        adata_full = sc.read_10x_h5(h5_path, gex_only=False)
+        # 10x multiome var has 'feature_types': "Gene Expression" vs "Peaks"
+        ft_col = "feature_types" if "feature_types" in adata_full.var.columns else "feature_type"
+        if ft_col not in adata_full.var.columns:
+            raise ValueError(
+                f"Expected feature type column '{ft_col}' in 10x multiome var. "
+                f"Columns: {list(adata_full.var.columns)}"
+            )
+
+        is_gex = adata_full.var[ft_col].astype(str).str.strip().str.lower().eq("gene expression")
+        is_peaks = adata_full.var[ft_col].astype(str).str.strip().str.lower().eq("peaks")
+
+        adata_rna = adata_full[:, is_gex].copy()
+        adata_atac = adata_full[:, is_peaks].copy()
+
+        # Drop the feature type column from each modality's var so we don't duplicate
+        for a in (adata_rna, adata_atac):
+            if ft_col in a.var.columns:
+                a.var = a.var.drop(columns=[ft_col])
+
+        # Store raw counts in .layers["counts"] for compatibility with counts_key
+        adata_rna.layers["counts"] = adata_rna.X.copy()
+        adata_atac.layers["counts"] = adata_atac.X.copy()
+
+        # Optionally add ATAC peak coordinates and annotations from BED / peak_annotation.tsv
+        peaks_bed_path = os.path.join(data_dir, f"{base_name}_atac_peaks.bed")
+        peak_ann_path = os.path.join(data_dir, f"{base_name}_atac_peak_annotation.tsv")
+        if os.path.isfile(peaks_bed_path):
+            bed = pd.read_csv(
+                peaks_bed_path,
+                sep="\t",
+                header=None,
+                usecols=[0, 1, 2],
+                names=["chrom", "chromStart", "chromEnd"],
+            )
+            # 10x peak names are "chr1-123-456"; BED order may match var order
+            peak_id_bed = bed["chrom"].astype(str) + "-" + bed["chromStart"].astype(str) + "-" + bed["chromEnd"].astype(str)
+            if adata_atac.n_vars == len(peak_id_bed) and (adata_atac.var_names == peak_id_bed.values).all():
+                adata_atac.var["chrom"] = bed["chrom"].values
+                adata_atac.var["chromStart"] = bed["chromStart"].values
+                adata_atac.var["chromEnd"] = bed["chromEnd"].values
+            else:
+                # Parse coordinates from peak name (chr-start-end)
+                adata_atac.var["peak"] = adata_atac.var_names
+                coords = adata_atac.var["peak"].str.split("-", n=2, expand=True)
+                adata_atac.var["chrom"] = coords[0]
+                adata_atac.var["chromStart"] = pd.to_numeric(coords[1], errors="coerce") if coords.shape[1] > 1 else ""
+                adata_atac.var["chromEnd"] = pd.to_numeric(coords[2], errors="coerce") if coords.shape[1] > 2 else ""
         else:
-            # Parse coordinates from peak name (chr-start-end)
             adata_atac.var["peak"] = adata_atac.var_names
             coords = adata_atac.var["peak"].str.split("-", n=2, expand=True)
             adata_atac.var["chrom"] = coords[0]
             adata_atac.var["chromStart"] = pd.to_numeric(coords[1], errors="coerce") if coords.shape[1] > 1 else ""
             adata_atac.var["chromEnd"] = pd.to_numeric(coords[2], errors="coerce") if coords.shape[1] > 2 else ""
-    else:
-        adata_atac.var["peak"] = adata_atac.var_names
-        coords = adata_atac.var["peak"].str.split("-", n=2, expand=True)
-        adata_atac.var["chrom"] = coords[0]
-        adata_atac.var["chromStart"] = pd.to_numeric(coords[1], errors="coerce") if coords.shape[1] > 1 else ""
-        adata_atac.var["chromEnd"] = pd.to_numeric(coords[2], errors="coerce") if coords.shape[1] > 2 else ""
 
-    if os.path.isfile(peak_ann_path):
-        ann = pd.read_csv(peak_ann_path, sep="\t")
-        peak_col = "Peak" if "Peak" in ann.columns else ("peak" if "peak" in ann.columns else None)
-        if peak_col is not None:
-            ann_indexed = ann.set_index(peak_col)
-            # Only merge columns that are not already in adata_atac.var to avoid duplicates
-            extra = [c for c in ann_indexed.columns if c not in adata_atac.var.columns]
-            if extra:
-                adata_atac.var = adata_atac.var.merge(
-                    ann_indexed[extra], left_index=True, right_index=True, how="left"
-                )
+        if os.path.isfile(peak_ann_path):
+            ann = pd.read_csv(peak_ann_path, sep="\t")
+            peak_col = "Peak" if "Peak" in ann.columns else ("peak" if "peak" in ann.columns else None)
+            if peak_col is not None:
+                ann_indexed = ann.set_index(peak_col)
+                # Only merge columns that are not already in adata_atac.var to avoid duplicates
+                extra = [c for c in ann_indexed.columns if c not in adata_atac.var.columns]
+                if extra:
+                    adata_atac.var = adata_atac.var.merge(
+                        ann_indexed[extra], left_index=True, right_index=True, how="left"
+                    )
 
-    return adata_rna, adata_atac, "mm10", "10x_mouse_brain_AD"
+        return adata_rna, adata_atac, "mm10", "10x_mouse_brain_AD"
 
-## load target data
-target_rna, target_atac, target_assembly, target_name = load_10x_mouse_brain_ad_data()
+    ## load target data
+    target_rna, target_atac, target_assembly, target_name = load_10x_mouse_brain_ad_data()
 
-target_rna.var_names = target_rna.var_names.str.split(".").str[0]
-target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep='first')]
+    target_rna.var_names = target_rna.var_names.str.split(".").str[0]
+    target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep='first')]
 
-target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].str.split(':|-').tolist()
+    target_atac.var[['chrom', 'chromStart', 'chromEnd']] = target_atac.var['peak'].str.split(':|-').tolist()
 
-#%% Basic feature processing
+    #%% Basic feature processing
 
-assert \
-    "counts" in adata.layers and \
-    "counts" in adata_atac.layers and \
-    "counts" in target_rna.layers and \
-    "counts" in target_atac.layers, \
-    "Counts layer not found in source or target data"
+    assert \
+        "counts" in adata.layers and \
+        "counts" in adata_atac.layers and \
+        "counts" in target_rna.layers and \
+        "counts" in target_atac.layers, \
+        "Counts layer not found in source or target data"
 
-## source RNA data
-sc.pp.normalize_total(adata, target_sum=1e4)
-sc.pp.log1p(adata)
+    ## source RNA data
+    sc.pp.normalize_total(adata, target_sum=1e4)
+    sc.pp.log1p(adata)
 
-## source ATAC data
-sc.pp.normalize_total(adata_atac, target_sum=1e4)
-sc.pp.log1p(adata_atac)
+    ## source ATAC data
+    sc.pp.normalize_total(adata_atac, target_sum=1e4)
+    sc.pp.log1p(adata_atac)
 
-## target RNA data
-sc.pp.filter_cells(target_rna, min_genes=100)
-sc.pp.filter_genes(target_rna, min_cells=3)
-sc.pp.normalize_total(target_rna, target_sum=1e4)
-sc.pp.log1p(target_rna)
+    ## target RNA data
+    sc.pp.filter_cells(target_rna, min_genes=100)
+    sc.pp.filter_genes(target_rna, min_cells=3)
+    sc.pp.normalize_total(target_rna, target_sum=1e4)
+    sc.pp.log1p(target_rna)
 
-## target ATAC data
-sc.pp.filter_cells(target_atac, min_genes=100)
-sc.pp.filter_genes(target_atac, min_cells=3)
-sc.pp.normalize_total(target_atac, target_sum=1e4)
-sc.pp.log1p(target_atac)
+    ## target ATAC data
+    sc.pp.filter_cells(target_atac, min_genes=100)
+    sc.pp.filter_genes(target_atac, min_cells=3)
+    sc.pp.normalize_total(target_atac, target_sum=1e4)
+    sc.pp.log1p(target_atac)
 
-## peform PCA and compute neighbor graph for target data
-sc.pp.pca(target_rna, n_comps=50)
-sc.pp.neighbors(target_rna, use_rep='X_pca', n_neighbors=100)
+    ## peform PCA and compute neighbor graph for target data
+    sc.pp.pca(target_rna, n_comps=50)
+    sc.pp.neighbors(target_rna, use_rep='X_pca', n_neighbors=100)
 
-sc.pp.pca(target_atac, n_comps=50)
-sc.pp.neighbors(target_atac, use_rep='X_pca', n_neighbors=100)
+    sc.pp.pca(target_atac, n_comps=50)
+    sc.pp.neighbors(target_atac, use_rep='X_pca', n_neighbors=100)
 
-#%% Perform data alignment
+    #%% Perform data alignment
 
-source_data = MuData({"rna": adata, "atac": adata_atac})
-source_name = "Spatial_ATAC_RNA"
-source_assembly = "mm10"
+    source_data = MuData({"rna": adata, "atac": adata_atac})
+    source_name = "Spatial_ATAC_RNA"
+    source_assembly = "mm10"
 
-target_data = MuData({"rna": target_rna, "atac": target_atac})
+    target_data = MuData({"rna": target_rna, "atac": target_atac})
 
-data_aligner = DataAligner(
-    source_data=source_data,
-    target_data=target_data,
-    source_name=source_name,
-    target_name=target_name,
-    source_assembly=source_assembly,
-    target_assembly=target_assembly,
-)
-data_aligner.find_gene_overlap()
-data_aligner.find_peak_overlap()
-data_aligner.align_features_by_overlap()
+    data_aligner = DataAligner(
+        source_data=source_data,
+        target_data=target_data,
+        source_name=source_name,
+        target_name=target_name,
+        source_assembly=source_assembly,
+        target_assembly=target_assembly,
+    )
+    data_aligner.find_gene_overlap()
+    data_aligner.find_peak_overlap()
+    data_aligner.align_features_by_overlap()
 
-## retrieve aligned data
-adata = data_aligner.source_data['rna']
-adata_atac = data_aligner.source_data['atac']
+    ## retrieve aligned data
+    adata = data_aligner.source_data['rna']
+    adata_atac = data_aligner.source_data['atac']
 
-target_rna = data_aligner.target_data['rna']
-target_atac = data_aligner.target_data['atac']
+    target_rna = data_aligner.target_data['rna']
+    target_atac = data_aligner.target_data['atac']
 
-#%% Rebuild GP + multimodal masks on aligned feature space
-#
-# After alignment, (re)create all masks so they are strictly tied to the final
-# aligned `adata.var_names` / `adata_atac.var_names`.
+    #%% Rebuild GP + multimodal masks on aligned feature space
+    #
+    # After alignment, (re)create all masks so they are strictly tied to the final
+    # aligned `adata.var_names` / `adata_atac.var_names`.
 
-# Defensive cleanup in case this cell was executed before (e.g., in notebooks)
-for _k in [gp_targets_mask_key, gp_targets_categories_mask_key, gp_sources_mask_key, gp_sources_categories_mask_key]:
-    if _k in adata.varm:
-        del adata.varm[_k]
-for _k in [gp_names_key]:
-    if _k in adata.uns:
-        del adata.uns[_k]
+    # Defensive cleanup in case this cell was executed before (e.g., in notebooks)
+    for _k in [gp_targets_mask_key, gp_targets_categories_mask_key, gp_sources_mask_key, gp_sources_categories_mask_key]:
+        if _k in adata.varm:
+            del adata.varm[_k]
+    for _k in [gp_names_key]:
+        if _k in adata.uns:
+            del adata.uns[_k]
 
-# Add the GP dictionary as binary masks to the (aligned) RNA adata
-add_gps_from_gp_dict_to_adata(
-    gp_dict=combined_gp_dict,
-    adata=adata,
-    gp_targets_mask_key=gp_targets_mask_key,
-    gp_targets_categories_mask_key=gp_targets_categories_mask_key,
-    gp_sources_mask_key=gp_sources_mask_key,
-    gp_sources_categories_mask_key=gp_sources_categories_mask_key,
-    gp_names_key=gp_names_key,
-    min_genes_per_gp=2,
-    min_source_genes_per_gp=0,
-    min_target_genes_per_gp=1,
-    max_genes_per_gp=None,
-    max_source_genes_per_gp=None,
-    max_target_genes_per_gp=None,
-    plot_gp_gene_count_distributions=True
+    # Add the GP dictionary as binary masks to the (aligned) RNA adata
+    add_gps_from_gp_dict_to_adata(
+        gp_dict=combined_gp_dict,
+        adata=adata,
+        gp_targets_mask_key=gp_targets_mask_key,
+        gp_targets_categories_mask_key=gp_targets_categories_mask_key,
+        gp_sources_mask_key=gp_sources_mask_key,
+        gp_sources_categories_mask_key=gp_sources_categories_mask_key,
+        gp_names_key=gp_names_key,
+        min_genes_per_gp=2,
+        min_source_genes_per_gp=0,
+        min_target_genes_per_gp=1,
+        max_genes_per_gp=None,
+        max_source_genes_per_gp=None,
+        max_target_genes_per_gp=None,
+        plot_gp_gene_count_distributions=True
+        )
+
+    ## Based on spatial proximity to the genes in the GP mask, add chromatin accessibility masks
+    gene_peak_mapping_dict = generate_multimodal_mapping_dict(
+        adata=adata,
+        adata_atac=adata_atac
+        )
+
+    ## Add chromatin accessibility masks
+    filter_peaks_based_on_genes = True    # If ´True´, filter ´adata_atac´ to only keep peaks that are mapped to genes in ´gene_peak_mapping_dict´.
+    adata, adata_atac = add_multimodal_mask_to_adata(
+        adata=adata,
+        adata_atac=adata_atac,
+        gene_peak_mapping_dict=gene_peak_mapping_dict,
+        filter_peaks_based_on_genes=filter_peaks_based_on_genes
+        )
+
+    if filter_peaks_based_on_genes:
+        print(f"Keeping {adata_atac.n_vars} peaks after filtering peaks with "
+            "no matching genes in gp mask.")
+
+        remaining_peaks = target_atac.var_names.isin(adata_atac.var_names)
+        target_atac = target_atac[:, remaining_peaks]
+
+    assert adata.var_names.equals(target_rna.var_names), "RNA data must have the same gene names"
+    assert adata_atac.var_names.equals(target_atac.var_names), "ATAC data must have the same peak names"
+
+    #%% Copy annotations and set spatial connectivities for target data
+
+    target_rna, target_atac = DataAligner.copy_annotations_to_target(
+        source_rna=adata,
+        source_atac=adata_atac,
+        target_rna=target_rna,
+        target_atac=target_atac
+    )
+    target_rna, target_atac = DataAligner.set_target_spatial_connectivities(
+        target_rna=target_rna,
+        target_atac=target_atac,
+        adj_type="knn"
     )
 
-## Based on spatial proximity to the genes in the GP mask, add chromatin accessibility masks
-gene_peak_mapping_dict = generate_multimodal_mapping_dict(
-    adata=adata,
-    adata_atac=adata_atac
-    )
-
-## Add chromatin accessibility masks
-filter_peaks_based_on_genes = True    # If ´True´, filter ´adata_atac´ to only keep peaks that are mapped to genes in ´gene_peak_mapping_dict´.
-adata, adata_atac = add_multimodal_mask_to_adata(
-    adata=adata,
-    adata_atac=adata_atac,
-    gene_peak_mapping_dict=gene_peak_mapping_dict,
-    filter_peaks_based_on_genes=filter_peaks_based_on_genes
-    )
-
-if filter_peaks_based_on_genes:
-    print(f"Keeping {adata_atac.n_vars} peaks after filtering peaks with "
-        "no matching genes in gp mask.")
-
-    remaining_peaks = target_atac.var_names.isin(adata_atac.var_names)
-    target_atac = target_atac[:, remaining_peaks]
-
-assert adata.var_names.equals(target_rna.var_names), "RNA data must have the same gene names"
-assert adata_atac.var_names.equals(target_atac.var_names), "ATAC data must have the same peak names"
-
-#%% Copy annotations and set spatial connectivities for target data
-
-target_rna, target_atac = DataAligner.copy_annotations_to_target(
-    source_rna=adata,
-    source_atac=adata_atac,
-    target_rna=target_rna,
-    target_atac=target_atac
-)
-target_rna, target_atac = DataAligner.set_target_spatial_connectivities(
-    target_rna=target_rna,
-    target_atac=target_atac,
-    adj_type="knn"
-)
-
-#%% Convert non-string columns in var to string representation
-# Fix non-string columns in var that can't be saved to H5AD
-def fix_var_for_h5ad(adata):
-    """Convert non-string columns in var to string representation."""
-    
-    for col in list(adata.var.columns):  # Use list() to avoid modification during iteration
-        try:
-            # For object dtype columns, ensure ALL values are strings
-            if adata.var[col].dtype == 'object':
-                # Convert all values to strings, handling None/NaN and mixed types
-                def safe_str_convert(x):
-                    if pd.isna(x) or x is None:
-                        return ''
-                    elif isinstance(x, str):
-                        return x
-                    elif isinstance(x, (list, tuple, dict, np.ndarray)):
-                        return str(x)
-                    elif isinstance(x, (int, float, bool)):
-                        return str(x)
-                    else:
-                        # Try to convert anything else to string
-                        try:
-                            return str(x)
-                        except:
+    #%% Convert non-string columns in var to string representation
+    # Fix non-string columns in var that can't be saved to H5AD
+    def fix_var_for_h5ad(adata):
+        """Convert non-string columns in var to string representation."""
+        
+        for col in list(adata.var.columns):  # Use list() to avoid modification during iteration
+            try:
+                # For object dtype columns, ensure ALL values are strings
+                if adata.var[col].dtype == 'object':
+                    # Convert all values to strings, handling None/NaN and mixed types
+                    def safe_str_convert(x):
+                        if pd.isna(x) or x is None:
                             return ''
+                        elif isinstance(x, str):
+                            return x
+                        elif isinstance(x, (list, tuple, dict, np.ndarray)):
+                            return str(x)
+                        elif isinstance(x, (int, float, bool)):
+                            return str(x)
+                        else:
+                            # Try to convert anything else to string
+                            try:
+                                return str(x)
+                            except:
+                                return ''
+                    
+                    # Apply conversion to all values
+                    adata.var[col] = adata.var[col].apply(safe_str_convert)
+                    # Ensure the dtype is object with string values
+                    adata.var[col] = adata.var[col].astype(str)
                 
-                # Apply conversion to all values
-                adata.var[col] = adata.var[col].apply(safe_str_convert)
-                # Ensure the dtype is object with string values
-                adata.var[col] = adata.var[col].astype(str)
-            
-            # Also check for categorical dtypes - convert to string
-            elif hasattr(adata.var[col].dtype, 'categories'):
-                # Categorical dtype - convert to string
-                adata.var[col] = adata.var[col].astype(str)
-                
-        except Exception as e:
-            print(f"Warning: Could not fix column '{col}', dropping it: {e}")
-            import traceback
-            traceback.print_exc()
-            adata.var = adata.var.drop(columns=[col])
-    
-    return adata
+                # Also check for categorical dtypes - convert to string
+                elif hasattr(adata.var[col].dtype, 'categories'):
+                    # Categorical dtype - convert to string
+                    adata.var[col] = adata.var[col].astype(str)
+                    
+            except Exception as e:
+                print(f"Warning: Could not fix column '{col}', dropping it: {e}")
+                import traceback
+                traceback.print_exc()
+                adata.var = adata.var.drop(columns=[col])
+        
+        return adata
 
-# First, identify problematic columns
-def diagnose_var_columns(adata, name="adata"):
-    """Diagnose which columns might cause issues."""
-    print(f"\nDiagnosing {name}.var columns:")
-    for col in adata.var.columns:
-        dtype = adata.var[col].dtype
-        print(f"  {col}: dtype={dtype}")
-        if dtype == 'object':
-            sample_vals = adata.var[col].dropna().head(3)
-            for idx, val in sample_vals.items():
-                print(f"    Sample value type: {type(val)}, value: {val}")
+    # First, identify problematic columns
+    def diagnose_var_columns(adata, name="adata"):
+        """Diagnose which columns might cause issues."""
+        print(f"\nDiagnosing {name}.var columns:")
+        for col in adata.var.columns:
+            dtype = adata.var[col].dtype
+            print(f"  {col}: dtype={dtype}")
+            if dtype == 'object':
+                sample_vals = adata.var[col].dropna().head(3)
+                for idx, val in sample_vals.items():
+                    print(f"    Sample value type: {type(val)}, value: {val}")
 
-# Fix both RNA and ATAC var tables
-print("Fixing var tables for H5AD compatibility...")
+    # Fix both RNA and ATAC var tables
+    print("Fixing var tables for H5AD compatibility...")
 
-diagnose_var_columns(target_rna, "RNA")
-diagnose_var_columns(target_atac, "ATAC")
+    diagnose_var_columns(target_rna, "RNA")
+    diagnose_var_columns(target_atac, "ATAC")
 
-target_rna = fix_var_for_h5ad(target_rna)
-target_atac = fix_var_for_h5ad(target_atac)
+    target_rna = fix_var_for_h5ad(target_rna)
+    target_atac = fix_var_for_h5ad(target_atac)
 
-# try: target_rna.write_h5ad(os.path.join(model_folder_path, 'target_rna.h5ad')); print(os.path.join(model_folder_path, 'target_rna.h5ad'))
+    # try: target_rna.write_h5ad(os.path.join(model_folder_path, 'target_rna.h5ad')); print(os.path.join(model_folder_path, 'target_rna.h5ad'))
 
-#%% Create shallow references to pseudocounts in new layers
+    #%% Create shallow references to pseudocounts in new layers
 
-adata.layers["pseudocounts"] = adata.X
-adata_atac.layers["pseudocounts"] = adata_atac.X
+    adata.layers["pseudocounts"] = adata.X
+    adata_atac.layers["pseudocounts"] = adata_atac.X
 
-target_rna.layers["pseudocounts"] = target_rna.X
-target_atac.layers["pseudocounts"] = target_atac.X
-
+    target_rna.layers["pseudocounts"] = target_rna.X
+    target_atac.layers["pseudocounts"] = target_atac.X
+'''
 #%% Initialize model
 
 model = CustomNicheCompass(
@@ -780,8 +791,8 @@ model = CustomNicheCompass(
     latent_key=latent_key,
     conv_layer_encoder=conv_layer_encoder,
     encoder_input_key="pseudocounts",
-    multimodal_layer_series=True,
-    multimodal_embedding_size=None,
+    multimodal_layer_series=False,
+    multimodal_embedding_size=128,
 )
 
 
@@ -819,8 +830,9 @@ with mlflow.start_run(run_name=current_timestamp):
                 lambda_chrom_access_recon=lambda_chrom_access_recon,
                 lambda_l1_masked=lambda_l1_masked,
                 lambda_l1_addon=lambda_l1_addon,
-                lambda_multimodal_contrastive_loss=100.0,
+                lambda_multimodal_contrastive_loss=500000.0,
                 edge_batch_size=edge_batch_size,
+                node_batch_size=node_batch_size,
                 use_cuda_if_available=use_cuda_if_available,
                 n_sampled_neighbors=n_sampled_neighbors,
                 multimodal_contrastive_anneal=False,

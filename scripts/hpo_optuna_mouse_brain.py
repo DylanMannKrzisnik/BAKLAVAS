@@ -3,7 +3,7 @@ import argparse
 import os
 import subprocess
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -184,6 +184,7 @@ def main() -> None:
         "contrastive_logits_neg_ratio": [0.0, 0.125, 0.25],
         # Model capacity for multimodal fusion. None means "keep full GP size".
         "multimodal_embedding_size": [None, 128, 256, 512],
+        "node_batch_size": [256, 512],
     }
 
     if args.launch_workers:
@@ -211,7 +212,7 @@ def main() -> None:
                 extra={"n_workers": len(gpu_list), "total_trials": total_trials},
             )
             _launch_workers(args, cache_dir, parent_run_id, gpu_list, study_name)
-        return
+        #return
 
     # GridSampler suggests each combination exactly once; study stops when grid is exhausted.
     sampler = optuna.samplers.GridSampler(search_space)
@@ -242,38 +243,15 @@ def main() -> None:
         )
 
     def objective(trial: optuna.Trial) -> float:
+        # Suggest all search_space params; build TrialParams from the subset
+        # that are TrialParams fields (extra keys are still logged by Optuna).
+        trial_param_names = {f.name for f in fields(TrialParams)}
+        kwargs = {
+            key: trial.suggest_categorical(key, values)
+            for key, values in search_space.items()
+        }
         params = TrialParams(
-            encoder_input_key=trial.suggest_categorical(
-                "encoder_input_key", search_space["encoder_input_key"]
-            ),
-            multimodal_layer_series=trial.suggest_categorical(
-                "multimodal_layer_series",
-                search_space["multimodal_layer_series"],
-            ),
-            lambda_multimodal_contrastive_loss=trial.suggest_categorical(
-                "lambda_multimodal_contrastive_loss",
-                search_space["lambda_multimodal_contrastive_loss"],
-            ),
-            multimodal_temperature=trial.suggest_categorical(
-                "multimodal_temperature",
-                search_space["multimodal_temperature"],
-            ),
-            multimodal_contrastive_anneal=trial.suggest_categorical(
-                "multimodal_contrastive_anneal",
-                search_space["multimodal_contrastive_anneal"],
-            ),
-            contrastive_logits_pos_ratio=trial.suggest_categorical(
-                "contrastive_logits_pos_ratio",
-                search_space["contrastive_logits_pos_ratio"],
-            ),
-            contrastive_logits_neg_ratio=trial.suggest_categorical(
-                "contrastive_logits_neg_ratio",
-                search_space["contrastive_logits_neg_ratio"],
-            ),
-            multimodal_embedding_size=trial.suggest_categorical(
-                "multimodal_embedding_size",
-                search_space["multimodal_embedding_size"],
-            ),
+            **{k: kwargs[k] for k in trial_param_names if k in kwargs}
         )
         with mlflow.start_run(
             run_name=f"trial_{trial.number:04d}", nested=True
@@ -290,6 +268,7 @@ def main() -> None:
                 optimization_metric="compound_metric",
             )
 
+    #%%
     # catch=(Exception,) prevents the study from stopping if a trial fails (e.g. NaNs).
     study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,))
 

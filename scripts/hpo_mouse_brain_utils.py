@@ -44,6 +44,7 @@ class TrainConfig:
     lambda_l1_addon: float = 30.0
     lambda_multimodal_contrastive_loss: float = 100.0
     edge_batch_size: int = 64
+    node_batch_size: int = 64
     use_cuda_if_available: bool = True
     n_sampled_neighbors: int = 4
     multimodal_contrastive_anneal: bool = False
@@ -119,7 +120,7 @@ def build_model(
         gp_sources_categories_mask_key=DEFAULT_GP_SOURCES_CATEGORIES_MASK_KEY,
         active_gp_thresh_ratio=0.01,
         latent_key=DEFAULT_LATENT_KEY,
-        conv_layer_encoder="gatv2conv",
+        conv_layer_encoder="gcnconv", # options: "gatv2conv", "gcnconv"
         encoder_input_key=params.encoder_input_key,
         multimodal_layer_series=params.multimodal_layer_series,
         multimodal_embedding_size=params.multimodal_embedding_size,

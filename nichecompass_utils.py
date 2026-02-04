@@ -2743,6 +2743,7 @@ class CustomVGPGAE(VGPGAE):
                         clip_embeddings_rna = hidden_fc_rna
                         clip_embeddings_atac = hidden_fc_atac
                     else:
+                        raise NotImplementedError("Not implemented for active GP masking")
                         if self.multimodal_layer_series_:
                             w = self.multimodal_encoder.weight  # (out, in_full)
                             b = self.multimodal_encoder.bias

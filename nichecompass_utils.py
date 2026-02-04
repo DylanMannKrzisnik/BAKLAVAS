@@ -1277,8 +1277,6 @@ class CustomTrainer(Trainer):
     def _log_target_paired_metrics_and_loss(
         self,
         temperature: float,
-        mu_rna: torch.Tensor, # would be better to pass either mu or clip_embeddings, but not both
-        mu_atac: torch.Tensor,
         clip_embeddings_rna: torch.Tensor,
         clip_embeddings_atac: torch.Tensor,
     ) -> None:
@@ -1661,8 +1659,6 @@ class CustomTrainer(Trainer):
 
                 self._log_target_paired_metrics_and_loss(
                         temperature=self.multimodal_temperature_,
-                        mu_rna=target_holdout_mu_rna,
-                        mu_atac=target_holdout_mu_atac,
                         clip_embeddings_rna=target_holdout_clip_embeddings_rna,
                         clip_embeddings_atac=target_holdout_clip_embeddings_atac,
                 )
@@ -2297,9 +2293,6 @@ class CustomVGPGAE(VGPGAE):
 
         # Send a copy of the post-FC encoder representation through multimodal_layer
         hidden_fc_rna = encoder_outputs_rna[2][batch_idx, :]
-        if not self.multimodal_layer_series_:
-            output["fc_multimodal_rna"] = self.multimodal_layer(
-                hidden_fc_rna.clone())
 
         # Encode atac data
         encoder_outputs_atac = self.encoder_atac(
@@ -2315,10 +2308,16 @@ class CustomVGPGAE(VGPGAE):
 
         # Send a copy of the post-FC encoder representation through multimodal_layer
         hidden_fc_atac = encoder_outputs_atac[2][batch_idx, :]
-        if not self.multimodal_layer_series_:
-            output["fc_multimodal_atac"] = self.multimodal_layer(
-                hidden_fc_atac.clone())
 
+        # Get multimodal embeddings and store in output
+        if self.multimodal_layer_series_:
+            output["clip_rna"] = self.multimodal_encoder(hidden_fc_rna)
+            output["clip_atac"] = self.multimodal_encoder(hidden_fc_atac)
+        else:
+            output["clip_rna"] = self.multimodal_layer(hidden_fc_rna)
+            output["clip_atac"] = self.multimodal_layer(hidden_fc_atac)
+
+        # Get modality mask
         modality_mask = getattr(data_batch, "modality_mask", None)
         if modality_mask is not None:
             modality_mask = modality_mask[batch_idx]
@@ -3020,25 +3019,17 @@ class CustomVGPGAE(VGPGAE):
                 multimodal_contrastive_active and
                 "mu_rna" in node_model_output and
                 "mu_atac" in node_model_output):
-            # Project modality means into CLIP space here (not inside
-            # `get_multimodal_similarity`) so we only run these layers when the
-            # multimodal contrastive loss is actually enabled.
-            if self.multimodal_layer_series_:
-                clip_embeddings_rna = self.multimodal_encoder(node_model_output["mu_rna"])
-                clip_embeddings_atac = self.multimodal_encoder(node_model_output["mu_atac"])
-            else:
-                clip_embeddings_rna = self.multimodal_layer(node_model_output["mu_rna"])
-                clip_embeddings_atac = self.multimodal_layer(node_model_output["mu_atac"])
 
             similarity_matrix = self.get_multimodal_similarity(
-                clip_embeddings_rna=clip_embeddings_rna,
-                clip_embeddings_atac=clip_embeddings_atac)
+                clip_embeddings_rna=node_model_output["clip_rna"],
+                clip_embeddings_atac=node_model_output["clip_atac"])
+
             loss_dict["multimodal_contrastive_loss"] = (
                 lambda_multimodal_contrastive_loss *
                 self.compute_multimodal_contrastive_loss(
                     similarity_matrix,
                     temperature=multimodal_temperature))
-                    
+
             loss_dict["global_loss"] += loss_dict[
                 "multimodal_contrastive_loss"]
             loss_dict["optim_loss"] += loss_dict[

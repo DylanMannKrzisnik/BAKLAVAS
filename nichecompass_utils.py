@@ -1286,9 +1286,9 @@ class CustomTrainer(Trainer):
         was_training = self.model.training
         self.model.eval()
 
-        similarity = self.model.get_multimodal_similarity( # requires mu, not clip_embeddings
-            mu_rna=mu_rna,
-            mu_atac=mu_atac)
+        similarity = self.model.get_multimodal_similarity(
+            clip_embeddings_rna=clip_embeddings_rna,
+            clip_embeddings_atac=clip_embeddings_atac)
         loss = self.model.compute_multimodal_contrastive_loss(
             similarity_matrix=similarity,
             temperature=temperature)
@@ -1511,17 +1511,29 @@ class CustomTrainer(Trainer):
             for edge_train_data_batch, node_train_data_batch in zip(
                     self.edge_train_loader,
                     _cycle_iterable(self.node_train_loader)):
+
+                # node-level model output
                 node_train_data_batch = node_train_data_batch.to(self.device, non_blocking=True)
                 node_train_model_output = self.model(
                     data_batch=node_train_data_batch,
                     decoder="omics",
                     use_only_active_gps=self.use_only_active_gps)
 
+                # multimodal embeddings model output
+                if self.multimodal_layer_series_:
+                    clip_embeddings_rna = self.multimodal_encoder(node_train_model_output["mu_rna"])
+                    clip_embeddings_atac = self.multimodal_encoder(node_train_model_output["mu_atac"])
+                else:
+                    clip_embeddings_rna = self.multimodal_layer(node_train_model_output["mu_rna"])
+                    clip_embeddings_atac = self.multimodal_layer(node_train_model_output["mu_atac"])
+
+                # edge-level model output
                 edge_train_data_batch = edge_train_data_batch.to(self.device, non_blocking=True)
                 edge_train_model_output = self.model(
                     data_batch=edge_train_data_batch,
                     decoder="graph",
                     use_only_active_gps=self.use_only_active_gps)
+
 
                 train_loss_dict = self.model.loss(
                     edge_model_output=edge_train_model_output,
@@ -2282,13 +2294,12 @@ class CustomVGPGAE(VGPGAE):
         self.logstd_rna = encoder_outputs_rna[1][batch_idx, :]
         output["mu_rna"] = self.mu_rna
         output["logstd_rna"] = self.logstd_rna
+
         # Send a copy of the post-FC encoder representation through multimodal_layer
-        self.hidden_fc_rna = encoder_outputs_rna[2][batch_idx, :]
-        output["hidden_fc_rna"] = self.hidden_fc_rna
+        hidden_fc_rna = encoder_outputs_rna[2][batch_idx, :]
         if not self.multimodal_layer_series_:
             output["fc_multimodal_rna"] = self.multimodal_layer(
-                self.hidden_fc_rna.clone())
-        z_rna = self.reparameterize(self.mu_rna, self.logstd_rna)
+                hidden_fc_rna.clone())
 
         # Encode atac data
         encoder_outputs_atac = self.encoder_atac(
@@ -2301,13 +2312,12 @@ class CustomVGPGAE(VGPGAE):
         self.logstd_atac = encoder_outputs_atac[1][batch_idx, :]
         output["mu_atac"] = self.mu_atac
         output["logstd_atac"] = self.logstd_atac
+
         # Send a copy of the post-FC encoder representation through multimodal_layer
-        self.hidden_fc_atac = encoder_outputs_atac[2][batch_idx, :]
-        output["hidden_fc_atac"] = self.hidden_fc_atac
+        hidden_fc_atac = encoder_outputs_atac[2][batch_idx, :]
         if not self.multimodal_layer_series_:
             output["fc_multimodal_atac"] = self.multimodal_layer(
-                self.hidden_fc_atac.clone())
-        z_atac = self.reparameterize(self.mu_atac, self.logstd_atac)
+                hidden_fc_atac.clone())
 
         modality_mask = getattr(data_batch, "modality_mask", None)
         if modality_mask is not None:
@@ -2987,6 +2997,7 @@ class CustomVGPGAE(VGPGAE):
              lambda_multimodal_contrastive_loss: float=0.,
              multimodal_temperature: float=1.0,
              multimodal_contrastive_active: bool=True) -> dict:
+
         loss_dict = super().loss(
             edge_model_output=edge_model_output,
             node_model_output=node_model_output,
@@ -3009,14 +3020,25 @@ class CustomVGPGAE(VGPGAE):
                 multimodal_contrastive_active and
                 "mu_rna" in node_model_output and
                 "mu_atac" in node_model_output):
+            # Project modality means into CLIP space here (not inside
+            # `get_multimodal_similarity`) so we only run these layers when the
+            # multimodal contrastive loss is actually enabled.
+            if self.multimodal_layer_series_:
+                clip_embeddings_rna = self.multimodal_encoder(node_model_output["mu_rna"])
+                clip_embeddings_atac = self.multimodal_encoder(node_model_output["mu_atac"])
+            else:
+                clip_embeddings_rna = self.multimodal_layer(node_model_output["mu_rna"])
+                clip_embeddings_atac = self.multimodal_layer(node_model_output["mu_atac"])
+
             similarity_matrix = self.get_multimodal_similarity(
-                mu_rna=node_model_output["mu_rna"],
-                mu_atac=node_model_output["mu_atac"])
+                clip_embeddings_rna=clip_embeddings_rna,
+                clip_embeddings_atac=clip_embeddings_atac)
             loss_dict["multimodal_contrastive_loss"] = (
                 lambda_multimodal_contrastive_loss *
                 self.compute_multimodal_contrastive_loss(
                     similarity_matrix,
                     temperature=multimodal_temperature))
+                    
             loss_dict["global_loss"] += loss_dict[
                 "multimodal_contrastive_loss"]
             loss_dict["optim_loss"] += loss_dict[
@@ -3024,25 +3046,29 @@ class CustomVGPGAE(VGPGAE):
 
         return loss_dict
 
-    def get_multimodal_similarity(self,
-                                  mu_rna: Optional[torch.Tensor]=None,
-                                  mu_atac: Optional[torch.Tensor]=None
-                                  ) -> torch.Tensor:
-        mu_rna = self.mu_rna if mu_rna is None else mu_rna
-        mu_atac = self.mu_atac if mu_atac is None else mu_atac
+    def get_multimodal_similarity(
+            self,
+            clip_embeddings_rna: Optional[torch.Tensor]=None,
+            clip_embeddings_atac: Optional[torch.Tensor]=None,
+            ) -> torch.Tensor:
+        """
+        Compute cross-modal similarity using *precomputed* CLIP embeddings.
 
-        if self.multimodal_layer_series_:
-            mu_rna = self.multimodal_encoder(mu_rna)
-            mu_atac = self.multimodal_encoder(mu_atac)
-        else:
-            mu_rna = self.multimodal_layer(mu_rna)
-            mu_atac = self.multimodal_layer(mu_atac)
+        Note
+        ----
+        This method intentionally does **not** project `mu_*` through
+        `multimodal_encoder` / `multimodal_layer`. Callers must provide the
+        projected embeddings (e.g. from `forward()` output or from
+        `get_latent_representation(..., return_clip_embeddings=True)`).
+        """
+        if clip_embeddings_rna is None or clip_embeddings_atac is None:
+            raise ValueError(
+                "clip_embeddings_rna and clip_embeddings_atac must be provided; "
+                "get_multimodal_similarity no longer computes them from mu.")
 
-        mu_rna_normed = F.normalize(mu_rna, p=2, dim=1)
-        mu_atac_normed = F.normalize(mu_atac, p=2, dim=1)
-
-        similarity_matrix = torch.matmul(mu_rna_normed, mu_atac_normed.t())
-        return similarity_matrix
+        clip_rna_normed = F.normalize(clip_embeddings_rna, p=2, dim=1)
+        clip_atac_normed = F.normalize(clip_embeddings_atac, p=2, dim=1)
+        return torch.matmul(clip_rna_normed, clip_atac_normed.t())
 
     def compute_multimodal_contrastive_loss(
             self,

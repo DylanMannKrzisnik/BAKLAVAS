@@ -71,6 +71,15 @@ def parse_args(notebook: bool = False) -> argparse.Namespace:
         default=None,
         help="Use an existing MLflow parent run id.",
     )
+    parser.add_argument(
+        "--mlflow-base-dir",
+        default=None,
+        help=(
+            "Base directory for MLflow tracking DB and artifacts (e.g. BAKLAVA_base). "
+            "If set, one SQLite DB and one artifact tree are used so 'mlflow ui' can "
+            "load all runs from one place. Also respects MLFLOW_BASE_DIR env var."
+        ),
+    )
     if notebook:
         return parser.parse_known_args()[0]
     else:
@@ -109,13 +118,10 @@ def main() -> None:
             importance_fig = optuna.visualization.plot_param_importances(study)
             try:
                 mlflow.log_figure(importance_fig, "hyperparameter_importance.png")
-            except Exception as png_err:
-                # Common case: Plotly static export not available (kaleido missing).
+            except Exception:
+                # Common case: Plotly static export not available (e.g. kaleido missing).
                 mlflow.log_text(
                     importance_fig.to_html(), "hyperparameter_importance.html"
-                )
-                mlflow.log_text(
-                    repr(png_err), "hyperparameter_importance_png_error.txt"
                 )
             return
         except Exception as plotly_err:
@@ -128,13 +134,9 @@ def main() -> None:
                 ax.figure.tight_layout()
                 mlflow.log_figure(ax.figure, "hyperparameter_importance.png")
                 return
-            except Exception as mpl_err:
-                mlflow.log_text(
-                    "Failed to create/log param importance figure.\n"
-                    f"Plotly error: {repr(plotly_err)}\n"
-                    f"Matplotlib error: {repr(mpl_err)}\n",
-                    "hyperparameter_importance_error.txt",
-                )
+            except Exception:
+                # Neither Plotly nor Matplotlib succeeded; skip logging.
+                pass
 
     cache_dir = resolve_cache_dir(args.cache_dir)
     if args.study_name:
@@ -143,14 +145,38 @@ def main() -> None:
         now = datetime.datetime.now()
         timestamp = now.strftime("%d%m%Y_%H%M%S")
         study_name = f"{args.study_name_prefix}_{timestamp}"
-        
-    mlflow_artifact_dir = os.path.join(cache_dir, "mlflow_artifacts", study_name)
+
+    # Optional base dir for MLflow (e.g. BAKLAVA_base): one DB + one artifact tree
+    # so you can run "mlflow ui" from one place and see all runs. Example:
+    #   mlflow ui --backend-store-uri sqlite:///<mlflow_base_dir>/mlflow_tracking/mlflow.db
+    mlflow_base_dir = args.mlflow_base_dir or os.environ.get("MLFLOW_BASE_DIR")
+    if mlflow_base_dir:
+        mlflow_base_dir = os.path.abspath(mlflow_base_dir)
+        mlflow_tracking_dir = os.path.join(mlflow_base_dir, "mlflow_tracking")
+        os.makedirs(mlflow_tracking_dir, exist_ok=True)
+        mlflow_db_path = os.path.join(mlflow_tracking_dir, "mlflow.db")
+        mlflow.set_tracking_uri(f"sqlite:///{mlflow_db_path}")
+        mlflow_artifact_dir = os.path.join(
+            mlflow_base_dir, "mlflow_artifacts", study_name
+        )
+    else:
+        # Per-study DB and artifacts under cache_dir (e.g. run-specific).
+        mlflow_tracking_dir = os.path.join(
+            cache_dir, "mlflow_tracking", study_name
+        )
+        os.makedirs(mlflow_tracking_dir, exist_ok=True)
+        mlflow_db_path = os.path.join(mlflow_tracking_dir, "mlflow.db")
+        mlflow.set_tracking_uri(f"sqlite:///{os.path.abspath(mlflow_db_path)}")
+        mlflow_artifact_dir = os.path.join(
+            cache_dir, "mlflow_artifacts", study_name
+        )
     os.makedirs(mlflow_artifact_dir, exist_ok=True)
-    mlflow.set_experiment(args.experiment_name)
     experiment_id = get_or_create_experiment_id(
         args.experiment_name,
         artifact_location=os.path.abspath(mlflow_artifact_dir),
     )
+    # Now that the experiment exists (with the desired artifact location), activate it.
+    mlflow.set_experiment(args.experiment_name)
 
     train_cfg = TrainConfig()
     search_space = {
@@ -315,10 +341,13 @@ def _launch_workers(
     gpus: List[str],
     study_name: str,
 ) -> None:
+    mlflow_base = args.mlflow_base_dir or os.environ.get("MLFLOW_BASE_DIR") or ""
     procs = []
     for gpu in gpus:
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu
+        if mlflow_base:
+            env["MLFLOW_BASE_DIR"] = mlflow_base
         cmd = [
             sys.executable,
             os.path.abspath(__file__),
@@ -335,6 +364,8 @@ def _launch_workers(
             "--gpu",
             gpu,
         ]
+        if args.mlflow_base_dir:
+            cmd.extend(["--mlflow-base-dir", args.mlflow_base_dir])
         if cache_dir:
             cmd.extend(["--cache-dir", cache_dir])
         procs.append(subprocess.Popen(cmd, env=env))

@@ -3055,18 +3055,6 @@ class CustomVGPGAE(VGPGAE):
         loss_atac = F.cross_entropy(logits.t(), labels)
         return 0.5 * (loss_rna + loss_atac)
 
-    def add_multimodal_contrastive_loss(
-            self,
-            mu_rna: Optional[torch.Tensor]=None,
-            mu_atac: Optional[torch.Tensor]=None,
-            temperature: float=1.0) -> torch.Tensor:
-        similarity_matrix = self.get_multimodal_similarity(
-            mu_rna=mu_rna,
-            mu_atac=mu_atac)
-        return self.compute_multimodal_contrastive_loss(
-            similarity_matrix,
-            temperature=temperature)
-
 
 class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
     """

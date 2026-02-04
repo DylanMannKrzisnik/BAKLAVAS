@@ -793,6 +793,7 @@ model = CustomNicheCompass(
     encoder_input_key="pseudocounts",
     multimodal_layer_series=False,
     multimodal_embedding_size=128,
+    n_fc_layers_encoder=1,
 )
 
 

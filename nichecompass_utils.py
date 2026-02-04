@@ -1973,6 +1973,11 @@ class CustomVGPGAE(VGPGAE):
                 torch.nn.Linear(
                     gp_embedding_size,
                     self.multimodal_embedding_size_),
+                torch.nn.ReLU(),
+                torch.nn.Dropout(0.2),
+                torch.nn.Linear(
+                    self.multimodal_embedding_size_,
+                    self.multimodal_embedding_size_),
                 torch.nn.BatchNorm1d(self.multimodal_embedding_size_)
             )
 

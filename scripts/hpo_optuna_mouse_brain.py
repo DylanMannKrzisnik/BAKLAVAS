@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, List, Optional
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -146,30 +147,23 @@ def main() -> None:
         timestamp = now.strftime("%d%m%Y_%H%M%S")
         study_name = f"{args.study_name_prefix}_{timestamp}"
 
-    # Optional base dir for MLflow (e.g. BAKLAVA_base): one DB + one artifact tree
-    # so you can run "mlflow ui" from one place and see all runs. Example:
-    #   mlflow ui --backend-store-uri sqlite:///<mlflow_base_dir>/mlflow_tracking/mlflow.db
-    mlflow_base_dir = args.mlflow_base_dir or os.environ.get("MLFLOW_BASE_DIR")
-    if mlflow_base_dir:
-        mlflow_base_dir = os.path.abspath(mlflow_base_dir)
-        mlflow_tracking_dir = os.path.join(mlflow_base_dir, "mlflow_tracking")
-        os.makedirs(mlflow_tracking_dir, exist_ok=True)
-        mlflow_db_path = os.path.join(mlflow_tracking_dir, "mlflow.db")
-        mlflow.set_tracking_uri(f"sqlite:///{mlflow_db_path}")
-        mlflow_artifact_dir = os.path.join(
-            mlflow_base_dir, "mlflow_artifacts", study_name
-        )
-    else:
-        # Per-study DB and artifacts under cache_dir (e.g. run-specific).
-        mlflow_tracking_dir = os.path.join(
-            cache_dir, "mlflow_tracking", study_name
-        )
-        os.makedirs(mlflow_tracking_dir, exist_ok=True)
-        mlflow_db_path = os.path.join(mlflow_tracking_dir, "mlflow.db")
-        mlflow.set_tracking_uri(f"sqlite:///{os.path.abspath(mlflow_db_path)}")
-        mlflow_artifact_dir = os.path.join(
-            cache_dir, "mlflow_artifacts", study_name
-        )
+    # Keep MLflow in ONE place so "mlflow ui" consistently shows all runs.
+    # Default: directory above the repo (i.e., BAKLAVA_base), but can be overridden
+    # via --mlflow-base-dir or MLFLOW_BASE_DIR.
+    #
+    # Run the UI with:
+    #   mlflow ui --backend-store-uri sqlite:////<mlflow_base_dir>/mlflow_tracking/mlflow.db
+    default_base_dir = str(Path(__file__).resolve().parents[2])
+    mlflow_base_dir = args.mlflow_base_dir or os.environ.get("MLFLOW_BASE_DIR") or default_base_dir
+    mlflow_base_dir = os.path.abspath(mlflow_base_dir)
+
+    mlflow_tracking_dir = os.path.join(mlflow_base_dir, "mlflow_tracking")
+    os.makedirs(mlflow_tracking_dir, exist_ok=True)
+    mlflow_db_path = os.path.join(mlflow_tracking_dir, "mlflow.db")
+    mlflow.set_tracking_uri(f"sqlite:///{mlflow_db_path}")
+    print(f"MLflow backend-store-uri: sqlite:////{mlflow_db_path.lstrip('/')}")
+
+    mlflow_artifact_dir = os.path.join(mlflow_base_dir, "mlflow_artifacts", study_name)
     os.makedirs(mlflow_artifact_dir, exist_ok=True)
     experiment_id = get_or_create_experiment_id(
         args.experiment_name,

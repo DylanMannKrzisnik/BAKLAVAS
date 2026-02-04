@@ -1365,6 +1365,7 @@ class CustomTrainer(Trainer):
               n_epochs_all_gps: int=25,
               n_epochs_no_edge_recon: int=0,
               n_epochs_no_cat_covariates_contrastive: int=5,
+              target_eval_interval: int=5,
               lr: float=0.001,
               weight_decay: float=0.,
               lambda_edge_recon: Optional[float]=500000.,
@@ -1627,51 +1628,55 @@ class CustomTrainer(Trainer):
                         if self.mlflow_experiment_id is not None:
                             mlflow.log_metric("val_multimodal_contrastive_loss", val_mmc_loss, step=self.epoch)
 
-            # Fetch target embeddings once before any metrics are computed.
-            if (self.log_target_multimodal_contrastive_  and self.target_holdout_adata is not None and self.target_holdout_adata_atac is not None):
 
-                target_holdout_clip_embeddings_rna, target_holdout_clip_embeddings_atac = (
-                    self._get_target_latent_embeddings(
-                        adata=self.target_holdout_adata,
-                        adata_atac=self.target_holdout_adata_atac,
-                        paired_data=self.target_paired_data_,
-                        chunk_size=500,
+            # Evaluate on target data
+            if (self.epoch % target_eval_interval == 0) or (self.epoch == self.n_epochs_-1):
+
+                # Fetch target embeddings once before any metrics are computed.
+                if (self.log_target_multimodal_contrastive_  and self.target_holdout_adata is not None and self.target_holdout_adata_atac is not None):
+
+                    target_holdout_clip_embeddings_rna, target_holdout_clip_embeddings_atac = (
+                        self._get_target_latent_embeddings(
+                            adata=self.target_holdout_adata,
+                            adata_atac=self.target_holdout_adata_atac,
+                            paired_data=self.target_paired_data_,
+                            chunk_size=500,
+                        )
                     )
-                )
 
-            # Compute metrics after embeddings are available.
-            if self.log_target_multimodal_contrastive_ and self.target_paired_data_:
+                # Compute metrics after embeddings are available.
+                if self.log_target_multimodal_contrastive_ and self.target_paired_data_:
 
-                self._log_target_paired_metrics(
-                        temperature=self.multimodal_temperature_,
-                        clip_embeddings_rna=target_holdout_clip_embeddings_rna,
-                        clip_embeddings_atac=target_holdout_clip_embeddings_atac,
-                )
+                    self._log_target_paired_metrics(
+                            temperature=self.multimodal_temperature_,
+                            clip_embeddings_rna=target_holdout_clip_embeddings_rna,
+                            clip_embeddings_atac=target_holdout_clip_embeddings_atac,
+                    )
 
-            if self.target_adata is not None:
-                self.target_holdout_adata.obsm[self.target_latent_key] = target_holdout_clip_embeddings_rna
-                if self.target_adata_atac is not None:
-                    self.target_holdout_adata_atac.obsm[self.target_latent_key] = target_holdout_clip_embeddings_atac
+                if self.target_adata is not None:
+                    self.target_holdout_adata.obsm[self.target_latent_key] = target_holdout_clip_embeddings_rna
+                    if self.target_adata_atac is not None:
+                        self.target_holdout_adata_atac.obsm[self.target_latent_key] = target_holdout_clip_embeddings_atac
 
-                self._log_target_unpaired_metrics()
+                    self._log_target_unpaired_metrics()
 
-            ## create and log compound metric
-            compound_metric = self.epoch_logs.copy()
-            '''
-            if "compound_metric" in compound_metric: # remove 'compound_metric' itself
-                compound_metric.pop("compound_metric")
-            for key_ in [key for key in list(compound_metric.keys()) if 'loss' in key]: # remove all items with keys containing 'loss'
-                compound_metric.pop(key_)
-            compound_metric = np.sum([values[-1] for values in compound_metric.values()]) / len(compound_metric)
-            '''
-            compound_metric = np.mean([
-                self.epoch_logs["target_one_minus_foscttm"][-1],
-                self.epoch_logs["target_iLISI"][-1]
-            ])
-            self.epoch_logs["compound_metric"].append(compound_metric)
+                ## create and log compound metric
+                compound_metric = self.epoch_logs.copy()
+                '''
+                if "compound_metric" in compound_metric: # remove 'compound_metric' itself
+                    compound_metric.pop("compound_metric")
+                for key_ in [key for key in list(compound_metric.keys()) if 'loss' in key]: # remove all items with keys containing 'loss'
+                    compound_metric.pop(key_)
+                compound_metric = np.sum([values[-1] for values in compound_metric.values()]) / len(compound_metric)
+                '''
+                compound_metric = np.mean([
+                    self.epoch_logs["target_one_minus_foscttm"][-1],
+                    self.epoch_logs["target_iLISI"][-1]
+                ])
+                self.epoch_logs["compound_metric"].append(compound_metric)
 
-            if self.mlflow_experiment_id is not None:
-                mlflow.log_metric("compound_metric", compound_metric, step=self.epoch)
+                if self.mlflow_experiment_id is not None:
+                    mlflow.log_metric("compound_metric", compound_metric, step=self.epoch)
 
             if self.monitor_:
                 print_progress(self.epoch, self.epoch_logs, self.n_epochs_)

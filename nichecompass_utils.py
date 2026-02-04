@@ -1239,6 +1239,7 @@ class CustomTrainer(Trainer):
 
         clip_embeddings_rna = []
         clip_embeddings_atac = []
+        multimodal_contrastive_loss = []
 
         model_dtype = next(self.model.parameters()).dtype
         for _, start, end in adata.chunked_X(chunk_size):
@@ -1272,10 +1273,7 @@ class CustomTrainer(Trainer):
             loss = self.model.compute_multimodal_contrastive_loss(
                 similarity_matrix=similarity,
                 temperature=self.multimodal_temperature_)
-
-            self.epoch_logs["target_multimodal_contrastive_loss"].append(float(loss.item()))
-            if self.mlflow_experiment_id is not None:
-                mlflow.log_metric("target_multimodal_contrastive_loss", float(loss.item()), step=self.epoch)
+            multimodal_contrastive_loss.append(float(loss.item()))
 
             ## store clip embeddings
             clip_embeddings_rna.append(clip_embeddings_rna_batch.detach().cpu().numpy())
@@ -1284,6 +1282,11 @@ class CustomTrainer(Trainer):
 
         clip_embeddings_rna = np.concatenate(clip_embeddings_rna, axis=0)
         clip_embeddings_atac = np.concatenate(clip_embeddings_atac, axis=0) if clip_embeddings_atac else None
+
+        multimodal_contrastive_loss = np.mean(multimodal_contrastive_loss)
+        self.epoch_logs["target_multimodal_contrastive_loss"].append(multimodal_contrastive_loss)
+        if self.mlflow_experiment_id is not None:
+            mlflow.log_metric("target_multimodal_contrastive_loss", multimodal_contrastive_loss, step=self.epoch)
 
         if was_training:
             self.model.train()
@@ -2685,6 +2688,7 @@ class CustomVGPGAE(VGPGAE):
         else:
             cat_covariates_embed = None
 
+        # RNA encoder
         encoder_outputs_rna = self.encoder_rna(
             x=x_enc_rna,
             edge_index=node_batch.edge_index,
@@ -2694,6 +2698,7 @@ class CustomVGPGAE(VGPGAE):
         mu_rna = encoder_outputs_rna[0][:node_batch.batch_size, :]
         logstd_rna = encoder_outputs_rna[1][:node_batch.batch_size, :]
 
+        # ATAC encoder
         encoder_outputs_atac = self.encoder_atac(
             x=x_enc_atac,
             edge_index=node_batch.edge_index,
@@ -2703,10 +2708,17 @@ class CustomVGPGAE(VGPGAE):
         mu_atac = encoder_outputs_atac[0][:node_batch.batch_size, :]
         logstd_atac = encoder_outputs_atac[1][:node_batch.batch_size, :]
 
-        # Keep full-sized modality means for CLIP projection (multimodal_layer
-        # expects the full latent dimensionality: n_prior_gp + n_addon_gp).
-        mu_rna_full = mu_rna
-        mu_atac_full = mu_atac
+        # Send a copy of the post-FC encoder representation through multimodal_layer
+        hidden_fc_rna = encoder_outputs_rna[2][:node_batch.batch_size, :]
+        hidden_fc_atac = encoder_outputs_atac[2][:node_batch.batch_size, :]
+
+        # Get multimodal embeddings and store in output
+        if self.multimodal_layer_series_:
+            clip_embeddings_rna = self.multimodal_encoder(hidden_fc_rna)
+            clip_embeddings_atac = self.multimodal_encoder(hidden_fc_atac)
+        else:
+            clip_embeddings_rna = self.multimodal_layer(hidden_fc_rna)
+            clip_embeddings_atac = self.multimodal_layer(hidden_fc_atac)
 
         if only_active_gps:
             active_gp_mask = self.get_active_gp_mask()
@@ -2720,20 +2732,16 @@ class CustomVGPGAE(VGPGAE):
         if separate_modalities:
             if return_clip_embeddings:
                 if active_gp_mask is None:
-                    if self.multimodal_layer_series_:
-                        clip_embeddings_rna = self.multimodal_encoder(mu_rna_full)
-                        clip_embeddings_atac = self.multimodal_encoder(mu_atac_full)
-                    else:
-                        clip_embeddings_rna = self.multimodal_layer(mu_rna_full)
-                        clip_embeddings_atac = self.multimodal_layer(mu_atac_full)
+                    clip_embeddings_rna = clip_embeddings_rna[:node_batch.batch_size, :]
+                    clip_embeddings_atac = clip_embeddings_atac[:node_batch.batch_size, :]
                 else:
                     # Project only-active GPs by masking the Linear weights.
                     # This avoids a dimension mismatch while ensuring inactive
                     # GPs do not contribute to the clip_embeddings.
                     if self.multimodal_layer_series_ and isinstance(
                             self.multimodal_encoder, torch.nn.Identity):
-                        clip_embeddings_rna = mu_rna
-                        clip_embeddings_atac = mu_atac
+                        clip_embeddings_rna = hidden_fc_rna
+                        clip_embeddings_atac = hidden_fc_atac
                     else:
                         if self.multimodal_layer_series_:
                             w = self.multimodal_encoder.weight  # (out, in_full)
@@ -2741,18 +2749,14 @@ class CustomVGPGAE(VGPGAE):
                         else:
                             w = self.multimodal_layer.weight  # (out, in_full)
                             b = self.multimodal_layer.bias
-                        clip_embeddings_rna = F.linear(mu_rna, w[:, active_gp_mask], b)
-                        clip_embeddings_atac = F.linear(mu_atac, w[:, active_gp_mask], b)
+                        clip_embeddings_rna = F.linear(hidden_fc_rna, w[:, active_gp_mask], b)
+                        clip_embeddings_atac = F.linear(hidden_fc_atac, w[:, active_gp_mask], b)
+
             if return_mu_std:
                 std_rna = torch.exp(logstd_rna)
                 std_atac = torch.exp(logstd_atac)
                 if return_clip_embeddings:
-                    return (mu_rna,
-                            std_rna,
-                            mu_atac,
-                            std_atac,
-                            clip_embeddings_rna,
-                            clip_embeddings_atac)
+                    return mu_rna, std_rna, mu_atac, std_atac, clip_embeddings_rna, clip_embeddings_atac
                 return mu_rna, std_rna, mu_atac, std_atac
             else:
                 z_rna = self.reparameterize(mu_rna, logstd_rna)
@@ -2766,6 +2770,7 @@ class CustomVGPGAE(VGPGAE):
         modality_mask = getattr(node_batch, "modality_mask", None)
         if modality_mask is not None:
             modality_mask = modality_mask[:node_batch.batch_size]
+
         mu, logstd = self._combine_posteriors(
             mu_rna,
             logstd_rna,
@@ -2777,8 +2782,7 @@ class CustomVGPGAE(VGPGAE):
             std = torch.exp(logstd)
             return mu, std
         z = self.reparameterize(mu, logstd)
-        if self.multimodal_layer_series_:
-            z = self.multimodal_layer(z)
+
         return z
 
 

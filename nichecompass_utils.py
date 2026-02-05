@@ -206,8 +206,8 @@ class CustomNicheCompass(NicheCompass):
             "default": 512
         },
         "edge_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[256, 512, 800]),
-            "default": 512
+            "suggest_distribution": CategoricalDistribution(choices=[64, 128, 256]),
+            "default": 256
         },
     }
 

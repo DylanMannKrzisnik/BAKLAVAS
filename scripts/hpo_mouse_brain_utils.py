@@ -22,8 +22,6 @@ DEFAULT_LATENT_KEY = "nichecompass_latent"
 class TrialParams:
     encoder_input_key: str
     multimodal_layer_series: bool
-    # Hyperparameters that most directly affect the (target) multimodal
-    # contrastive loss used as the objective.
     lambda_multimodal_contrastive_loss: float
     multimodal_temperature: float
     multimodal_contrastive_anneal: bool
@@ -151,6 +149,8 @@ def load_cached_targets(cache_dir: str) -> Tuple[ad.AnnData, ad.AnnData]:
         )
     return ad.read_h5ad(target_rna_path), ad.read_h5ad(target_atac_path)
 
+def get_hparams(key=None):
+    return CustomNicheCompass.get_hparams(key)
 
 def run_trial(
     params: TrialParams,

@@ -200,8 +200,8 @@ class CustomNicheCompass(NicheCompass):
             "default": 0.0
         },
         "node_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[256, 512]),
-            "default": 256
+            "suggest_distribution": CategoricalDistribution(choices=[256, 512, 800]),
+            "default": 800
         },
     }
 

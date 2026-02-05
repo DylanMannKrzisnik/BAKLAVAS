@@ -208,7 +208,14 @@ if not os.path.exists(os.path.join(so_data_folder_path, 'spatial_atac_rna_seq_mo
 
 #%% Load data from cached model
 
-from scripts.hpo_mouse_brain_utils import resolve_cache_dir, load_cached_inputs, load_cached_targets
+from scripts.hpo_mouse_brain_utils import (
+    resolve_cache_dir,
+    load_cached_inputs,
+    load_cached_targets,
+    resolve_hparams,
+    filter_model_hparams,
+    filter_train_hparams,
+)
 
 cache_dir = resolve_cache_dir(None)
 adata, adata_atac = load_cached_inputs(cache_dir)
@@ -776,6 +783,9 @@ target_name = "cached_data"
 '''
 #%% Initialize model
 
+hparam_defaults = resolve_hparams()
+model_hparams = filter_model_hparams(hparam_defaults)
+
 model = CustomNicheCompass(
     adata,
     adata_atac,
@@ -787,13 +797,8 @@ model = CustomNicheCompass(
     gp_targets_categories_mask_key=gp_targets_categories_mask_key,
     gp_sources_mask_key=gp_sources_mask_key,
     gp_sources_categories_mask_key=gp_sources_categories_mask_key,
-    active_gp_thresh_ratio=active_gp_thresh_ratio,
     latent_key=latent_key,
-    conv_layer_encoder=conv_layer_encoder,
-    encoder_input_key="pseudocounts",
-    multimodal_layer_series=False,
-    multimodal_embedding_size=128,
-    n_fc_layers_encoder=1,
+    **model_hparams,
 )
 
 
@@ -822,6 +827,8 @@ with mlflow.start_run(run_name=current_timestamp):
     mlflow.log_param("source_dataset_name", source_name)
     mlflow.log_param("target_dataset_name", target_name)
 
+    train_hparams = filter_train_hparams(hparam_defaults)
+
     ## Train model
     model.train(n_epochs=n_epochs,
                 n_epochs_all_gps=n_epochs_all_gps,
@@ -831,12 +838,9 @@ with mlflow.start_run(run_name=current_timestamp):
                 lambda_chrom_access_recon=lambda_chrom_access_recon,
                 lambda_l1_masked=lambda_l1_masked,
                 lambda_l1_addon=lambda_l1_addon,
-                lambda_multimodal_contrastive_loss=500000.0,
                 edge_batch_size=edge_batch_size,
-                node_batch_size=node_batch_size,
                 use_cuda_if_available=use_cuda_if_available,
                 n_sampled_neighbors=n_sampled_neighbors,
-                multimodal_contrastive_anneal=False,
                 target_adata=target_rna,
                 target_adata_atac=target_atac,
                 target_holdout_frac=0.1,
@@ -848,7 +852,8 @@ with mlflow.start_run(run_name=current_timestamp):
                 log_target_multimodal_contrastive=True,
                 use_early_stopping=False,
                 verbose=False,
-                mlflow_experiment_id=mlflow_experiment_id
+                mlflow_experiment_id=mlflow_experiment_id,
+                **train_hparams,
             )
 
 

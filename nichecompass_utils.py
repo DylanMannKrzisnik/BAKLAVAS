@@ -7,7 +7,9 @@ override behavior from the NicheCompass package (e.g., custom VGPGAE forward).
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional, Tuple, Union 
+from typing import List, Literal, Optional, Tuple, Union
+
+import copy
 
 import math
 import time
@@ -207,8 +209,9 @@ class CustomNicheCompass(NicheCompass):
 
     @classmethod
     def get_hparams(cls, key=None):
-        hparams = cls.HPARAMS[key].copy() if key else cls.HPARAMS.copy()
-        return hparams
+        if key is not None:
+            return copy.deepcopy(cls.HPARAMS[key])
+        return copy.deepcopy(cls.HPARAMS)
 
     def __init__(self,
                  adata: AnnData,

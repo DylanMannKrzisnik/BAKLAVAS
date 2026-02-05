@@ -41,6 +41,7 @@ import os
 import random
 import warnings
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import gdown
@@ -802,14 +803,32 @@ model = CustomNicheCompass(
 
 #%% Train model
 
+# Keep MLflow in ONE place so "mlflow ui" consistently shows all runs.
+# Default: directory above the repo (i.e., BAKLAVA_base), but can be overridden
+# via MLFLOW_BASE_DIR env var (same convention as scripts/hpo_optuna_mouse_brain.py).
+default_base_dir = str(Path(__file__).resolve().parents[1])
+mlflow_base_dir = os.environ.get("MLFLOW_BASE_DIR") or default_base_dir
+mlflow_base_dir = os.path.abspath(mlflow_base_dir)
+
+mlflow_tracking_dir = os.path.join(mlflow_base_dir, "mlflow_tracking")
+os.makedirs(mlflow_tracking_dir, exist_ok=True)
+mlflow_db_path = os.path.join(mlflow_tracking_dir, "mlflow.db")
+mlflow.set_tracking_uri(f"sqlite:///{mlflow_db_path}")
+print(f"MLflow backend-store-uri: sqlite:////{mlflow_db_path.lstrip('/')}")
+
 # Set up MLflow experiment for logging
 mlflow_experiment_name = f"nichecompass_mouse_brain_multimodal"
+mlflow_artifact_dir = os.path.join(mlflow_base_dir, "mlflow_artifacts", mlflow_experiment_name)
+os.makedirs(mlflow_artifact_dir, exist_ok=True)
 
 # Get or create experiment
 mlflow_experiment = mlflow.get_experiment_by_name(mlflow_experiment_name)
 if mlflow_experiment is None:
     # Create new experiment
-    mlflow_experiment_id = mlflow.create_experiment(mlflow_experiment_name)
+    mlflow_experiment_id = mlflow.create_experiment(
+        mlflow_experiment_name,
+        artifact_location=os.path.abspath(mlflow_artifact_dir),
+    )
     print(f"Created new MLflow experiment: {mlflow_experiment_name} (ID: {mlflow_experiment_id})")
 else:
     mlflow_experiment_id = mlflow_experiment.experiment_id

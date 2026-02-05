@@ -19,6 +19,9 @@ DEFAULT_TUNED_HPARAM_KEYS = [
     "node_batch_size",
 ]
 
+# HPO convenience override for TrainConfig.n_epochs
+HPO_N_EPOCHS = 10
+
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"
 DEFAULT_GP_NAMES_KEY = "nichecompass_gp_names"

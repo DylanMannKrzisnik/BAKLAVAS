@@ -102,6 +102,7 @@ def main() -> None:
         TrainConfig,
         TrialParams,
         get_search_space,
+        HPO_N_EPOCHS,
         get_or_create_experiment_id,
         resolve_cache_dir,
         run_trial,
@@ -173,7 +174,7 @@ def main() -> None:
     # Now that the experiment exists (with the desired artifact location), activate it.
     mlflow.set_experiment(args.experiment_name)
 
-    train_cfg = TrainConfig()
+    train_cfg = TrainConfig(n_epochs=HPO_N_EPOCHS)
     search_space = get_search_space()
 
     if args.launch_workers:

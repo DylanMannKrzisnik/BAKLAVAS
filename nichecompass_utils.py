@@ -7,7 +7,9 @@ override behavior from the NicheCompass package (e.g., custom VGPGAE forward).
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional, Tuple, Union 
+from typing import List, Literal, Optional, Tuple, Union
+
+import copy
 
 import math
 import time
@@ -24,6 +26,8 @@ from anndata import AnnData
 from torch_geometric.data import Data
 from torch_geometric.loader import LinkNeighborLoader, NeighborLoader
 from torch_geometric.utils import add_self_loops, remove_self_loops
+
+from optuna.distributions import CategoricalDistribution
 
 from nichecompass.data import (SpatialAnnTorchDataset,
                                dataprocessors)
@@ -163,6 +167,56 @@ class CustomNicheCompass(NicheCompass):
     """
     Project-specific NicheCompass with custom behavior.
     """
+
+    HPARAMS = {
+        'multimodal_layer_series': {
+            'suggest_distribution': CategoricalDistribution(choices=[False, True]),
+            'default': False
+        },
+        'multimodal_embedding_size': {
+            'suggest_distribution': CategoricalDistribution(choices=[64, 128, 256, 512]),
+            'default': 128
+        },
+        "encoder_input_key": {
+            "suggest_distribution": CategoricalDistribution(choices=["counts", "pseudocounts"]),
+            "default": "counts"
+        },
+        "lambda_multimodal_contrastive_loss": {
+            "suggest_distribution": CategoricalDistribution(choices=[1000.0, 10000.0, 100000.0]),
+            "default": 10.0
+        },
+        "multimodal_temperature": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.1, 0.2, 0.5, 1.0]),
+            "default": 0.1
+        },
+        "multimodal_contrastive_anneal": {
+            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "default": False
+        },
+        "contrastive_logits_pos_ratio": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.125, 0.25]),
+            "default": 0.0
+        },
+        "contrastive_logits_neg_ratio": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.125, 0.25]),
+            "default": 0.0
+        },
+        "node_batch_size": {
+            "suggest_distribution": CategoricalDistribution(choices=[256, 512, 800]),
+            "default": 512
+        },
+        "edge_batch_size": {
+            "suggest_distribution": CategoricalDistribution(choices=[64, 128, 256]),
+            "default": 256
+        },
+    }
+
+    @classmethod
+    def get_hparams(cls, key=None):
+        if key is not None:
+            return copy.deepcopy(cls.HPARAMS[key])
+        return copy.deepcopy(cls.HPARAMS)
+
     def __init__(self,
                  adata: AnnData,
                  adata_atac: Optional[AnnData]=None,

@@ -3,7 +3,7 @@ import argparse
 import os
 import subprocess
 import sys
-from dataclasses import asdict, fields
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -101,6 +101,8 @@ def main() -> None:
     from hpo_mouse_brain_utils import (
         TrainConfig,
         TrialParams,
+        get_search_space,
+        HPO_N_EPOCHS,
         get_or_create_experiment_id,
         resolve_cache_dir,
         run_trial,
@@ -172,20 +174,8 @@ def main() -> None:
     # Now that the experiment exists (with the desired artifact location), activate it.
     mlflow.set_experiment(args.experiment_name)
 
-    train_cfg = TrainConfig()
-    search_space = {
-        "multimodal_layer_series": [False],
-        "encoder_input_key": ["counts", "pseudocounts"],
-        # Contrastive-loss–relevant knobs (objective is target_multimodal_contrastive_loss)
-        "lambda_multimodal_contrastive_loss": [10.0, 30.0, 100.0, 300.0],
-        "multimodal_temperature": [0.1, 0.2, 0.5, 1.0],
-        "multimodal_contrastive_anneal": [False], # [False, True],
-        "contrastive_logits_pos_ratio": [0.0, 0.125, 0.25],
-        "contrastive_logits_neg_ratio": [0.0, 0.125, 0.25],
-        # Model capacity for multimodal fusion. None means "keep full GP size".
-        "multimodal_embedding_size": [None, 128, 256, 512],
-        "node_batch_size": [256, 512],
-    }
+    train_cfg = TrainConfig(n_epochs=HPO_N_EPOCHS, n_epochs_all_gps=HPO_N_EPOCHS)
+    search_space = get_search_space()
 
     if args.launch_workers:
         if not args.gpus:
@@ -212,7 +202,7 @@ def main() -> None:
                 extra={"n_workers": len(gpu_list), "total_trials": total_trials},
             )
             _launch_workers(args, cache_dir, parent_run_id, gpu_list, study_name)
-        #return
+        return
 
     # GridSampler suggests each combination exactly once; study stops when grid is exhausted.
     sampler = optuna.samplers.GridSampler(search_space)
@@ -243,16 +233,11 @@ def main() -> None:
         )
 
     def objective(trial: optuna.Trial) -> float:
-        # Suggest all search_space params; build TrialParams from the subset
-        # that are TrialParams fields (extra keys are still logged by Optuna).
-        trial_param_names = {f.name for f in fields(TrialParams)}
         kwargs = {
             key: trial.suggest_categorical(key, values)
             for key, values in search_space.items()
         }
-        params = TrialParams(
-            **{k: kwargs[k] for k in trial_param_names if k in kwargs}
-        )
+        params = TrialParams(**kwargs)
         with mlflow.start_run(
             run_name=f"trial_{trial.number:04d}", nested=True
         ) as child_run:

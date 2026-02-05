@@ -1,12 +1,26 @@
+import inspect
 import os
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import anndata as ad
 import mlflow
+from optuna.distributions import CategoricalDistribution
 
 from nichecompass_utils import CustomNicheCompass
 
+DEFAULT_TUNED_HPARAM_KEYS = [
+    "encoder_input_key",
+    "lambda_multimodal_contrastive_loss",
+    "multimodal_temperature",
+    "contrastive_logits_pos_ratio",
+    "contrastive_logits_neg_ratio",
+    "multimodal_embedding_size",
+    "node_batch_size",
+]
+
+# HPO convenience override for TrainConfig.n_epochs
+HPO_N_EPOCHS = 200
 
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"
@@ -20,16 +34,15 @@ DEFAULT_LATENT_KEY = "nichecompass_latent"
 
 @dataclass(frozen=True)
 class TrialParams:
-    encoder_input_key: str
-    multimodal_layer_series: bool
-    # Hyperparameters that most directly affect the (target) multimodal
-    # contrastive loss used as the objective.
-    lambda_multimodal_contrastive_loss: float
-    multimodal_temperature: float
-    multimodal_contrastive_anneal: bool
-    contrastive_logits_pos_ratio: float
-    contrastive_logits_neg_ratio: float
-    multimodal_embedding_size: Optional[int]
+    encoder_input_key: Optional[str] = None
+    multimodal_layer_series: Optional[bool] = None
+    lambda_multimodal_contrastive_loss: Optional[float] = None
+    multimodal_temperature: Optional[float] = None
+    multimodal_contrastive_anneal: Optional[bool] = None
+    contrastive_logits_pos_ratio: Optional[float] = None
+    contrastive_logits_neg_ratio: Optional[float] = None
+    multimodal_embedding_size: Optional[int] = None
+    node_batch_size: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -57,7 +70,6 @@ class TrainConfig:
     log_target_multimodal_contrastive: bool = True
     use_early_stopping: bool = False
     verbose: bool = False
-
 
 def _find_latest_cache_dir(root: str) -> Optional[str]:
     if not os.path.isdir(root):
@@ -102,11 +114,75 @@ def load_cached_inputs(cache_dir: str) -> Tuple[ad.AnnData, ad.AnnData]:
     return ad.read_h5ad(adata_path), ad.read_h5ad(adata_atac_path)
 
 
+def _trial_params_to_overrides(params: Optional[TrialParams]) -> Dict[str, Any]:
+    if params is None:
+        return {}
+    overrides = asdict(params)
+    return {key: value for key, value in overrides.items() if value is not None}
+
+
+def _hparam_defaults() -> Dict[str, Any]:
+    defaults = {}
+    for key, spec in get_hparams().items():
+        if isinstance(spec, dict) and "default" in spec:
+            defaults[key] = spec["default"]
+    return defaults
+
+
+def resolve_hparams(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    resolved = _hparam_defaults()
+    if overrides:
+        resolved.update(overrides)
+    return resolved
+
+
+def _filter_hparams_for_signature(func, hparams: Dict[str, Any]) -> Dict[str, Any]:
+    signature = inspect.signature(func)
+    allowed = set(signature.parameters)
+    allowed.discard("self")
+    allowed.discard("adata")
+    allowed.discard("adata_atac")
+    allowed.discard("kwargs")
+    allowed.discard("trainer_kwargs")
+    return {key: value for key, value in hparams.items() if key in allowed}
+
+
+def filter_model_hparams(hparams: Dict[str, Any]) -> Dict[str, Any]:
+    return _filter_hparams_for_signature(CustomNicheCompass.__init__, hparams)
+
+
+def filter_train_hparams(hparams: Dict[str, Any]) -> Dict[str, Any]:
+    return _filter_hparams_for_signature(CustomNicheCompass.train, hparams)
+
+
+def get_search_space(tuned_keys: Optional[List[str]] = None) -> Dict[str, List[Any]]:
+    tuned_keys = tuned_keys or DEFAULT_TUNED_HPARAM_KEYS
+    hparams = get_hparams()
+    search_space: Dict[str, List[Any]] = {}
+    for key in tuned_keys:
+        if key not in hparams:
+            raise KeyError(f"Unknown HPARAMS key requested for search space: {key}")
+        spec = hparams[key]
+        dist = spec.get("suggest_distribution") if isinstance(spec, dict) else None
+        if dist is None:
+            raise ValueError(f"No suggest_distribution defined for HPARAMS key: {key}")
+        if isinstance(dist, CategoricalDistribution):
+            search_space[key] = list(dist.choices)
+        else:
+            raise TypeError(
+                f"Unsupported distribution type for HPARAMS key '{key}': {type(dist)}"
+            )
+    return search_space
+
+
 def build_model(
     adata: ad.AnnData,
     adata_atac: ad.AnnData,
     params: TrialParams,
 ) -> CustomNicheCompass:
+    hparam_overrides = _trial_params_to_overrides(params)
+    resolved_hparams = resolve_hparams(hparam_overrides)
+    model_hparams = filter_model_hparams(resolved_hparams)
     return CustomNicheCompass(
         adata,
         adata_atac,
@@ -118,12 +194,8 @@ def build_model(
         gp_targets_categories_mask_key=DEFAULT_GP_TARGETS_CATEGORIES_MASK_KEY,
         gp_sources_mask_key=DEFAULT_GP_SOURCES_MASK_KEY,
         gp_sources_categories_mask_key=DEFAULT_GP_SOURCES_CATEGORIES_MASK_KEY,
-        active_gp_thresh_ratio=0.01,
         latent_key=DEFAULT_LATENT_KEY,
-        conv_layer_encoder="gcnconv", # options: "gatv2conv", "gcnconv"
-        encoder_input_key=params.encoder_input_key,
-        multimodal_layer_series=params.multimodal_layer_series,
-        multimodal_embedding_size=params.multimodal_embedding_size,
+        **model_hparams,
     )
 
 
@@ -152,6 +224,10 @@ def load_cached_targets(cache_dir: str) -> Tuple[ad.AnnData, ad.AnnData]:
     return ad.read_h5ad(target_rna_path), ad.read_h5ad(target_atac_path)
 
 
+def get_hparams(key=None):
+    return CustomNicheCompass.get_hparams(key)
+
+
 def run_trial(
     params: TrialParams,
     cache_dir: str,
@@ -160,42 +236,23 @@ def run_trial(
     optimization_metric: str = "compound_metric",
 ) -> float:
     adata, adata_atac = load_cached_inputs(cache_dir)
+    hparam_overrides = _trial_params_to_overrides(params)
+    resolved_hparams = resolve_hparams(hparam_overrides)
     model = build_model(adata, adata_atac, params)
 
     target_rna, target_atac = load_cached_targets(cache_dir)
 
     # Log only trial params to the child (current) run.
-    mlflow.log_params(asdict(params))
+    mlflow.log_params(hparam_overrides)
+
+    train_kwargs = {key: value for key, value in asdict(train_cfg).items() if value is not None}
+    # Ensure HPARAMS defaults / tuned overrides take precedence over TrainConfig.
+    train_kwargs.update(filter_train_hparams(resolved_hparams))
 
     model.train(
-        n_epochs=train_cfg.n_epochs,
-        n_epochs_all_gps=train_cfg.n_epochs_all_gps,
-        lr=train_cfg.lr,
-        lambda_edge_recon=train_cfg.lambda_edge_recon,
-        lambda_gene_expr_recon=train_cfg.lambda_gene_expr_recon,
-        lambda_chrom_access_recon=train_cfg.lambda_chrom_access_recon,
-        lambda_l1_masked=train_cfg.lambda_l1_masked,
-        lambda_l1_addon=train_cfg.lambda_l1_addon,
-        lambda_multimodal_contrastive_loss=params.lambda_multimodal_contrastive_loss,
-        multimodal_temperature=params.multimodal_temperature,
-        multimodal_contrastive_anneal=params.multimodal_contrastive_anneal,
-        contrastive_logits_pos_ratio=params.contrastive_logits_pos_ratio,
-        contrastive_logits_neg_ratio=params.contrastive_logits_neg_ratio,
-        edge_batch_size=train_cfg.edge_batch_size,
-        node_batch_size=train_cfg.node_batch_size,
-        use_cuda_if_available=train_cfg.use_cuda_if_available,
-        n_sampled_neighbors=train_cfg.n_sampled_neighbors,
+        **train_kwargs,
         target_adata=target_rna,
         target_adata_atac=target_atac,
-        target_holdout_frac=train_cfg.target_holdout_frac,
-        target_holdout_n=train_cfg.target_holdout_n,
-        target_holdout_seed=train_cfg.target_holdout_seed,
-        target_paired_data=train_cfg.target_paired_data,
-        target_encoder_input_key=train_cfg.target_encoder_input_key,
-        target_counts_key=train_cfg.target_counts_key,
-        log_target_multimodal_contrastive=train_cfg.log_target_multimodal_contrastive,
-        use_early_stopping=train_cfg.use_early_stopping,
-        verbose=train_cfg.verbose,
         mlflow_experiment_id=mlflow_experiment_id,
     )
 

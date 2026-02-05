@@ -20,7 +20,7 @@ DEFAULT_TUNED_HPARAM_KEYS = [
 ]
 
 # HPO convenience override for TrainConfig.n_epochs
-HPO_N_EPOCHS = 10
+HPO_N_EPOCHS = 5
 
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"

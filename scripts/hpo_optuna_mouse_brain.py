@@ -202,7 +202,7 @@ def main() -> None:
                 extra={"n_workers": len(gpu_list), "total_trials": total_trials},
             )
             _launch_workers(args, cache_dir, parent_run_id, gpu_list, study_name)
-        #return
+        return
 
     # GridSampler suggests each combination exactly once; study stops when grid is exhausted.
     sampler = optuna.samplers.GridSampler(search_space)

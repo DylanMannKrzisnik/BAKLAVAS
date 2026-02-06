@@ -49,8 +49,8 @@ node_level_split_mask = dataprocessors.node_level_split_mask
 def initialize_dataloaders(node_masked_data: Data,
                            edge_train_data: Optional[Data]=None,
                            edge_val_data: Optional[Data]=None,
-                           edge_batch_size: Optional[int]=64,
-                           node_batch_size: int=64,
+                           edge_batch_size: Optional[int]=None,
+                           node_batch_size: Optional[int]=None,
                            n_direct_neighbors: int=-1,
                            n_hops: int=1,
                            shuffle: bool=True,
@@ -109,6 +109,12 @@ def initialize_dataloaders(node_masked_data: Data,
         reconstruction) objects.
     """
     loader_dict = {}
+    hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+        edge_batch_size=edge_batch_size,
+        node_batch_size=node_batch_size,
+    )
+    edge_batch_size = hparam_kwargs["edge_batch_size"]
+    node_batch_size = hparam_kwargs["node_batch_size"]
 
     loader_kwargs = {
         "pin_memory": pin_memory,
@@ -301,16 +307,15 @@ class CustomNicheCompass(NicheCompass):
                  use_cuda_if_available: bool=True,
                  seed: int=0,
                  **kwargs):
-        # Get defaults from HPARAMS for parameters that have them
-        hparam_defaults = self.__class__._get_hparam_defaults()
-        
-        # Apply HPARAMS defaults if parameter was not provided (None)
-        # Pattern: For any parameter that exists in HPARAMS, use HPARAMS default if None
-        # This allows the function signature to use None as a sentinel value,
-        # which will be replaced by the corresponding HPARAMS default value
-        encoder_input_key = encoder_input_key if encoder_input_key is not None else hparam_defaults.get("encoder_input_key", None)
-        multimodal_embedding_size = multimodal_embedding_size if multimodal_embedding_size is not None else hparam_defaults.get("multimodal_embedding_size", 128)
-        multimodal_layer_series = multimodal_layer_series if multimodal_layer_series is not None else hparam_defaults.get("multimodal_layer_series", False)
+        # Apply HPARAMS defaults for relevant parameters if not provided.
+        hparam_kwargs = self.__class__._apply_hparam_defaults(
+            encoder_input_key=encoder_input_key,
+            multimodal_embedding_size=multimodal_embedding_size,
+            multimodal_layer_series=multimodal_layer_series,
+        )
+        encoder_input_key = hparam_kwargs["encoder_input_key"]
+        multimodal_embedding_size = hparam_kwargs["multimodal_embedding_size"]
+        multimodal_layer_series = hparam_kwargs["multimodal_layer_series"]
         self.adata = adata
         self.adata_atac = adata_atac
         self.counts_key_ = counts_key
@@ -712,11 +717,11 @@ class CustomNicheCompass(NicheCompass):
               lambda_gene_expr_recon: float=300.,
               lambda_chrom_access_recon: float=100.,
               lambda_cat_covariates_contrastive: float=0.,
-              lambda_multimodal_contrastive_loss: float=0.,
-              multimodal_temperature: float=1.0,
-              multimodal_contrastive_anneal: bool=False,
-              contrastive_logits_pos_ratio: float=0.,
-              contrastive_logits_neg_ratio: float=0.,
+              lambda_multimodal_contrastive_loss: Optional[float]=None,
+              multimodal_temperature: Optional[float]=None,
+              multimodal_contrastive_anneal: Optional[bool]=None,
+              contrastive_logits_pos_ratio: Optional[float]=None,
+              contrastive_logits_neg_ratio: Optional[float]=None,
               lambda_group_lasso: float=0.,
               lambda_l1_masked: float=0.,
               l1_targets_categories: Optional[list]=["target_gene"],
@@ -724,7 +729,7 @@ class CustomNicheCompass(NicheCompass):
               lambda_l1_addon: float=30.,
               edge_val_ratio: float=0.1,
               node_val_ratio: float=0.1,
-              edge_batch_size: int=256,
+              edge_batch_size: Optional[int]=None,
               node_batch_size: Optional[int]=None,
               paired_data: bool=True,
               target_adata: Optional[AnnData]=None,
@@ -748,6 +753,30 @@ class CustomNicheCompass(NicheCompass):
         """
         Train the CustomNicheCompass model using CustomTrainer.
         """
+        hparam_kwargs = self.__class__._apply_hparam_defaults(
+            lambda_multimodal_contrastive_loss=lambda_multimodal_contrastive_loss,
+            multimodal_temperature=multimodal_temperature,
+            multimodal_contrastive_anneal=multimodal_contrastive_anneal,
+            contrastive_logits_pos_ratio=contrastive_logits_pos_ratio,
+            contrastive_logits_neg_ratio=contrastive_logits_neg_ratio,
+            edge_batch_size=edge_batch_size,
+            node_batch_size=node_batch_size,
+        )
+        lambda_multimodal_contrastive_loss = hparam_kwargs[
+            "lambda_multimodal_contrastive_loss"
+        ]
+        multimodal_temperature = hparam_kwargs["multimodal_temperature"]
+        multimodal_contrastive_anneal = hparam_kwargs[
+            "multimodal_contrastive_anneal"
+        ]
+        contrastive_logits_pos_ratio = hparam_kwargs[
+            "contrastive_logits_pos_ratio"
+        ]
+        contrastive_logits_neg_ratio = hparam_kwargs[
+            "contrastive_logits_neg_ratio"
+        ]
+        edge_batch_size = hparam_kwargs["edge_batch_size"]
+        node_batch_size = hparam_kwargs["node_batch_size"]
         self.trainer = CustomTrainer(
             adata=self.adata,
             adata_atac=self.adata_atac,
@@ -878,7 +907,7 @@ class CustomNicheCompass(NicheCompass):
             paired_data: bool=True,
             only_active_gps: bool=True,
             return_mu_std: bool=False,
-            node_batch_size: int=64,
+            node_batch_size: Optional[int]=None,
             dtype: type=np.float64,
             separate_modalities: bool=False,
             return_clip_embeddings: bool=False,
@@ -910,6 +939,10 @@ class CustomNicheCompass(NicheCompass):
             adata_atac = self.adata_atac
         if encoder_input_key is None:
             encoder_input_key = self.encoder_input_key_
+        hparam_kwargs = self.__class__._apply_hparam_defaults(
+            node_batch_size=node_batch_size,
+        )
+        node_batch_size = hparam_kwargs["node_batch_size"]
 
         # Create single dataloader containing entire dataset
         data_dict = prepare_data(
@@ -1075,7 +1108,7 @@ class CustomNicheCompass(NicheCompass):
             adata_atac: Optional[AnnData]=None,
             paired_data: bool=True,
             only_active_gps: bool=True,
-            node_batch_size: int=64,
+            node_batch_size: Optional[int]=None,
             encoder_input_key: Optional[str]=None,
             ) -> dict:
         """
@@ -1091,6 +1124,10 @@ class CustomNicheCompass(NicheCompass):
             adata_atac = self.adata_atac
         if encoder_input_key is None:
             encoder_input_key = self.encoder_input_key_
+        hparam_kwargs = self.__class__._apply_hparam_defaults(
+            node_batch_size=node_batch_size,
+        )
+        node_batch_size = hparam_kwargs["node_batch_size"]
 
         # Create single dataloader containing entire dataset
         data_dict = prepare_data(
@@ -1182,6 +1219,10 @@ class CustomTrainer(Trainer):
         target_latent_key: str="nichecompass_latent",
         **kwargs
     ):
+        hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+            encoder_input_key=encoder_input_key,
+        )
+        encoder_input_key = hparam_kwargs["encoder_input_key"]
         self.latent_dtype_ = kwargs.pop("latent_dtype", np.float64)
         super().__init__(*args, **kwargs)
 
@@ -1455,11 +1496,11 @@ class CustomTrainer(Trainer):
               weight_decay: float=0.,
               lambda_edge_recon: Optional[float]=500000.,
               lambda_cat_covariates_contrastive: Optional[float]=0.,
-              lambda_multimodal_contrastive_loss: float=0.,
-              multimodal_temperature: float=1.0,
-              multimodal_contrastive_anneal: bool=False,
-              contrastive_logits_pos_ratio: Optional[float]=0.125,
-              contrastive_logits_neg_ratio: Optional[float]=0.125,
+              lambda_multimodal_contrastive_loss: Optional[float]=None,
+              multimodal_temperature: Optional[float]=None,
+              multimodal_contrastive_anneal: Optional[bool]=None,
+              contrastive_logits_pos_ratio: Optional[float]=None,
+              contrastive_logits_neg_ratio: Optional[float]=None,
               lambda_gene_expr_recon: float=100.,
               lambda_chrom_access_recon: float=10.,
               lambda_group_lasso: float=0.,
@@ -1472,6 +1513,26 @@ class CustomTrainer(Trainer):
         """
         Train the CustomNicheCompass model.
         """
+        hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+            lambda_multimodal_contrastive_loss=lambda_multimodal_contrastive_loss,
+            multimodal_temperature=multimodal_temperature,
+            multimodal_contrastive_anneal=multimodal_contrastive_anneal,
+            contrastive_logits_pos_ratio=contrastive_logits_pos_ratio,
+            contrastive_logits_neg_ratio=contrastive_logits_neg_ratio,
+        )
+        lambda_multimodal_contrastive_loss = hparam_kwargs[
+            "lambda_multimodal_contrastive_loss"
+        ]
+        multimodal_temperature = hparam_kwargs["multimodal_temperature"]
+        multimodal_contrastive_anneal = hparam_kwargs[
+            "multimodal_contrastive_anneal"
+        ]
+        contrastive_logits_pos_ratio = hparam_kwargs[
+            "contrastive_logits_pos_ratio"
+        ]
+        contrastive_logits_neg_ratio = hparam_kwargs[
+            "contrastive_logits_neg_ratio"
+        ]
         self.n_epochs_ = n_epochs
         self.n_epochs_all_gps_ = n_epochs_all_gps
         self.n_epochs_no_edge_recon_ = n_epochs_no_edge_recon
@@ -1961,6 +2022,16 @@ class CustomVGPGAE(VGPGAE):
     implementation while giving you a single place to modify logic.
     """
     def __init__(self, *args, **kwargs):
+        hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+            multimodal_embedding_size=kwargs.get("multimodal_embedding_size"),
+            multimodal_layer_series=kwargs.get("multimodal_layer_series"),
+        )
+        kwargs["multimodal_embedding_size"] = hparam_kwargs[
+            "multimodal_embedding_size"
+        ]
+        kwargs["multimodal_layer_series"] = hparam_kwargs[
+            "multimodal_layer_series"
+        ]
 
         # Remove 'multimodal_embedding_size' from kwargs before passing to super().__init__
         kwargs_no_mme = dict(kwargs)
@@ -3071,13 +3142,29 @@ class CustomVGPGAE(VGPGAE):
              lambda_chrom_access_recon: float=100.,
              lambda_edge_recon: Optional[float]=500000.,
              lambda_cat_covariates_contrastive: Optional[float]=100000.,
-             contrastive_logits_pos_ratio: float=0.125,
-             contrastive_logits_neg_ratio: float=0.,
+             contrastive_logits_pos_ratio: Optional[float]=None,
+             contrastive_logits_neg_ratio: Optional[float]=None,
              edge_recon_active: bool=True,
              cat_covariates_contrastive_active: bool=True,
-             lambda_multimodal_contrastive_loss: float=0.,
-             multimodal_temperature: float=1.0,
+             lambda_multimodal_contrastive_loss: Optional[float]=None,
+             multimodal_temperature: Optional[float]=None,
              multimodal_contrastive_active: bool=True) -> dict:
+        hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+            contrastive_logits_pos_ratio=contrastive_logits_pos_ratio,
+            contrastive_logits_neg_ratio=contrastive_logits_neg_ratio,
+            lambda_multimodal_contrastive_loss=lambda_multimodal_contrastive_loss,
+            multimodal_temperature=multimodal_temperature,
+        )
+        contrastive_logits_pos_ratio = hparam_kwargs[
+            "contrastive_logits_pos_ratio"
+        ]
+        contrastive_logits_neg_ratio = hparam_kwargs[
+            "contrastive_logits_neg_ratio"
+        ]
+        lambda_multimodal_contrastive_loss = hparam_kwargs[
+            "lambda_multimodal_contrastive_loss"
+        ]
+        multimodal_temperature = hparam_kwargs["multimodal_temperature"]
 
         loss_dict = super().loss(
             edge_model_output=edge_model_output,
@@ -3142,7 +3229,11 @@ class CustomVGPGAE(VGPGAE):
     def compute_multimodal_contrastive_loss(
             self,
             similarity_matrix: torch.Tensor,
-            temperature: float=1.0) -> torch.Tensor:
+            temperature: Optional[float]=None) -> torch.Tensor:
+        hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+            multimodal_temperature=temperature,
+        )
+        temperature = hparam_kwargs["multimodal_temperature"]
         temperature = max(temperature, 1e-8)
         logits = similarity_matrix / temperature
         labels = torch.arange(logits.size(0), device=logits.device)
@@ -3172,6 +3263,10 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
                  self_loops: bool=True,
                  cat_covariates_keys: Optional[List[str]]=None,
                  paired_data: bool=True):
+        hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+            encoder_input_key=encoder_input_key,
+        )
+        encoder_input_key = hparam_kwargs["encoder_input_key"]
         input_key = encoder_input_key if encoder_input_key is not None else counts_key
 
         if input_key is None:
@@ -3396,6 +3491,10 @@ def prepare_data(adata: AnnData,
     Project-specific prepare_data function imitating nichecompass.data.dataprocessors.prepare_data().
     """
     data_dict = {}
+    hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+        encoder_input_key=encoder_input_key,
+    )
+    encoder_input_key = hparam_kwargs["encoder_input_key"]
     dataset = CustomSpatialAnnTorchDataset(
         adata=adata,
         adata_atac=adata_atac,

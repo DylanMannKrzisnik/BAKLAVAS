@@ -205,23 +205,103 @@ if not os.path.exists(os.path.join(so_data_folder_path, 'spatial_atac_rna_seq_mo
 #     - CollecTRI (Transcriptional Regulation GPs)
 #     - NicheNet (Combined Interaction GPs)
 
-#%% Load data from cached model
+#%% Load / prepare input data (cached or freshly processed)
+
+# Toggle between using a cached prepared dataset (fast) vs rebuilding from raw
+# source/target files (slow, but reproducible).
+USE_CACHED_DATA = False
+
+# Optional override for cache directory (timestamp folder). If None, uses latest.
+CACHE_DIR_OVERRIDE = None
 
 from scripts.hpo_mouse_brain_utils import (
-    resolve_cache_dir,
-    load_cached_inputs,
-    load_cached_targets,
     resolve_hparams,
     filter_model_hparams,
     filter_train_hparams,
 )
 
-cache_dir = resolve_cache_dir(None)
-adata, adata_atac = load_cached_inputs(cache_dir)
-target_rna, target_atac = load_cached_targets(cache_dir)
+if USE_CACHED_DATA:
+    from scripts.hpo_mouse_brain_utils import (
+        resolve_cache_dir,
+        load_cached_inputs,
+        load_cached_targets,
+    )
 
-source_name = "cached_data"
-target_name = "cached_data"
+    cache_dir = resolve_cache_dir(CACHE_DIR_OVERRIDE)
+    adata, adata_atac = load_cached_inputs(cache_dir)
+    target_rna, target_atac = load_cached_targets(cache_dir)
+
+    source_name = "cached_data"
+    target_name = "cached_data"
+
+else:
+    # Fresh rebuild from raw files.
+    from data_utils import (
+        load_spatial_atac_rna_mouse_brain_source,
+        load_10x_mouse_brain_ad_data,
+        basic_feature_processing_for_alignment,
+        annotate_genes_and_peaks_for_alignment,
+        align_source_target_multimodal_by_overlap,
+        finalize_target_after_alignment,
+        add_pseudocount_layers,
+    )
+    
+    adata, adata_atac, source_assembly, source_name = load_spatial_atac_rna_mouse_brain_source(
+        so_data_folder_path=so_data_folder_path,
+        dataset=dataset,
+        cell_type_key=cell_type_key,
+        spatial_key=spatial_key,
+        n_neighbors=n_neighbors,
+        adj_key=adj_key,
+    )
+    target_rna, target_atac, target_assembly, target_name = load_10x_mouse_brain_ad_data()
+
+    #%%
+    # Match the previously inlined alignment preprocessing
+    target_rna.var_names = target_rna.var_names.str.split(".").str[0]
+    target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep="first")]
+
+    if "peak" in target_atac.var.columns and not set(["chrom", "chromStart", "chromEnd"]).issubset(target_atac.var.columns):
+        target_atac.var[["chrom", "chromStart", "chromEnd"]] = target_atac.var["peak"].str.split(":|-").tolist()
+
+    adata, adata_atac, target_rna, target_atac = basic_feature_processing_for_alignment(
+        adata=adata,
+        adata_atac=adata_atac,
+        target_rna=target_rna,
+        target_atac=target_atac,
+    )
+
+    # Add genomic coordinates required for peak-overlap alignment
+    adata, adata_atac = annotate_genes_and_peaks_for_alignment(
+        adata=adata, adata_atac=adata_atac, gtf_file_path=gtf_file_path
+    )
+
+
+    adata, adata_atac, target_rna, target_atac = align_source_target_multimodal_by_overlap(
+        adata=adata,
+        adata_atac=adata_atac,
+        target_rna=target_rna,
+        target_atac=target_atac,
+        source_name=source_name,
+        target_name=target_name,
+        source_assembly=source_assembly,
+        target_assembly=target_assembly,
+    )
+
+    # Ensure target data exposes `spatial_connectivities` expected by NicheCompass
+    target_rna, target_atac = finalize_target_after_alignment(
+        adata=adata,
+        adata_atac=adata_atac,
+        target_rna=target_rna,
+        target_atac=target_atac,
+        adj_type="knn",
+    )
+
+    # Ensure ATAC modality has the spatial connectivities expected by the model.
+    if adj_key in adata.obsp:
+        adata_atac.obsp[adj_key] = adata.obsp[adj_key].copy()
+
+    add_pseudocount_layers(adata, adata_atac, target_rna, target_atac)
 
 #%% 2.1 Create Prior Knowledge Gene Program (GP) Mask
 

@@ -217,6 +217,27 @@ class CustomNicheCompass(NicheCompass):
             return copy.deepcopy(cls.HPARAMS[key])
         return copy.deepcopy(cls.HPARAMS)
 
+    @classmethod
+    def _get_hparam_defaults(cls):
+        """Extract default values from HPARAMS dictionary."""
+        return {key: config['default'] for key, config in cls.HPARAMS.items() 
+                if 'default' in config}
+    
+    @classmethod
+    def _apply_hparam_defaults(cls, **kwargs):
+        """
+        Apply HPARAMS defaults to kwargs.
+        Only applies defaults for keys that exist in HPARAMS and have None values.
+        """
+        hparam_defaults = cls._get_hparam_defaults()
+        result = {}
+        for key, value in kwargs.items():
+            if key in hparam_defaults and value is None:
+                result[key] = hparam_defaults[key]
+            else:
+                result[key] = value
+        return result
+
     def __init__(self,
                  adata: AnnData,
                  adata_atac: Optional[AnnData]=None,
@@ -273,13 +294,23 @@ class CustomNicheCompass(NicheCompass):
                  dropout_rate_graph_decoder: float=0.,
                  cat_covariates_cats: Optional[List[List]]=None,
                  n_addon_gp: int=100,
-                 multimodal_embedding_size: int=128,
-                 multimodal_layer_series: bool=False,
+                 multimodal_embedding_size: Optional[int]=None,
+                 multimodal_layer_series: Optional[bool]=None,
                  cat_covariates_embeds_nums: Optional[List[int]]=None,
                  include_edge_kl_loss: bool=True,
                  use_cuda_if_available: bool=True,
                  seed: int=0,
                  **kwargs):
+        # Get defaults from HPARAMS for parameters that have them
+        hparam_defaults = self.__class__._get_hparam_defaults()
+        
+        # Apply HPARAMS defaults if parameter was not provided (None)
+        # Pattern: For any parameter that exists in HPARAMS, use HPARAMS default if None
+        # This allows the function signature to use None as a sentinel value,
+        # which will be replaced by the corresponding HPARAMS default value
+        encoder_input_key = encoder_input_key if encoder_input_key is not None else hparam_defaults.get("encoder_input_key", None)
+        multimodal_embedding_size = multimodal_embedding_size if multimodal_embedding_size is not None else hparam_defaults.get("multimodal_embedding_size", 128)
+        multimodal_layer_series = multimodal_layer_series if multimodal_layer_series is not None else hparam_defaults.get("multimodal_layer_series", False)
         self.adata = adata
         self.adata_atac = adata_atac
         self.counts_key_ = counts_key

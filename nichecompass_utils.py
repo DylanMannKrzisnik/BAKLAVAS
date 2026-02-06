@@ -181,7 +181,7 @@ class CustomNicheCompass(NicheCompass):
         },
         'multimodal_embedding_size': {
             'suggest_distribution': CategoricalDistribution(choices=[32, 64, 128]),
-            'default': 64
+            'default': 128
         },
         "encoder_input_key": {
             "suggest_distribution": CategoricalDistribution(choices=["counts", "pseudocounts"]),
@@ -193,7 +193,7 @@ class CustomNicheCompass(NicheCompass):
         },
         "multimodal_temperature": {
             "suggest_distribution": CategoricalDistribution(choices=[0.1, 0.5, 1.0, 2.5]),
-            "default": 0.1
+            "default": 2.5
         },
         "multimodal_contrastive_anneal": {
             "suggest_distribution": CategoricalDistribution(choices=[False, True]),
@@ -205,7 +205,7 @@ class CustomNicheCompass(NicheCompass):
         },
         "contrastive_logits_neg_ratio": {
             "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.125, 0.25]),
-            "default": 0.0
+            "default": 0.25
         },
         "node_batch_size": {
             "suggest_distribution": CategoricalDistribution(choices=[64, 128, 256, 512]),

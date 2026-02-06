@@ -1,9 +1,11 @@
 #%%
 import argparse
+import io
 import os
 import subprocess
 import sys
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -85,6 +87,105 @@ def parse_args(notebook: bool = False) -> argparse.Namespace:
         return parser.parse_known_args()[0]
     else:
         return parser.parse_args()
+
+
+class TeeLogger:
+    """Capture stdout/stderr to both terminal and a buffer."""
+    def __init__(self, original_stream):
+        self.original_stream = original_stream
+        self.buffer = io.StringIO()
+    
+    def write(self, data):
+        # Write to original stream (terminal)
+        self.original_stream.write(data)
+        self.original_stream.flush()
+        # Write to buffer
+        self.buffer.write(data)
+    
+    def flush(self):
+        self.original_stream.flush()
+        self.buffer.flush()
+    
+    def get_output(self):
+        return self.buffer.getvalue()
+
+
+def _dump_hpo_log_to_file(
+    study: Any,  # optuna.Study
+    stdout_output: str,
+    stderr_output: str,
+    log_file_path: str,
+) -> None:
+    """
+    Dump comprehensive HPO log including study statistics, all trials, and terminal output.
+    
+    Args:
+        study: Optuna study object
+        stdout_output: Captured stdout output
+        stderr_output: Captured stderr output
+        log_file_path: Path to write the log file
+    """
+    import optuna
+    
+    with open(log_file_path, "w") as f:
+        f.write(f"Optuna Study: {study.study_name}\n")
+        f.write(f"=" * 80 + "\n\n")
+        
+        # Study summary
+        f.write(f"Study Statistics:\n")
+        f.write(f"  Number of trials: {len(study.trials)}\n")
+        f.write(f"  Number of complete trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])}\n")
+        f.write(f"  Number of pruned trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])}\n")
+        f.write(f"  Number of failed trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])}\n")
+        
+        if study.best_trial:
+            f.write(f"\nBest Trial:\n")
+            f.write(f"  Trial number: {study.best_trial.number}\n")
+            f.write(f"  Value: {study.best_trial.value}\n")
+            f.write(f"  Params:\n")
+            for key, value in study.best_trial.params.items():
+                f.write(f"    {key}: {value}\n")
+        
+        f.write(f"\n" + "=" * 80 + "\n")
+        f.write(f"All Trials:\n")
+        f.write(f"=" * 80 + "\n\n")
+        
+        # All trials
+        for trial in study.trials:
+            f.write(f"Trial {trial.number}:\n")
+            f.write(f"  State: {trial.state.name}\n")
+            if trial.value is not None:
+                f.write(f"  Value: {trial.value}\n")
+            f.write(f"  Params:\n")
+            for key, value in trial.params.items():
+                f.write(f"    {key}: {value}\n")
+            if trial.user_attrs:
+                f.write(f"  User attributes:\n")
+                for key, value in trial.user_attrs.items():
+                    f.write(f"    {key}: {value}\n")
+            if trial.system_attrs:
+                f.write(f"  System attributes:\n")
+                for key, value in trial.system_attrs.items():
+                    f.write(f"    {key}: {value}\n")
+            f.write(f"\n")
+        
+        # Terminal output
+        f.write(f"\n" + "=" * 80 + "\n")
+        f.write(f"Terminal Output (stdout):\n")
+        f.write(f"=" * 80 + "\n\n")
+        if stdout_output:
+            f.write(stdout_output)
+        else:
+            f.write("(no stdout output captured)\n")
+        
+        f.write(f"\n" + "=" * 80 + "\n")
+        f.write(f"Terminal Output (stderr):\n")
+        f.write(f"=" * 80 + "\n\n")
+        if stderr_output:
+            f.write(stderr_output)
+        else:
+            f.write("(no stderr output captured)\n")
+
 
 #%%
 def main() -> None:
@@ -254,8 +355,24 @@ def main() -> None:
             )
 
     #%%
-    # catch=(Exception,) prevents the study from stopping if a trial fails (e.g. NaNs).
-    study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,))
+    # Capture stdout/stderr during optimization
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    stdout_logger = TeeLogger(original_stdout)
+    stderr_logger = TeeLogger(original_stderr)
+    
+    try:
+        sys.stdout = stdout_logger
+        sys.stderr = stderr_logger
+        
+        # catch=(Exception,) prevents the study from stopping if a trial fails (e.g. NaNs).
+        study.optimize(objective, n_trials=args.n_trials_per_gpu, catch=(Exception,))
+    finally:
+        # Restore original streams
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        stdout_output = stdout_logger.get_output()
+        stderr_output = stderr_logger.get_output()
 
     # Calculate importance
     try:
@@ -263,6 +380,11 @@ def main() -> None:
     except Exception as e:
         print(f"Error logging parameter importance: {e}")
 
+    # Dump log into file and add to mlflow study
+    log_file_path = os.path.join(mlflow_artifact_dir, "hpo_log.txt")
+    _dump_hpo_log_to_file(study, stdout_output, stderr_output, log_file_path)
+    mlflow.log_artifact(log_file_path, "hpo_log.txt")
+    
     if not args.parent_run_id:
         mlflow.end_run()
 

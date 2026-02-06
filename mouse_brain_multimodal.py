@@ -806,13 +806,10 @@ model = CustomNicheCompass(
 # Keep MLflow in ONE place so "mlflow ui" consistently shows all runs.
 # Default: directory above the repo (i.e., BAKLAVA_base), but can be overridden
 # via MLFLOW_BASE_DIR env var (same convention as scripts/hpo_optuna_mouse_brain.py).
-default_base_dir = str(Path(__file__).resolve().parents[1])
-mlflow_base_dir = os.environ.get("MLFLOW_BASE_DIR") or default_base_dir
+mlflow_base_dir = os.environ.get("MLFLOW_BASE_DIR")
 mlflow_base_dir = os.path.abspath(mlflow_base_dir)
 
-mlflow_tracking_dir = os.path.join(mlflow_base_dir, "mlflow_tracking")
-os.makedirs(mlflow_tracking_dir, exist_ok=True)
-mlflow_db_path = os.path.join(mlflow_tracking_dir, "mlflow.db")
+mlflow_db_path = os.path.join(mlflow_base_dir, "mlflow.db")
 mlflow.set_tracking_uri(f"sqlite:///{mlflow_db_path}")
 print(f"MLflow backend-store-uri: sqlite:////{mlflow_db_path.lstrip('/')}")
 
@@ -858,7 +855,7 @@ with mlflow.start_run(run_name=current_timestamp):
         "lambda_l1_masked": lambda_l1_masked,
         "lambda_l1_addon": lambda_l1_addon,
         "edge_batch_size": 64,
-        "node_batch_size": 64,
+        "node_batch_size": 128,
         "use_cuda_if_available": use_cuda_if_available,
         "n_sampled_neighbors": n_sampled_neighbors,
         "target_adata": target_rna,

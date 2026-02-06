@@ -174,8 +174,8 @@ class CustomNicheCompass(NicheCompass):
             'default': False
         },
         'multimodal_embedding_size': {
-            'suggest_distribution': CategoricalDistribution(choices=[64, 128, 256, 512]),
-            'default': 128
+            'suggest_distribution': CategoricalDistribution(choices=[32, 64, 128]),
+            'default': 64
         },
         "encoder_input_key": {
             "suggest_distribution": CategoricalDistribution(choices=["counts", "pseudocounts"]),
@@ -183,10 +183,10 @@ class CustomNicheCompass(NicheCompass):
         },
         "lambda_multimodal_contrastive_loss": {
             "suggest_distribution": CategoricalDistribution(choices=[1000.0, 10000.0, 100000.0]),
-            "default": 10.0
+            "default": 10000.0
         },
         "multimodal_temperature": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.1, 0.2, 0.5, 1.0]),
+            "suggest_distribution": CategoricalDistribution(choices=[0.1, 0.5, 1.0, 2.5]),
             "default": 0.1
         },
         "multimodal_contrastive_anneal": {
@@ -202,12 +202,12 @@ class CustomNicheCompass(NicheCompass):
             "default": 0.0
         },
         "node_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[256, 512, 800]),
-            "default": 512
+            "suggest_distribution": CategoricalDistribution(choices=[64, 128, 256, 512]),
+            "default": 128
         },
         "edge_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[64, 128, 256]),
-            "default": 256
+            "suggest_distribution": CategoricalDistribution(choices=[64, 128, 256, 512]),
+            "default": 64
         },
     }
 
@@ -266,7 +266,7 @@ class CustomNicheCompass(NicheCompass):
                  n_fc_layers_encoder: int=1,
                  n_layers_encoder: int=1,
                  n_hidden_encoder: Optional[int]=None,
-                 conv_layer_encoder: Literal["gcnconv", "gatv2conv"]="gatv2conv",
+                 conv_layer_encoder: Literal["gcnconv", "gatv2conv"]="gcnconv",
                  encoder_n_attention_heads: Optional[int]=4,
                  encoder_use_bn: bool=False,
                  dropout_rate_encoder: float=0.,

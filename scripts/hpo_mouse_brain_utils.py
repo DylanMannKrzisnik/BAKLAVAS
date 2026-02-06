@@ -11,7 +11,6 @@ from nichecompass_utils import CustomNicheCompass
 
 DEFAULT_TUNED_HPARAM_KEYS = [
     "encoder_input_key",
-    "lambda_multimodal_contrastive_loss",
     "multimodal_temperature",
     "contrastive_logits_pos_ratio",
     "contrastive_logits_neg_ratio",
@@ -20,7 +19,7 @@ DEFAULT_TUNED_HPARAM_KEYS = [
 ]
 
 # HPO convenience override for TrainConfig.n_epochs
-HPO_N_EPOCHS = 200
+HPO_N_EPOCHS = 60
 
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"

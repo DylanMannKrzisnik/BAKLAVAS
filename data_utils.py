@@ -14,6 +14,7 @@ __all__ = [
     "load_10x_mouse_brain_ad_data",
     "basic_feature_processing_for_alignment",
     "annotate_genes_and_peaks_for_alignment",
+    "filter_spatially_variable_features",
     "align_source_target_multimodal_by_overlap",
     "finalize_target_after_alignment",
     "add_pseudocount_layers",
@@ -358,6 +359,105 @@ def annotate_genes_and_peaks_for_alignment(
     from nichecompass.utils import get_gene_annotations
 
     return get_gene_annotations(adata=adata, adata_atac=adata_atac, gtf_file_path=gtf_file_path)
+
+
+def filter_spatially_variable_features(
+    adata: ad.AnnData,
+    adata_atac: ad.AnnData,
+    *,
+    combined_gp_dict: dict,
+    filter_genes: bool = True,
+    filter_peaks: bool = True,
+    n_svg: int = 3000,
+    n_svp: int = 15000,
+    min_cell_gene_thresh_ratio: float = 0.005,
+    min_cell_peak_thresh_ratio: float = 0.005,
+    adj_key: str = "spatial_connectivities",
+    verbose: bool = True,
+) -> Tuple[ad.AnnData, ad.AnnData]:
+    """Filter source data to keep only spatially variable genes and peaks.
+    
+    This exactly mirrors the filtering logic from the tutorial block (section 2.3).
+    
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Source RNA data with spatial information
+    adata_atac : ad.AnnData
+        Source ATAC data
+    combined_gp_dict : dict
+        Combined gene program dictionary
+    filter_genes : bool
+        Whether to filter genes to spatially variable ones
+    filter_peaks : bool
+        Whether to filter peaks to spatially variable ones
+    n_svg : int
+        Number of spatially variable genes to keep
+    n_svp : int
+        Number of spatially variable peaks to keep
+    min_cell_gene_thresh_ratio : float
+        Minimum fraction of cells expressing a gene
+    min_cell_peak_thresh_ratio : float
+        Minimum fraction of cells with peak accessibility
+    adj_key : str
+        Key for spatial adjacency matrix
+    verbose : bool
+        Print progress messages
+        
+    Returns
+    -------
+    (adata, adata_atac) : Tuple[ad.AnnData, ad.AnnData]
+        Filtered source RNA and ATAC data
+    """
+    
+    import squidpy as sq
+    from nichecompass.utils import get_unique_genes_from_gp_dict
+    
+    if filter_genes:
+        print("Filtering genes...")
+        # Filter genes and only keep ligand, receptor, enzyme, sensor, and
+        # the 'n_svg' spatially variable genes
+        gp_dict_genes = get_unique_genes_from_gp_dict(
+            gp_dict=combined_gp_dict,
+            retrieved_gene_entities=["sources", "targets"])
+        print(f"Starting with {len(adata.var_names)} genes.")
+        min_cells = int(adata.shape[0] * min_cell_gene_thresh_ratio)
+        sc.pp.filter_genes(adata, min_cells=min_cells)
+        print(f"Keeping {len(adata.var_names)} genes after filtering genes with "
+              f"counts in less than {int(adata.shape[0] * min_cell_gene_thresh_ratio)} cells.")
+        
+        # Identify spatially variable genes
+        sq.gr.spatial_autocorr(adata, mode="moran", genes=adata.var_names)
+        svg_genes = adata.uns["moranI"].index[:n_svg].tolist()
+        adata.var["spatially_variable"] = adata.var_names.isin(svg_genes)
+        adata = adata[:, adata.var["spatially_variable"] == True]
+        print(f"Keeping {len(adata.var_names)} spatially variable genes.")
+        
+    if filter_peaks:
+        print("\nFiltering peaks...")
+        print(f"Starting with {len(adata_atac.var_names)} peaks.")
+        # Filter out peaks that are rarely detected to reduce GPU footprint of model
+        min_cells = int(adata_atac.shape[0] * min_cell_peak_thresh_ratio)
+        sc.pp.filter_genes(adata_atac, min_cells=min_cells)
+        print(f"Keeping {len(adata_atac.var_names)} peaks after filtering peaks with "
+              f"counts in less than {int(adata_atac.shape[0] * min_cell_peak_thresh_ratio)} cells.")
+        
+        # Filter spatially variable peaks
+        adata_atac.obsp["spatial_connectivities"] = adata.obsp["spatial_connectivities"]
+        adata_atac.obsp["spatial_distances"] = adata.obsp["spatial_distances"]
+
+        sq.gr.spatial_autocorr(adata_atac,
+                            mode="moran",
+                            genes=adata_atac.var_names)
+        sv_peaks = adata_atac.uns["moranI"].index[:n_svp].tolist()
+        adata_atac.var["spatially_variable"] = adata_atac.var_names.isin(sv_peaks)
+        adata_atac = adata_atac[:, adata_atac.var["spatially_variable"] == True]
+        print(f"Keeping {len(adata_atac.var_names)} peaks after filtering spatially variable "
+            f"peaks.")
+
+    print("\n WARNING: genes currently not filtered by GP, 'gp_dict_genes' not used.")
+    
+    return adata, adata_atac
 
 
 def build_combined_gp_dict_mouse_brain(

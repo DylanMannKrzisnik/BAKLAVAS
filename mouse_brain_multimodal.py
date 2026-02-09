@@ -241,6 +241,7 @@ else:
         load_10x_mouse_brain_ad_data,
         basic_feature_processing_for_alignment,
         annotate_genes_and_peaks_for_alignment,
+        filter_spatially_variable_features,
         align_source_target_multimodal_by_overlap,
         build_combined_gp_dict_mouse_brain,
         rebuild_nichecompass_multimodal_masks,
@@ -259,6 +260,40 @@ else:
     target_rna, target_atac, target_assembly, target_name = load_10x_mouse_brain_ad_data()
 
     #%%
+    # Build prior GPs (needed for filtering - tutorial section 2.1)
+    combined_gp_dict = build_combined_gp_dict_mouse_brain(
+        species=species,
+        omnipath_lr_network_file_path=omnipath_lr_network_file_path,
+        nichenet_lr_network_file_path=nichenet_lr_network_file_path,
+        nichenet_ligand_target_matrix_file_path=nichenet_ligand_target_matrix_file_path,
+        mebocost_enzyme_sensor_interactions_folder_path=mebocost_enzyme_sensor_interactions_folder_path,
+        collectri_tf_network_file_path=collectri_tf_network_file_path,
+        gene_orthologs_mapping_file_path=gene_orthologs_mapping_file_path,
+        verbose=True,
+    )
+
+    #%%
+    # Filter source data to spatially variable genes/peaks (tutorial section 2.3)
+    adata, adata_atac = filter_spatially_variable_features(
+        adata=adata,
+        adata_atac=adata_atac,
+        combined_gp_dict=combined_gp_dict,
+        filter_genes=filter_genes,
+        filter_peaks=filter_peaks,
+        n_svg=n_svg,
+        n_svp=n_svp,
+        min_cell_gene_thresh_ratio=min_cell_gene_thresh_ratio,
+        min_cell_peak_thresh_ratio=min_cell_peak_thresh_ratio,
+        adj_key=adj_key,
+        verbose=True,
+    )
+
+    # Add genomic coordinates required for peak-overlap alignment (tutorial section 2.4)
+    adata, adata_atac = annotate_genes_and_peaks_for_alignment(
+        adata=adata, adata_atac=adata_atac, gtf_file_path=gtf_file_path
+    )
+
+    #%%
     # Match the previously inlined alignment preprocessing
     target_rna.var_names = target_rna.var_names.str.split(".").str[0]
     target_rna = target_rna[:, ~target_rna.var_names.duplicated(keep="first")]
@@ -271,11 +306,6 @@ else:
         adata_atac=adata_atac,
         target_rna=target_rna,
         target_atac=target_atac,
-    )
-
-    # Add genomic coordinates required for peak-overlap alignment
-    adata, adata_atac = annotate_genes_and_peaks_for_alignment(
-        adata=adata, adata_atac=adata_atac, gtf_file_path=gtf_file_path
     )
 
 
@@ -299,18 +329,7 @@ else:
         adj_type="knn",
     )
 
-    # Build prior GPs and rebuild all required NicheCompass masks (GP + chromatin accessibility)
-    combined_gp_dict = build_combined_gp_dict_mouse_brain(
-        species=species,
-        omnipath_lr_network_file_path=omnipath_lr_network_file_path,
-        nichenet_lr_network_file_path=nichenet_lr_network_file_path,
-        nichenet_ligand_target_matrix_file_path=nichenet_ligand_target_matrix_file_path,
-        mebocost_enzyme_sensor_interactions_folder_path=mebocost_enzyme_sensor_interactions_folder_path,
-        collectri_tf_network_file_path=collectri_tf_network_file_path,
-        gene_orthologs_mapping_file_path=gene_orthologs_mapping_file_path,
-        verbose=True,
-    )
-
+    # Rebuild all required NicheCompass masks (GP + chromatin accessibility) on aligned feature space
     adata, adata_atac, target_rna, target_atac = rebuild_nichecompass_multimodal_masks(
         adata=adata,
         adata_atac=adata_atac,

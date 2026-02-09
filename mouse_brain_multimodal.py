@@ -1640,7 +1640,7 @@ z_source_rna, _, z_source_atac, _, clip_embeddings_rna, clip_embeddings_atac = m
     counts_key="counts",
     adj_key="spatial_connectivities",
     cat_covariates_keys=None,
-    only_active_gps=True,
+    only_active_gps=False,
     return_mu_std=True,
     separate_modalities=True,
     return_clip_embeddings=True,
@@ -1698,7 +1698,7 @@ mu_target_rna, _, mu_target_atac, _, clip_embeddings_rna, clip_embeddings_atac =
                 counts_key="counts",
                 adj_key="spatial_connectivities",
                 cat_covariates_keys=None,
-                only_active_gps=True,
+                only_active_gps=False,
                 return_mu_std=True,
                 separate_modalities=True,
                 return_clip_embeddings=True,
@@ -1746,7 +1746,8 @@ sc.pp.pca(clip_embeddings_adata, n_comps=50)
 sc.pp.neighbors(clip_embeddings_adata, use_rep='X_pca', n_neighbors=100)
 sc.tl.leiden(clip_embeddings_adata, resolution=0.5) # also leiden clustering in identify_niches()
 sc.tl.umap(clip_embeddings_adata, min_dist=0.3)
-sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden', 'Main_cluster_name'], ncols=3, wspace=0.1, size=25)
+#sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden', 'Main_cluster_name'], ncols=3, wspace=0.1, size=25)
+sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden'], ncols=3, wspace=0.1, size=25)
 
 sc.tl.embedding_density(clip_embeddings_adata, groupby='modality')
 sc.pl.embedding_density(clip_embeddings_adata, key='umap_density_modality')

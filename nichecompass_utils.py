@@ -46,6 +46,22 @@ edge_level_split = dataprocessors.edge_level_split
 node_level_split_mask = dataprocessors.node_level_split_mask
 
 
+def _get_module_out_features(module: torch.nn.Module) -> Optional[int]:
+    """
+    Extract output feature size from a module (e.g. Sequential or Linear).
+
+    For nn.Sequential, returns the out_features of the last nn.Linear.
+    For nn.Linear, returns out_features. For nn.Identity, returns None.
+    """
+    if isinstance(module, torch.nn.Linear):
+        return module.out_features
+    if isinstance(module, torch.nn.Sequential):
+        for layer in reversed(module):
+            if isinstance(layer, torch.nn.Linear):
+                return layer.out_features
+    return None
+
+
 def initialize_dataloaders(node_masked_data: Data,
                            edge_train_data: Optional[Data]=None,
                            edge_val_data: Optional[Data]=None,
@@ -988,7 +1004,10 @@ class CustomNicheCompass(NicheCompass):
         
         if separate_modalities:
             if return_clip_embeddings:
-                clip_dim = int(getattr(self.model.multimodal_layer, "out_features"))
+                clip_dim = int(
+                    _get_module_out_features(self.model.multimodal_layer)
+                    or n_gps
+                )
                 clip_embeddings_rna = np.empty(shape=(n_obs, clip_dim), dtype=dtype)
                 clip_embeddings_atac = np.empty(shape=(n_obs, clip_dim), dtype=dtype)
             if return_mu_std:

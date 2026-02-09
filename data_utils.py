@@ -358,3 +358,174 @@ def annotate_genes_and_peaks_for_alignment(
     from nichecompass.utils import get_gene_annotations
 
     return get_gene_annotations(adata=adata, adata_atac=adata_atac, gtf_file_path=gtf_file_path)
+
+
+def build_combined_gp_dict_mouse_brain(
+    *,
+    species: str,
+    omnipath_lr_network_file_path: str,
+    nichenet_lr_network_file_path: str,
+    nichenet_ligand_target_matrix_file_path: str,
+    mebocost_enzyme_sensor_interactions_folder_path: str,
+    collectri_tf_network_file_path: str,
+    gene_orthologs_mapping_file_path: str,
+    nichenet_version: str = "v2",
+    keep_target_genes_ratio: float = 1.0,
+    max_n_target_genes_per_gp: int = 250,
+    verbose: bool = True,
+):
+    """Build the default combined GP dictionary used in the mouse brain tutorial."""
+
+    from nichecompass.utils import (
+        extract_gp_dict_from_collectri_tf_network,
+        extract_gp_dict_from_mebocost_ms_interactions,
+        extract_gp_dict_from_nichenet_lrt_interactions,
+        extract_gp_dict_from_omnipath_lr_interactions,
+        filter_and_combine_gp_dict_gps_v2,
+    )
+
+    omnipath_gp_dict = extract_gp_dict_from_omnipath_lr_interactions(
+        species=species,
+        load_from_disk=False,
+        save_to_disk=True,
+        lr_network_file_path=omnipath_lr_network_file_path,
+        gene_orthologs_mapping_file_path=gene_orthologs_mapping_file_path,
+        plot_gp_gene_count_distributions=False,
+    )
+
+    # NicheNet supports load-from-disk if the prepared CSV is already present
+    save_load_kwargs = {
+        "lr_network_file_path": nichenet_lr_network_file_path,
+        "ligand_target_matrix_file_path": nichenet_ligand_target_matrix_file_path,
+        "gene_orthologs_mapping_file_path": gene_orthologs_mapping_file_path,
+    }
+    if os.path.exists(nichenet_lr_network_file_path) and os.path.exists(
+        nichenet_ligand_target_matrix_file_path
+    ):
+        save_load_kwargs.update({"load_from_disk": True, "save_to_disk": False})
+    else:
+        save_load_kwargs.update({"load_from_disk": False, "save_to_disk": True})
+
+    nichenet_gp_dict = extract_gp_dict_from_nichenet_lrt_interactions(
+        species=species,
+        version=nichenet_version,
+        keep_target_genes_ratio=keep_target_genes_ratio,
+        max_n_target_genes_per_gp=max_n_target_genes_per_gp,
+        plot_gp_gene_count_distributions=False,
+        **save_load_kwargs,
+    )
+
+    mebocost_gp_dict = extract_gp_dict_from_mebocost_ms_interactions(
+        dir_path=mebocost_enzyme_sensor_interactions_folder_path,
+        species=species,
+        plot_gp_gene_count_distributions=False,
+    )
+
+    collectri_gp_dict = extract_gp_dict_from_collectri_tf_network(
+        species=species,
+        tf_network_file_path=collectri_tf_network_file_path,
+        load_from_disk=False,
+        save_to_disk=True,
+        plot_gp_gene_count_distributions=False,
+    )
+
+    gp_dicts = [
+        omnipath_gp_dict,
+        nichenet_gp_dict,
+        mebocost_gp_dict,
+        collectri_gp_dict,
+    ]
+    combined_gp_dict = filter_and_combine_gp_dict_gps_v2(gp_dicts, verbose=verbose)
+
+    if verbose:
+        print(f"Number of gene programs after filtering and combining: {len(combined_gp_dict)}")
+
+    return combined_gp_dict
+
+
+def rebuild_nichecompass_multimodal_masks(
+    *,
+    adata: ad.AnnData,
+    adata_atac: ad.AnnData,
+    target_rna: ad.AnnData,
+    target_atac: ad.AnnData,
+    combined_gp_dict: dict,
+    gp_targets_mask_key: str,
+    gp_targets_categories_mask_key: str,
+    gp_sources_mask_key: str,
+    gp_sources_categories_mask_key: str,
+    gp_names_key: str,
+    adj_key: str = "spatial_connectivities",
+    filter_peaks_based_on_genes: bool = True,
+) -> Tuple[ad.AnnData, ad.AnnData, ad.AnnData, ad.AnnData]:
+    """Rebuild GP + chromatin-accessibility masks after alignment.
+
+    This mirrors the previously inlined tutorial block that was commented out.
+    """
+
+    from nichecompass.utils import (
+        add_gps_from_gp_dict_to_adata,
+        add_multimodal_mask_to_adata,
+        generate_multimodal_mapping_dict,
+    )
+
+    # Defensive cleanup (idempotent)
+    for _k in [
+        gp_targets_mask_key,
+        gp_targets_categories_mask_key,
+        gp_sources_mask_key,
+        gp_sources_categories_mask_key,
+    ]:
+        if _k in adata.varm:
+            del adata.varm[_k]
+    if gp_names_key in adata.uns:
+        del adata.uns[gp_names_key]
+
+    add_gps_from_gp_dict_to_adata(
+        gp_dict=combined_gp_dict,
+        adata=adata,
+        gp_targets_mask_key=gp_targets_mask_key,
+        gp_targets_categories_mask_key=gp_targets_categories_mask_key,
+        gp_sources_mask_key=gp_sources_mask_key,
+        gp_sources_categories_mask_key=gp_sources_categories_mask_key,
+        gp_names_key=gp_names_key,
+        min_genes_per_gp=2,
+        min_source_genes_per_gp=0,
+        min_target_genes_per_gp=1,
+        max_genes_per_gp=None,
+        max_source_genes_per_gp=None,
+        max_target_genes_per_gp=None,
+        plot_gp_gene_count_distributions=False,
+    )
+
+    gene_peak_mapping_dict = generate_multimodal_mapping_dict(adata=adata, adata_atac=adata_atac)
+
+    adata, adata_atac = add_multimodal_mask_to_adata(
+        adata=adata,
+        adata_atac=adata_atac,
+        gene_peak_mapping_dict=gene_peak_mapping_dict,
+        filter_peaks_based_on_genes=filter_peaks_based_on_genes,
+    )
+
+    if filter_peaks_based_on_genes:
+        remaining_peaks = target_atac.var_names.isin(adata_atac.var_names)
+        target_atac = target_atac[:, remaining_peaks]
+
+    # Keep connectivities consistent across modalities
+    if adj_key in adata.obsp:
+        adata_atac.obsp[adj_key] = adata.obsp[adj_key].copy()
+
+    # Sanity checks: aligned feature spaces must match
+    assert adata.var_names.equals(target_rna.var_names), "RNA data must have the same gene names"
+    assert adata_atac.var_names.equals(target_atac.var_names), "ATAC data must have the same peak names"
+
+    # Copy masks/indices to target and set target spatial_connectivities
+    target_rna, target_atac = finalize_target_after_alignment(
+        adata=adata,
+        adata_atac=adata_atac,
+        target_rna=target_rna,
+        target_atac=target_atac,
+        adj_type="knn",
+    )
+
+    return adata, adata_atac, target_rna, target_atac

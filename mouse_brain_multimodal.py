@@ -242,6 +242,8 @@ else:
         basic_feature_processing_for_alignment,
         annotate_genes_and_peaks_for_alignment,
         align_source_target_multimodal_by_overlap,
+        build_combined_gp_dict_mouse_brain,
+        rebuild_nichecompass_multimodal_masks,
         finalize_target_after_alignment,
         add_pseudocount_layers,
     )
@@ -295,6 +297,33 @@ else:
         target_rna=target_rna,
         target_atac=target_atac,
         adj_type="knn",
+    )
+
+    # Build prior GPs and rebuild all required NicheCompass masks (GP + chromatin accessibility)
+    combined_gp_dict = build_combined_gp_dict_mouse_brain(
+        species=species,
+        omnipath_lr_network_file_path=omnipath_lr_network_file_path,
+        nichenet_lr_network_file_path=nichenet_lr_network_file_path,
+        nichenet_ligand_target_matrix_file_path=nichenet_ligand_target_matrix_file_path,
+        mebocost_enzyme_sensor_interactions_folder_path=mebocost_enzyme_sensor_interactions_folder_path,
+        collectri_tf_network_file_path=collectri_tf_network_file_path,
+        gene_orthologs_mapping_file_path=gene_orthologs_mapping_file_path,
+        verbose=True,
+    )
+
+    adata, adata_atac, target_rna, target_atac = rebuild_nichecompass_multimodal_masks(
+        adata=adata,
+        adata_atac=adata_atac,
+        target_rna=target_rna,
+        target_atac=target_atac,
+        combined_gp_dict=combined_gp_dict,
+        gp_targets_mask_key=gp_targets_mask_key,
+        gp_targets_categories_mask_key=gp_targets_categories_mask_key,
+        gp_sources_mask_key=gp_sources_mask_key,
+        gp_sources_categories_mask_key=gp_sources_categories_mask_key,
+        gp_names_key=gp_names_key,
+        adj_key=adj_key,
+        filter_peaks_based_on_genes=True,
     )
 
     # Ensure ATAC modality has the spatial connectivities expected by the model.

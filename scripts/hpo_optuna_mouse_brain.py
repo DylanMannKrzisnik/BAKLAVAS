@@ -268,7 +268,7 @@ def main() -> None:
     mlflow_base_dir = args.mlflow_base_dir or os.environ.get("MLFLOW_BASE_DIR") or default_base_dir
     mlflow_base_dir = os.path.abspath(mlflow_base_dir)
 
-    mlflow_tracking_dir = os.path.join(mlflow_base_dir, "mlflow_tracking")
+    mlflow_tracking_dir = os.path.join(mlflow_base_dir)
     os.makedirs(mlflow_tracking_dir, exist_ok=True)
     mlflow_db_path = os.path.join(mlflow_tracking_dir, "mlflow.db")
     mlflow.set_tracking_uri(f"sqlite:///{mlflow_db_path}")

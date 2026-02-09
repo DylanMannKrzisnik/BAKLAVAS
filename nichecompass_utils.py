@@ -45,146 +45,6 @@ from evals_utils import foscttm_moscot, benchmark_embeddings
 edge_level_split = dataprocessors.edge_level_split
 node_level_split_mask = dataprocessors.node_level_split_mask
 
-
-def _get_module_out_features(module: torch.nn.Module) -> Optional[int]:
-    """
-    Extract output feature size from a module (e.g. Sequential or Linear).
-
-    For nn.Sequential, returns the out_features of the last nn.Linear.
-    For nn.Linear, returns out_features. For nn.Identity, returns None.
-    """
-    if isinstance(module, torch.nn.Linear):
-        return module.out_features
-    if isinstance(module, torch.nn.Sequential):
-        for layer in reversed(module):
-            if isinstance(layer, torch.nn.Linear):
-                return layer.out_features
-    return None
-
-
-def initialize_dataloaders(node_masked_data: Data,
-                           edge_train_data: Optional[Data]=None,
-                           edge_val_data: Optional[Data]=None,
-                           edge_batch_size: Optional[int]=None,
-                           node_batch_size: Optional[int]=None,
-                           n_direct_neighbors: int=-1,
-                           n_hops: int=1,
-                           shuffle: bool=True,
-                           edges_directed: bool=False,
-                           neg_edge_sampling_ratio: float=1.,
-                           pin_memory: bool=False,
-                           num_workers: int=0,
-                           persistent_workers: bool=False,
-                           prefetch_factor: int=2) -> dict:
-    """
-    Initialize edge-level and node-level training and validation dataloaders.
-
-    Parameters
-    ----------
-    node_masked_data:
-        PyG Data object with node-level split masks.
-    edge_train_data:
-        PyG Data object containing the edge-level training set.
-    edge_val_data:
-        PyG Data object containing the edge-level validation set.
-    edge_batch_size:
-        Batch size for the edge-level dataloaders.
-    node_batch_size:
-        Batch size for the node-level dataloaders.
-    n_direct_neighbors:
-        Number of sampled direct neighbors of the current batch nodes to be 
-        included in the batch. Defaults to ´-1´, which means to include all 
-        direct neighbors.
-    n_hops:
-        Number of neighbor hops / levels for neighbor sampling of nodes to be 
-        included in the current batch. E.g. ´2´ means to not only include 
-        sampled direct neighbors of current batch nodes but also sampled 
-        neighbors of the direct neighbors.
-    shuffle:
-        If `True`, shuffle the dataloaders.
-    edges_directed:
-        If `False`, both symmetric edge index pairs are included in the same 
-        edge-level batch (1 edge has 2 symmetric edge index pairs).
-    neg_edge_sampling_ratio:
-        Negative sampling ratio of edges. This is currently implemented in an
-        approximate way, i.e. negative edges may contain false negatives.
-    pin_memory:
-        If `True`, pin CPU memory for faster host→device copies.
-    num_workers:
-        Number of worker processes for data loading.
-    persistent_workers:
-        Keep workers alive between epochs (only valid when num_workers > 0).
-    prefetch_factor:
-        Number of batches prefetched per worker (only valid when num_workers > 0).
-
-    Returns
-    ----------
-    loader_dict:
-        Dictionary containing training and validation PyG LinkNeighborLoader 
-        (for edge reconstruction) and NeighborLoader (for gene expression 
-        reconstruction) objects.
-    """
-    loader_dict = {}
-    hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
-        edge_batch_size=edge_batch_size,
-        node_batch_size=node_batch_size,
-    )
-    edge_batch_size = hparam_kwargs["edge_batch_size"]
-    node_batch_size = hparam_kwargs["node_batch_size"]
-
-    loader_kwargs = {
-        "pin_memory": pin_memory,
-        "num_workers": num_workers,
-    }
-    if num_workers > 0:
-        loader_kwargs["persistent_workers"] = persistent_workers
-        loader_kwargs["prefetch_factor"] = prefetch_factor
-
-    # Node-level dataloaders
-    loader_dict["node_train_loader"] = NeighborLoader(
-        node_masked_data,
-        num_neighbors=[n_direct_neighbors] * n_hops,
-        batch_size=node_batch_size,
-        directed=False,
-        shuffle=shuffle,
-        input_nodes=node_masked_data.train_mask,
-        **loader_kwargs)
-    if node_masked_data.val_mask.sum() != 0:
-        loader_dict["node_val_loader"] = NeighborLoader(
-            node_masked_data,
-            num_neighbors=[n_direct_neighbors] * n_hops,
-            batch_size=node_batch_size,
-            directed=False,
-            shuffle=shuffle,
-            input_nodes=node_masked_data.val_mask,
-            **loader_kwargs)
-        
-    # Edge-level dataloaders
-    if edge_train_data is not None:
-        loader_dict["edge_train_loader"] = LinkNeighborLoader(
-            edge_train_data,
-            num_neighbors=[n_direct_neighbors] * n_hops,
-            batch_size=edge_batch_size,
-            edge_label=None, # will automatically be added as 1 for all edges
-            edge_label_index=edge_train_data.edge_label_index[:, edge_train_data.edge_label.bool()], # limit the edges to the ones from the edge_label_adj
-            directed=edges_directed,
-            shuffle=shuffle,
-            neg_sampling_ratio=neg_edge_sampling_ratio,
-            **loader_kwargs)
-    if edge_val_data is not None and edge_val_data.edge_label.sum() != 0:
-        loader_dict["edge_val_loader"] = LinkNeighborLoader(
-            edge_val_data,
-            num_neighbors=[n_direct_neighbors] * n_hops,
-            batch_size=edge_batch_size,
-            edge_label=None, # will automatically be added as 1 for all edges
-            edge_label_index=edge_val_data.edge_label_index[:, edge_val_data.edge_label.bool()], # limit the edges to the ones from the edge_label_adj
-            directed=edges_directed,
-            shuffle=shuffle,
-            neg_sampling_ratio=neg_edge_sampling_ratio,
-            **loader_kwargs)
-
-    return loader_dict
-
 class CustomNicheCompass(NicheCompass):
     """
     Project-specific NicheCompass with custom behavior.
@@ -192,11 +52,11 @@ class CustomNicheCompass(NicheCompass):
 
     HPARAMS = {
         'multimodal_layer_series': {
-            'suggest_distribution': CategoricalDistribution(choices=[False, True]),
+            'suggest_distribution': CategoricalDistribution(choices=[False]),
             'default': False
         },
         'multimodal_embedding_size': {
-            'suggest_distribution': CategoricalDistribution(choices=[32, 64, 128]),
+            'suggest_distribution': CategoricalDistribution(choices=[64, 128]),
             'default': 128
         },
         "encoder_input_key": {
@@ -204,32 +64,32 @@ class CustomNicheCompass(NicheCompass):
             "default": "counts"
         },
         "lambda_multimodal_contrastive_loss": {
-            "suggest_distribution": CategoricalDistribution(choices=[1000.0, 10000.0, 100000.0]),
+            "suggest_distribution": CategoricalDistribution(choices=[10000.0]),
             "default": 10000.0
         },
         "multimodal_temperature": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.1, 0.5, 1.0, 2.5]),
+            "suggest_distribution": CategoricalDistribution(choices=[0.1, 1.0, 2.5]),
             "default": 2.5
         },
         "multimodal_contrastive_anneal": {
-            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "suggest_distribution": CategoricalDistribution(choices=[False]),
             "default": False
         },
         "contrastive_logits_pos_ratio": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.125, 0.25]),
+            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.25]),
             "default": 0.0
         },
         "contrastive_logits_neg_ratio": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.125, 0.25]),
+            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.25]),
             "default": 0.25
         },
         "node_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[64, 128, 256, 512]),
-            "default": 128
+            "suggest_distribution": CategoricalDistribution(choices=[512]),
+            "default": 512
         },
         "edge_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[64, 128, 256, 512]),
-            "default": 64
+            "suggest_distribution": CategoricalDistribution(choices=[256]),
+            "default": 256
         },
     }
 
@@ -3571,6 +3431,146 @@ def prepare_data(adata: AnnData,
         val_ratio=node_val_ratio,
         test_ratio=node_test_ratio)
     return data_dict
+    
+
+def _get_module_out_features(module: torch.nn.Module) -> Optional[int]:
+    """
+    Extract output feature size from a module (e.g. Sequential or Linear).
+
+    For nn.Sequential, returns the out_features of the last nn.Linear.
+    For nn.Linear, returns out_features. For nn.Identity, returns None.
+    """
+    if isinstance(module, torch.nn.Linear):
+        return module.out_features
+    if isinstance(module, torch.nn.Sequential):
+        for layer in reversed(module):
+            if isinstance(layer, torch.nn.Linear):
+                return layer.out_features
+    return None
+
+
+def initialize_dataloaders(node_masked_data: Data,
+                           edge_train_data: Optional[Data]=None,
+                           edge_val_data: Optional[Data]=None,
+                           edge_batch_size: Optional[int]=None,
+                           node_batch_size: Optional[int]=None,
+                           n_direct_neighbors: int=-1,
+                           n_hops: int=1,
+                           shuffle: bool=True,
+                           edges_directed: bool=False,
+                           neg_edge_sampling_ratio: float=1.,
+                           pin_memory: bool=False,
+                           num_workers: int=0,
+                           persistent_workers: bool=False,
+                           prefetch_factor: int=2) -> dict:
+    """
+    Initialize edge-level and node-level training and validation dataloaders.
+
+    Parameters
+    ----------
+    node_masked_data:
+        PyG Data object with node-level split masks.
+    edge_train_data:
+        PyG Data object containing the edge-level training set.
+    edge_val_data:
+        PyG Data object containing the edge-level validation set.
+    edge_batch_size:
+        Batch size for the edge-level dataloaders.
+    node_batch_size:
+        Batch size for the node-level dataloaders.
+    n_direct_neighbors:
+        Number of sampled direct neighbors of the current batch nodes to be 
+        included in the batch. Defaults to ´-1´, which means to include all 
+        direct neighbors.
+    n_hops:
+        Number of neighbor hops / levels for neighbor sampling of nodes to be 
+        included in the current batch. E.g. ´2´ means to not only include 
+        sampled direct neighbors of current batch nodes but also sampled 
+        neighbors of the direct neighbors.
+    shuffle:
+        If `True`, shuffle the dataloaders.
+    edges_directed:
+        If `False`, both symmetric edge index pairs are included in the same 
+        edge-level batch (1 edge has 2 symmetric edge index pairs).
+    neg_edge_sampling_ratio:
+        Negative sampling ratio of edges. This is currently implemented in an
+        approximate way, i.e. negative edges may contain false negatives.
+    pin_memory:
+        If `True`, pin CPU memory for faster host→device copies.
+    num_workers:
+        Number of worker processes for data loading.
+    persistent_workers:
+        Keep workers alive between epochs (only valid when num_workers > 0).
+    prefetch_factor:
+        Number of batches prefetched per worker (only valid when num_workers > 0).
+
+    Returns
+    ----------
+    loader_dict:
+        Dictionary containing training and validation PyG LinkNeighborLoader 
+        (for edge reconstruction) and NeighborLoader (for gene expression 
+        reconstruction) objects.
+    """
+    loader_dict = {}
+    hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+        edge_batch_size=edge_batch_size,
+        node_batch_size=node_batch_size,
+    )
+    edge_batch_size = hparam_kwargs["edge_batch_size"]
+    node_batch_size = hparam_kwargs["node_batch_size"]
+
+    loader_kwargs = {
+        "pin_memory": pin_memory,
+        "num_workers": num_workers,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    # Node-level dataloaders
+    loader_dict["node_train_loader"] = NeighborLoader(
+        node_masked_data,
+        num_neighbors=[n_direct_neighbors] * n_hops,
+        batch_size=node_batch_size,
+        directed=False,
+        shuffle=shuffle,
+        input_nodes=node_masked_data.train_mask,
+        **loader_kwargs)
+    if node_masked_data.val_mask.sum() != 0:
+        loader_dict["node_val_loader"] = NeighborLoader(
+            node_masked_data,
+            num_neighbors=[n_direct_neighbors] * n_hops,
+            batch_size=node_batch_size,
+            directed=False,
+            shuffle=shuffle,
+            input_nodes=node_masked_data.val_mask,
+            **loader_kwargs)
+        
+    # Edge-level dataloaders
+    if edge_train_data is not None:
+        loader_dict["edge_train_loader"] = LinkNeighborLoader(
+            edge_train_data,
+            num_neighbors=[n_direct_neighbors] * n_hops,
+            batch_size=edge_batch_size,
+            edge_label=None, # will automatically be added as 1 for all edges
+            edge_label_index=edge_train_data.edge_label_index[:, edge_train_data.edge_label.bool()], # limit the edges to the ones from the edge_label_adj
+            directed=edges_directed,
+            shuffle=shuffle,
+            neg_sampling_ratio=neg_edge_sampling_ratio,
+            **loader_kwargs)
+    if edge_val_data is not None and edge_val_data.edge_label.sum() != 0:
+        loader_dict["edge_val_loader"] = LinkNeighborLoader(
+            edge_val_data,
+            num_neighbors=[n_direct_neighbors] * n_hops,
+            batch_size=edge_batch_size,
+            edge_label=None, # will automatically be added as 1 for all edges
+            edge_label_index=edge_val_data.edge_label_index[:, edge_val_data.edge_label.bool()], # limit the edges to the ones from the edge_label_adj
+            directed=edges_directed,
+            shuffle=shuffle,
+            neg_sampling_ratio=neg_edge_sampling_ratio,
+            **loader_kwargs)
+
+    return loader_dict
 
 
 __all__ = [

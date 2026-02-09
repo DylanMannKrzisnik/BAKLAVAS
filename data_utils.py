@@ -22,6 +22,149 @@ __all__ = [
 ]
 
 
+def _read_cellranger_csv_with_barcodes(csv_path: str) -> pd.DataFrame:
+    """Read a Cell Ranger CSV and set barcode-like first column as index."""
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return df
+
+    first_col = df.columns[0]
+    first_values = df[first_col].astype(str)
+    barcode_colnames = {"barcode", "barcodes", "cell", "cell_id"}
+    if first_col.lower() in barcode_colnames or first_values.str.contains("-").any():
+        df = df.set_index(first_col)
+    df.index = df.index.astype(str)
+    return df
+
+
+def _resolve_analysis_dir(data_dir: str, base_name: str) -> Optional[str]:
+    """Best-effort resolution of Cell Ranger ARC analysis directory."""
+    candidates = [
+        os.path.join(data_dir, "analysis"),
+        os.path.join(data_dir, f"{base_name}_analysis"),
+        os.path.join(data_dir, f"{base_name}_analysis", "analysis"),
+        os.path.join(data_dir, "Multiome_RNA_ATAC_Mouse_Brain_Alzheimers_AppNote_analysis"),
+        os.path.join(data_dir, "Multiome_RNA_ATAC_Mouse_Brain_Alzheimers_AppNote_analysis", "analysis"),
+    ]
+    for analysis_dir in candidates:
+        if os.path.isdir(analysis_dir) and (
+            os.path.isdir(os.path.join(analysis_dir, "clustering"))
+            or os.path.isdir(os.path.join(analysis_dir, "dimensionality_reduction"))
+        ):
+            return analysis_dir
+    return None
+
+
+def _merge_obs_table(adata: ad.AnnData, table: pd.DataFrame, col_prefix: str) -> None:
+    """Merge a barcode-indexed table into adata.obs with a prefix."""
+    if table.empty:
+        return
+    table = table.copy()
+    table.index = table.index.astype(str)
+    table.columns = [f"{col_prefix}{c}" for c in table.columns]
+    adata.obs = adata.obs.merge(table, left_index=True, right_index=True, how="left")
+
+
+def _add_cellranger_arc_analysis_metadata(
+    adata_rna: ad.AnnData,
+    adata_atac: ad.AnnData,
+    analysis_dir: str,
+) -> None:
+    """Attach key ARC secondary analysis outputs to RNA and ATAC AnnData objects."""
+
+    # 1) Dimensionality reduction projections
+    dr_specs = [
+        ("gex", "pca_projection.csv", adata_rna, "X_arc_gex_pca"),
+        ("gex", "umap_projection.csv", adata_rna, "X_arc_gex_umap"),
+        ("gex", "tsne_projection.csv", adata_rna, "X_arc_gex_tsne"),
+        ("atac", "lsa_projection.csv", adata_atac, "X_arc_atac_lsa"),
+        ("atac", "umap_projection.csv", adata_atac, "X_arc_atac_umap"),
+        ("atac", "tsne_projection.csv", adata_atac, "X_arc_atac_tsne"),
+    ]
+    for modality, fname, adata, obsm_key in dr_specs:
+        csv_path = os.path.join(analysis_dir, "dimensionality_reduction", modality, fname)
+        if not os.path.isfile(csv_path):
+            continue
+        proj = _read_cellranger_csv_with_barcodes(csv_path)
+        if proj.empty:
+            continue
+        proj = proj.apply(pd.to_numeric, errors="coerce")
+        proj = proj.reindex(adata.obs_names)
+        adata.obsm[obsm_key] = proj.to_numpy(dtype=np.float32, copy=False)
+
+    # 2) Clustering outputs
+    cluster_specs = [("gex", adata_rna, "arc_gex_"), ("atac", adata_atac, "arc_atac_")]
+    cluster_dirs = ["graphclust", "kmeans_2_clusters", "kmeans_3_clusters", "kmeans_4_clusters", "kmeans_5_clusters"]
+    for modality, adata, prefix in cluster_specs:
+        for cluster_dir in cluster_dirs:
+            csv_path = os.path.join(analysis_dir, "clustering", modality, cluster_dir, "clusters.csv")
+            if not os.path.isfile(csv_path):
+                continue
+            clusters = _read_cellranger_csv_with_barcodes(csv_path)
+            if clusters.empty:
+                continue
+            _merge_obs_table(adata, clusters, f"{prefix}{cluster_dir}_")
+
+    # 3) Feature linkage (peak-gene links)
+    linkage_bedpe = os.path.join(analysis_dir, "feature_linkage", "feature_linkage.bedpe")
+    if os.path.isfile(linkage_bedpe):
+        try:
+            linkage_df = pd.read_csv(linkage_bedpe, sep="\t", header=None)
+            adata_rna.uns["arc_feature_linkage_bedpe"] = linkage_df
+            adata_atac.uns["arc_feature_linkage_bedpe"] = linkage_df
+        except Exception:
+            pass
+
+    linkage_matrix_h5 = os.path.join(analysis_dir, "feature_linkage", "feature_linkage_matrix.h5")
+    if os.path.isfile(linkage_matrix_h5):
+        adata_rna.uns["arc_feature_linkage_matrix_h5_path"] = linkage_matrix_h5
+        adata_atac.uns["arc_feature_linkage_matrix_h5_path"] = linkage_matrix_h5
+
+    # 4) TF analysis: peak-to-motif mapping
+    peak_motif_bed = os.path.join(analysis_dir, "tf_analysis", "peak_motif_mapping.bed")
+    if os.path.isfile(peak_motif_bed):
+        try:
+            peak_motif_df = pd.read_csv(peak_motif_bed, sep="\t", header=None)
+            adata_atac.uns["arc_peak_motif_mapping_bed"] = peak_motif_df
+            adata_rna.uns["arc_peak_motif_mapping_bed"] = peak_motif_df
+        except Exception:
+            pass
+
+    # 5) TF-by-cell matrix
+    tf_matrix_dir = os.path.join(analysis_dir, "tf_analysis", "filtered_tf_bc_matrix")
+    barcodes_path = os.path.join(tf_matrix_dir, "barcodes.tsv.gz")
+    motifs_path = os.path.join(tf_matrix_dir, "motifs.tsv")
+    matrix_path = os.path.join(tf_matrix_dir, "matrix.mtx.gz")
+    if os.path.isfile(barcodes_path) and os.path.isfile(motifs_path) and os.path.isfile(matrix_path):
+        try:
+            from scipy import sparse
+            from scipy.io import mmread
+
+            barcodes = pd.read_csv(barcodes_path, sep="\t", header=None).iloc[:, 0].astype(str).tolist()
+            motifs = pd.read_csv(motifs_path, sep="\t", header=None).iloc[:, 0].astype(str).tolist()
+            tf_mtx = mmread(matrix_path).tocsr()
+
+            if tf_mtx.shape == (len(motifs), len(barcodes)):
+                tf_by_cell = tf_mtx.T.tocsr()
+            elif tf_mtx.shape == (len(barcodes), len(motifs)):
+                tf_by_cell = tf_mtx.tocsr()
+            else:
+                tf_by_cell = None
+
+            if tf_by_cell is not None:
+                barcode_indexer = pd.Index(barcodes).get_indexer(adata_atac.obs_names.astype(str))
+                missing_row = sparse.csr_matrix((1, tf_by_cell.shape[1]), dtype=tf_by_cell.dtype)
+                tf_with_missing = sparse.vstack([tf_by_cell, missing_row], format="csr")
+                safe_indexer = np.where(barcode_indexer >= 0, barcode_indexer, tf_by_cell.shape[0])
+                aligned_tf = tf_with_missing[safe_indexer, :]
+
+                adata_atac.obsm["X_arc_tf_motif"] = aligned_tf
+                adata_atac.uns["arc_tf_motif_names"] = np.asarray(motifs, dtype=object)
+                adata_rna.uns["arc_tf_motif_names"] = np.asarray(motifs, dtype=object)
+        except Exception:
+            pass
+
+
 def multimodal_latents_adata(modality1_dict, modality2_dict, latent_key):
     """Build a single AnnData from two modality-specific latent spaces."""
 
@@ -190,6 +333,26 @@ def load_10x_mouse_brain_ad_data(
                 adata_atac.var = adata_atac.var.merge(
                     ann_indexed[extra], left_index=True, right_index=True, how="left"
                 )
+
+    # Unpack Multiome_RNA_ATAC_Mouse_Brain_Alzheimers_AppNote_analysis.tar.gz in the data_dir if present
+    analysis_dir = _resolve_analysis_dir(data_dir, base_name)
+    tar_path = os.path.join(data_dir, "Multiome_RNA_ATAC_Mouse_Brain_Alzheimers_AppNote_analysis.tar.gz")
+    if os.path.isfile(tar_path) and analysis_dir is None:
+        import tarfile
+        print(f"Found tar archive: {tar_path}. Extracting...")
+        with tarfile.open(tar_path, "r:gz") as tar:
+            tar.extractall(path=data_dir)
+        print("Extraction completed.")
+        analysis_dir = _resolve_analysis_dir(data_dir, base_name)
+
+    if analysis_dir is not None:
+        print(f"Found Cell Ranger ARC analysis directory: {analysis_dir}.")
+        _add_cellranger_arc_analysis_metadata(adata_rna, adata_atac, analysis_dir)
+
+    # set 'arc_gex_graphclust_Cluster' as the reference clusters
+    reference_clusters_rna_and_atac = adata_rna.obs['arc_gex_graphclust_Cluster']
+    adata_rna.obs['REF_arc_gex_graphclust_Cluster'] = reference_clusters_rna_and_atac
+    adata_atac.obs['REF_arc_gex_graphclust_Cluster'] = reference_clusters_rna_and_atac
 
     return adata_rna, adata_atac, "mm10", "10x_mouse_brain_AD"
 

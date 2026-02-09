@@ -110,6 +110,7 @@ def _add_cellranger_arc_analysis_metadata(
     if os.path.isfile(linkage_bedpe):
         try:
             linkage_df = pd.read_csv(linkage_bedpe, sep="\t", header=None)
+            linkage_df.columns = linkage_df.columns.astype(str)
             adata_rna.uns["arc_feature_linkage_bedpe"] = linkage_df
             adata_atac.uns["arc_feature_linkage_bedpe"] = linkage_df
         except Exception:
@@ -125,6 +126,7 @@ def _add_cellranger_arc_analysis_metadata(
     if os.path.isfile(peak_motif_bed):
         try:
             peak_motif_df = pd.read_csv(peak_motif_bed, sep="\t", header=None)
+            peak_motif_df.columns = peak_motif_df.columns.astype(str)
             adata_atac.uns["arc_peak_motif_mapping_bed"] = peak_motif_df
             adata_rna.uns["arc_peak_motif_mapping_bed"] = peak_motif_df
         except Exception:
@@ -351,8 +353,20 @@ def load_10x_mouse_brain_ad_data(
 
     # set 'arc_gex_graphclust_Cluster' as the reference clusters
     reference_clusters_rna_and_atac = adata_rna.obs['arc_gex_graphclust_Cluster']
-    adata_rna.obs['REF_arc_gex_graphclust_Cluster'] = reference_clusters_rna_and_atac
-    adata_atac.obs['REF_arc_gex_graphclust_Cluster'] = reference_clusters_rna_and_atac
+    reference_clusters_key = 'REF_arc_gex_graphclust_Cluster'
+
+    adata_rna.uns['label_key'] = reference_clusters_key
+    adata_atac.uns['label_key'] = reference_clusters_key
+    adata_rna.obs[reference_clusters_key] = reference_clusters_rna_and_atac
+    adata_atac.obs[reference_clusters_key] = reference_clusters_rna_and_atac
+
+    # convert non-string columns in uns to string representation
+    for ad in (adata_rna, adata_atac):
+        for k, v in list(ad.uns.items()):
+            if isinstance(v, pd.DataFrame) and not all(isinstance(c, str) for c in v.columns):
+                v = v.copy()
+                v.columns = v.columns.astype(str) 
+                ad.uns[k] = v
 
     return adata_rna, adata_atac, "mm10", "10x_mouse_brain_AD"
 

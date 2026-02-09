@@ -1477,8 +1477,8 @@ class CustomTrainer(Trainer):
                 self.target_holdout_adata.obs.assign(modality="rna"),
                 self.target_holdout_adata_atac.obs.assign(modality="atac"),
             ], axis=0),
-            #uns={"label_key": self.target_holdout_adata.uns['label_key']},
-            uns={"label_key": None},
+            uns={"label_key": self.target_holdout_adata.uns['label_key']},
+            #uns={"label_key": None},
         )
 
         results_dict = benchmark_embeddings(
@@ -1834,9 +1834,18 @@ class CustomTrainer(Trainer):
                     compound_metric.pop(key_)
                 compound_metric = np.sum([values[-1] for values in compound_metric.values()]) / len(compound_metric)
                 '''
-                compound_metric = np.mean([
+                compound_metric_integration = np.mean([
                     self.epoch_logs["target_one_minus_foscttm"][-1],
                     self.epoch_logs["target_iLISI"][-1]
+                ])
+                compound_metric_clustering = np.mean([
+                    self.epoch_logs["target_KMeans_ARI"][-1],
+                    self.epoch_logs["target_KMeans_NMI"][-1],
+                    self.epoch_logs["target_Silhouette_label"][-1],
+                ])
+                compound_metric = np.mean([
+                    compound_metric_integration,
+                    compound_metric_clustering,
                 ])
                 self.epoch_logs["compound_metric"].append(compound_metric)
 

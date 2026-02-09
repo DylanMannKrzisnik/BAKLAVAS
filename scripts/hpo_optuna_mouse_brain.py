@@ -1,16 +1,24 @@
+#%% Load environment variables
+from dotenv import load_dotenv, dotenv_values
+load_dotenv()
+
+from pprint import pprint
+print("Loaded environment variables from .env or env:", end="\n\n")
+pprint(dotenv_values())
+
+import os
+import sys
+sys.path.append(os.environ.get("BAKLAVA_ROOT"))
+sys.path.append(os.path.join(os.environ.get("BAKLAVA_ROOT"), "scripts"))
+
 #%%
 import argparse
 import io
-import os
 import subprocess
-import sys
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional
-
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-
 
 def parse_args(notebook: bool = False) -> argparse.Namespace:
     parser = argparse.ArgumentParser(

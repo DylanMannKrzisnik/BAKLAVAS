@@ -15,7 +15,9 @@ import math
 import time
 import warnings
 from collections import defaultdict
+import tempfile
 
+import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
 import pandas as pd
@@ -23,6 +25,7 @@ import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
 from anndata import AnnData
+import scanpy as sc
 from torch_geometric.data import Data
 from torch_geometric.loader import LinkNeighborLoader, NeighborLoader
 from torch_geometric.utils import add_self_loops, remove_self_loops
@@ -1341,6 +1344,11 @@ class CustomTrainer(Trainer):
             #uns={"label_key": None},
         )
 
+        # compute PCA, neighbors & leiden
+        sc.pp.pca(clip_embeddings_adata, n_comps=50)
+        sc.pp.neighbors(clip_embeddings_adata, use_rep='X_pca', n_neighbors=100)
+        sc.tl.leiden(clip_embeddings_adata, resolution=0.5)
+
         scib_n_jobs = 1
         scib_n_jobs_env = os.environ.get("BAKLAVA_SCIB_N_JOBS")
         if scib_n_jobs_env is not None:
@@ -1365,6 +1373,22 @@ class CustomTrainer(Trainer):
         if self.mlflow_experiment_id is not None:
             for key, value in results_dict.items():
                 mlflow.log_metric(f"target_{key}".replace(" ", "_"), value, step=self.epoch)
+
+            if self.epoch == self.n_epochs_-1:
+                sc.tl.umap(clip_embeddings_adata, min_dist=0.3)
+                sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden'], ncols=3, wspace=0.1, size=25, show=False)
+                fd, umap_path = tempfile.mkstemp(suffix='.png')
+                os.close(fd)
+                try:
+                    plt.savefig(umap_path, bbox_inches='tight')
+                    mlflow.log_artifact(umap_path, artifact_path='umap')
+                finally:
+                    plt.close('all')
+                    try:
+                        os.unlink(umap_path)
+                    except OSError:
+                        pass
+
 
     def _get_multimodal_contrastive_weight(self, increasing: bool=True) -> float:
         if (not self.multimodal_contrastive_anneal_) or self.n_epochs_ <= 1:

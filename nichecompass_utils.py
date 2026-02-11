@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import List, Literal, Optional, Tuple, Union
 
 import copy
-
+import os
 import math
 import time
 import warnings
@@ -56,8 +56,8 @@ class CustomNicheCompass(NicheCompass):
             'default': False
         },
         'multimodal_embedding_size': {
-            'suggest_distribution': CategoricalDistribution(choices=[64, 128]),
-            'default': 128
+            'suggest_distribution': CategoricalDistribution(choices=[64]),
+            'default': 64
         },
         "encoder_input_key": {
             "suggest_distribution": CategoricalDistribution(choices=["counts", "pseudocounts"]),
@@ -84,8 +84,8 @@ class CustomNicheCompass(NicheCompass):
             "default": 0.25
         },
         "node_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[512]),
-            "default": 512
+            "suggest_distribution": CategoricalDistribution(choices=[256]),
+            "default": 256
         },
         "edge_batch_size": {
             "suggest_distribution": CategoricalDistribution(choices=[256]),
@@ -1341,12 +1341,23 @@ class CustomTrainer(Trainer):
             #uns={"label_key": None},
         )
 
+        scib_n_jobs = 1
+        scib_n_jobs_env = os.environ.get("BAKLAVA_SCIB_N_JOBS")
+        if scib_n_jobs_env is not None:
+            try:
+                scib_n_jobs = max(1, int(scib_n_jobs_env))
+            except ValueError:
+                warnings.warn(
+                    f"Invalid BAKLAVA_SCIB_N_JOBS='{scib_n_jobs_env}', "
+                    "falling back to 1."
+                )
+
         results_dict = benchmark_embeddings(
             adata=clip_embeddings_adata,
             batch_key="modality",
             label_key=clip_embeddings_adata.uns['label_key'],
             embedding_obsm_keys=["nichecompass_latent"],
-            n_jobs=6,
+            n_jobs=scib_n_jobs,
         )
         for key, value in results_dict.items():
             self.epoch_logs[f"target_{key}".replace(" ", "_")].append(value)
@@ -1370,7 +1381,7 @@ class CustomTrainer(Trainer):
               n_epochs_all_gps: int=25,
               n_epochs_no_edge_recon: int=0,
               n_epochs_no_cat_covariates_contrastive: int=5,
-              target_eval_interval: int=5,
+              target_eval_interval: int=10,
               lr: float=0.001,
               weight_decay: float=0.,
               lambda_edge_recon: Optional[float]=500000.,
@@ -1694,23 +1705,53 @@ class CustomTrainer(Trainer):
                     compound_metric.pop(key_)
                 compound_metric = np.sum([values[-1] for values in compound_metric.values()]) / len(compound_metric)
                 '''
-                compound_metric_integration = np.mean([
-                    self.epoch_logs["target_one_minus_foscttm"][-1],
-                    self.epoch_logs["target_iLISI"][-1]
-                ])
-                compound_metric_clustering = np.mean([
-                    self.epoch_logs["target_KMeans_ARI"][-1],
-                    self.epoch_logs["target_KMeans_NMI"][-1],
-                    self.epoch_logs["target_Silhouette_label"][-1],
-                ])
-                compound_metric = np.mean([
-                    compound_metric_integration,
-                    compound_metric_clustering,
-                ])
-                self.epoch_logs["compound_metric"].append(compound_metric)
+                def _latest_finite_metric(metric_key: str) -> Optional[float]:
+                    values = self.epoch_logs.get(metric_key, [])
+                    if not values:
+                        return None
+                    value = float(values[-1])
+                    if not np.isfinite(value):
+                        return None
+                    return value
 
-                if self.mlflow_experiment_id is not None:
-                    mlflow.log_metric("compound_metric", compound_metric, step=self.epoch)
+                integration_metrics = [
+                    _latest_finite_metric("target_one_minus_foscttm"),
+                    _latest_finite_metric("target_iLISI"),
+                ]
+                integration_metrics = [
+                    metric for metric in integration_metrics if metric is not None
+                ]
+
+                clustering_metrics = [
+                    _latest_finite_metric("target_KMeans_ARI"),
+                    _latest_finite_metric("target_KMeans_NMI"),
+                    _latest_finite_metric("target_Silhouette_label"),
+                ]
+                clustering_metrics = [
+                    metric for metric in clustering_metrics if metric is not None
+                ]
+
+                compound_components = []
+                if integration_metrics:
+                    compound_components.append(float(np.mean(integration_metrics)))
+                if clustering_metrics:
+                    compound_components.append(float(np.mean(clustering_metrics)))
+
+                if compound_components:
+                    compound_metric = float(np.mean(compound_components))
+                    self.epoch_logs["compound_metric"].append(compound_metric)
+
+                    if self.mlflow_experiment_id is not None:
+                        mlflow.log_metric(
+                            "compound_metric",
+                            compound_metric,
+                            step=self.epoch,
+                        )
+                else:
+                    warnings.warn(
+                        "Skipping compound_metric logging because no finite "
+                        "target metrics are available for this epoch."
+                    )
 
             if self.monitor_:
                 print_progress(self.epoch, self.epoch_logs, self.n_epochs_)

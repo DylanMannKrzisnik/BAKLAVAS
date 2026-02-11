@@ -1,5 +1,16 @@
+import os
+
 from anndata import AnnData
 from typing import List
+
+# Keep JAX/XLA memory usage conservative for long HPO runs.
+# These need to be set before importing `jax`.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
+os.environ.setdefault(
+    "JAX_DISABLE_JIT",
+    os.environ.get("BAKLAVA_JAX_DISABLE_JIT", "1"),
+)
 
 import numpy as np
 import jax.numpy as jnp
@@ -42,7 +53,7 @@ def benchmark_embeddings(
     batch_key: str,
     label_key: str,
     embedding_obsm_keys: List[str],
-    n_jobs: int=6,
+    n_jobs: int=1,
 ) -> None:
 
     adata.obsm["nichecompass_latent"] = adata.X

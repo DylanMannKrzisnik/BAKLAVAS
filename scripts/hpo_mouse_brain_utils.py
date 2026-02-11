@@ -19,7 +19,7 @@ DEFAULT_TUNED_HPARAM_KEYS = [
 ]
 
 # HPO convenience override for TrainConfig.n_epochs
-HPO_N_EPOCHS = 60
+HPO_N_EPOCHS = 100
 
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"
@@ -90,7 +90,7 @@ def resolve_cache_dir(cache_dir: Optional[str]) -> str:
         return cache_dir
     default_root = (
         "/home/mcb/users/dmannk/BAKLAVA_base/outputs/"
-        "nichecompass_mouse_brain_multimodal/artifacts/multimodal"
+        "nichecompass_mouse_brain_multimodal/stable/multimodal"
     )
     latest = _find_latest_cache_dir(default_root)
     if latest is None:

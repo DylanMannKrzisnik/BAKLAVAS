@@ -311,9 +311,9 @@ def load_mousedev_spatial_triomic_data(
         rna_adata.obsp[adj_key] = rna_adata.obsp[adj_key].maximum(rna_adata.obsp[adj_key].T)
 
     if "counts" not in rna_adata.layers:
-        rna_adata.layers["counts"] = rna_adata.X.copy()
+        rna_adata.layers["counts"] = rna_adata.X.astype(np.int32).copy()
     if "counts" not in atac_adata.layers:
-        atac_adata.layers["counts"] = atac_adata.X.copy()
+        atac_adata.layers["counts"] = atac_adata.X.astype(np.int32).copy()
 
     return rna_adata, atac_adata, "mm10", "mousedev_spatial_triomic"
 

@@ -244,9 +244,11 @@ def load_spatial_atac_rna_mouse_brain_source(
 
 def load_mousedev_spatial_triomic_data(
     data_dir: str,
+    make_adjacency_symmetric: bool = True,
+    adj_key: str = "spatial_connectivities",
 ) -> Tuple[ad.AnnData, ad.AnnData, str, str]:
     """Load the mousedev spatial triomic dataset."""
-    
+
     rna_datapath = os.path.join(data_dir, "rna_adata.h5ad")
     atac_datapath = os.path.join(data_dir, "MouseDev_Triomic_ATAC.h5ad")
     rna_adata = sc.read_h5ad(rna_datapath, backed="r")
@@ -304,6 +306,14 @@ def load_mousedev_spatial_triomic_data(
         spatial_key="spatial",
         n_neighs=4,
     )
+
+    if make_adjacency_symmetric and (adj_key in rna_adata.obsp):
+        rna_adata.obsp[adj_key] = rna_adata.obsp[adj_key].maximum(rna_adata.obsp[adj_key].T)
+
+    if "counts" not in rna_adata.layers:
+        rna_adata.layers["counts"] = rna_adata.X.copy()
+    if "counts" not in atac_adata.layers:
+        atac_adata.layers["counts"] = atac_adata.X.copy()
 
     return rna_adata, atac_adata, "mm10", "mousedev_spatial_triomic"
 

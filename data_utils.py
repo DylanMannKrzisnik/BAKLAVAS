@@ -246,7 +246,7 @@ def load_mousedev_spatial_triomic_data(
     data_dir: str,
 ) -> Tuple[ad.AnnData, ad.AnnData, str, str]:
     """Load the mousedev spatial triomic dataset."""
-    #%%
+    
     rna_datapath = os.path.join(data_dir, "rna_adata.h5ad")
     atac_datapath = os.path.join(data_dir, "MouseDev_Triomic_ATAC.h5ad")
     rna_adata = sc.read_h5ad(rna_datapath, backed="r")

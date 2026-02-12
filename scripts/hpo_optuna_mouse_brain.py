@@ -16,7 +16,6 @@ import argparse
 import io
 import subprocess
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional
 

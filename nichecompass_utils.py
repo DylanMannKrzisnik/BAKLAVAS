@@ -66,32 +66,44 @@ class CustomNicheCompass(NicheCompass):
             "default": "counts"
         },
         "lambda_multimodal_contrastive_loss": {
-            "suggest_distribution": CategoricalDistribution(choices=[10000.0]),
-            "default": 10000.0
+            "suggest_distribution": CategoricalDistribution(choices=[5000.0]),
+            "default": 5000.0
         },
         "multimodal_temperature": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.1, 1.0, 2.5]),
-            "default": 2.5
+            "suggest_distribution": CategoricalDistribution(choices=[1.0]),
+            "default": 1.0
         },
         "multimodal_contrastive_anneal": {
-            "suggest_distribution": CategoricalDistribution(choices=[False]),
-            "default": False
+            "suggest_distribution": CategoricalDistribution(choices=[True]),
+            "default": True
         },
         "contrastive_logits_pos_ratio": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.25]),
+            "suggest_distribution": CategoricalDistribution(choices=[0.0]),
             "default": 0.0
         },
         "contrastive_logits_neg_ratio": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.25]),
+            "suggest_distribution": CategoricalDistribution(choices=[0.25]),
             "default": 0.25
         },
+        "lr": {
+            "suggest_distribution": CategoricalDistribution(choices=[1e-4, 3e-4, 7e-4]),
+            "default": 3e-4
+        },
+        "weight_decay": {
+            "suggest_distribution": CategoricalDistribution(choices=[1e-6, 1e-5]),
+            "default": 1e-5
+        },
         "node_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[512]),
-            "default": 512
+            "suggest_distribution": CategoricalDistribution(choices=[128, 256, 512]),
+            "default": 256
         },
         "edge_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[256]),
-            "default": 256
+            "suggest_distribution": CategoricalDistribution(choices=[64, 128]),
+            "default": 128
+        },
+        "n_sampled_neighbors": {
+            "suggest_distribution": CategoricalDistribution(choices=[2, 4]),
+            "default": 4
         },
     }
 

@@ -10,16 +10,15 @@ from optuna.distributions import CategoricalDistribution
 from nichecompass_utils import CustomNicheCompass
 
 DEFAULT_TUNED_HPARAM_KEYS = [
-    "encoder_input_key",
-    "multimodal_temperature",
-    "contrastive_logits_pos_ratio",
-    "contrastive_logits_neg_ratio",
-    "multimodal_embedding_size",
+    "lr",
+    "weight_decay",
     "node_batch_size",
+    "edge_batch_size",
+    "n_sampled_neighbors",
 ]
 
 # HPO convenience override for TrainConfig.n_epochs
-HPO_N_EPOCHS = 50
+HPO_N_EPOCHS = 5
 
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"
@@ -41,25 +40,29 @@ class TrialParams:
     contrastive_logits_pos_ratio: Optional[float] = None
     contrastive_logits_neg_ratio: Optional[float] = None
     multimodal_embedding_size: Optional[int] = None
+    lr: Optional[float] = None
+    weight_decay: Optional[float] = None
     node_batch_size: Optional[int] = None
+    edge_batch_size: Optional[int] = None
+    n_sampled_neighbors: Optional[int] = None
 
 
 @dataclass(frozen=True)
 class TrainConfig:
     n_epochs: int = 10
     n_epochs_all_gps: int = 10
-    lr: float = 0.001
+    lr: float = 0.0003
     lambda_edge_recon: float = 500000.0
     lambda_gene_expr_recon: float = 300.0
     lambda_chrom_access_recon: float = 300.0
     lambda_l1_masked: float = 0.0
     lambda_l1_addon: float = 30.0
-    lambda_multimodal_contrastive_loss: float = 100000.0
-    edge_batch_size: int = 64
+    lambda_multimodal_contrastive_loss: float = 5000.0
+    edge_batch_size: int = 128
     node_batch_size: int = 256
     use_cuda_if_available: bool = True
     n_sampled_neighbors: int = 4
-    multimodal_contrastive_anneal: bool = False
+    multimodal_contrastive_anneal: bool = True
     target_holdout_frac: float = 0.1
     target_holdout_n: Optional[int] = 2000
     target_holdout_seed: int = 0

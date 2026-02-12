@@ -84,8 +84,20 @@ def benchmark_embeddings(
             adata,
             batch_key=batch_key,
             label_key=label_key,
-            bio_conservation_metrics=BioConservation(),
-            batch_correction_metrics=BatchCorrection(),
+            bio_conservation_metrics=BioConservation(
+                isolated_labels=False,
+                nmi_ari_cluster_labels_leiden=False,
+                nmi_ari_cluster_labels_kmeans=True,
+                silhouette_label=True,
+                clisi_knn=False
+            ),
+            batch_correction_metrics=BatchCorrection(
+                bras=False,
+                ilisi_knn=True,
+                kbet_per_label=False,
+                graph_connectivity=False,
+                pcr_comparison=False,
+            ),
             embedding_obsm_keys=embedding_obsm_keys,
             n_jobs=n_jobs,
         )

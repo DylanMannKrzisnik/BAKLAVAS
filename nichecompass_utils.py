@@ -15,7 +15,6 @@ import math
 import time
 import warnings
 from collections import defaultdict
-import tempfile
 
 import matplotlib.pyplot as plt
 import mlflow
@@ -59,8 +58,8 @@ class CustomNicheCompass(NicheCompass):
             'default': False
         },
         'multimodal_embedding_size': {
-            'suggest_distribution': CategoricalDistribution(choices=[64]),
-            'default': 64
+            'suggest_distribution': CategoricalDistribution(choices=[128]),
+            'default': 128
         },
         "encoder_input_key": {
             "suggest_distribution": CategoricalDistribution(choices=["counts", "pseudocounts"]),
@@ -87,8 +86,8 @@ class CustomNicheCompass(NicheCompass):
             "default": 0.25
         },
         "node_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[256]),
-            "default": 256
+            "suggest_distribution": CategoricalDistribution(choices=[512]),
+            "default": 512
         },
         "edge_batch_size": {
             "suggest_distribution": CategoricalDistribution(choices=[256]),
@@ -1344,11 +1343,6 @@ class CustomTrainer(Trainer):
             #uns={"label_key": None},
         )
 
-        # compute PCA, neighbors & leiden
-        sc.pp.pca(clip_embeddings_adata, n_comps=50)
-        sc.pp.neighbors(clip_embeddings_adata, use_rep='X_pca', n_neighbors=100)
-        sc.tl.leiden(clip_embeddings_adata, resolution=0.5)
-
         scib_n_jobs = 1
         scib_n_jobs_env = os.environ.get("BAKLAVA_SCIB_N_JOBS")
         if scib_n_jobs_env is not None:
@@ -1374,20 +1368,32 @@ class CustomTrainer(Trainer):
             for key, value in results_dict.items():
                 mlflow.log_metric(f"target_{key}".replace(" ", "_"), value, step=self.epoch)
 
-            if self.epoch == self.n_epochs_-1:
-                sc.tl.umap(clip_embeddings_adata, min_dist=0.3)
-                sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden'], ncols=3, wspace=0.1, size=25, show=False)
-                fd, umap_path = tempfile.mkstemp(suffix='.png')
-                os.close(fd)
+            if self.epoch == self.n_epochs_ - 1:
+                # compute PCA, neighbors & leiden
+                sc.pp.pca(clip_embeddings_adata, n_comps=50)
+                sc.pp.neighbors(clip_embeddings_adata, use_rep='X_pca', n_neighbors=100)
+
                 try:
-                    plt.savefig(umap_path, bbox_inches='tight')
-                    mlflow.log_artifact(umap_path, artifact_path='umap')
+                    sc.tl.umap(clip_embeddings_adata, min_dist=0.3)
+                    umap_fig = sc.pl.umap(
+                        clip_embeddings_adata,
+                        color=["modality", clip_embeddings_adata.uns['label_key']],
+                        ncols=2,
+                        wspace=0.3,
+                        size=25,
+                        show=False,
+                        return_fig=True,
+                    )
+                    mlflow.log_figure(
+                        umap_fig,
+                        f"umap/target_holdout_umap_epoch_{self.epoch + 1}.png",
+                    )
+                except Exception as exc:
+                    warnings.warn(
+                        f"Failed to generate/log target holdout UMAP to MLflow: {exc}"
+                    )
                 finally:
-                    plt.close('all')
-                    try:
-                        os.unlink(umap_path)
-                    except OSError:
-                        pass
+                    plt.close("all")
 
 
     def _get_multimodal_contrastive_weight(self, increasing: bool=True) -> float:

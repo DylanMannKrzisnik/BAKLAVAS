@@ -1576,7 +1576,7 @@ source_model = CustomNicheCompass.load(
     gp_names_key=gp_names_key
 )
 
-source_samples = source_model.adata.obs[sample_key].unique().tolist()
+#source_samples = source_model.adata.obs[sample_key].unique().tolist()
 
 target_model = CustomNicheCompass.load(
     dir_path=model_folder_path,
@@ -1586,6 +1586,20 @@ target_model = CustomNicheCompass.load(
 )
 
 #target_samples = target_model.adata.obs[target_sample_key].unique().tolist()
+
+#%% Save target model
+
+target_model_folder_path = model_folder_path.replace('model', 'target_model')
+os.makedirs(target_model_folder_path, exist_ok=True)
+
+target_model.save(
+    dir_path=target_model_folder_path,
+    overwrite=True,
+    save_adata=True,
+    adata_file_name="target_adata.h5ad",
+    save_adata_atac=True,
+    adata_atac_file_name=f"target_adata_atac.h5ad"
+)
 
 #%% Compute neighbor graph and UMAP embedding for target data
 
@@ -1716,20 +1730,6 @@ sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden'], ncols=3, wspace=
 
 sc.tl.embedding_density(clip_embeddings_adata, groupby='modality')
 sc.pl.embedding_density(clip_embeddings_adata, key='umap_density_modality')
-
-#%% Save target model
-
-target_model_folder_path = model_folder_path.replace('model', 'target_model')
-os.makedirs(target_model_folder_path, exist_ok=True)
-
-target_model.save(
-    dir_path=target_model_folder_path,
-    overwrite=True,
-    save_adata=True,
-    adata_file_name="target_adata.h5ad",
-    save_adata_atac=True,
-    adata_atac_file_name=f"target_adata_atac.h5ad"
-)
 
 
 #%% 4.1 Visualize NicheCompass Latent GP Space (Source)

@@ -31,6 +31,54 @@ from torch_geometric.utils import add_self_loops, remove_self_loops
 
 from optuna.distributions import CategoricalDistribution
 
+def _is_truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _read_int_env(var_name: str, default: int) -> int:
+    raw_value = os.environ.get(var_name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        warnings.warn(
+            f"Invalid {var_name}={raw_value!r}; using default {default}.",
+            RuntimeWarning,
+        )
+        return default
+
+
+def _configure_omnipath() -> None:
+    """
+    Configure OmniPath networking defaults before importing NicheCompass modules.
+    """
+    try:
+        import omnipath as op
+    except Exception:
+        return
+
+    op.options.autoload = False
+    op.options.timeout = _read_int_env("BAKLAVA_OMNIPATH_TIMEOUT", 600)
+    op.options.num_retries = _read_int_env("BAKLAVA_OMNIPATH_NUM_RETRIES", 10)
+
+    # Prefer no-TLS endpoint by default on cluster environments where HTTPS
+    # handshakes/proxies often trigger connect timeouts.
+    use_no_tls = _is_truthy(os.environ.get("BAKLAVA_OMNIPATH_NO_TLS", "1"))
+    explicit_url = os.environ.get("BAKLAVA_OMNIPATH_URL")
+    if explicit_url:
+        op.options.url = explicit_url
+    elif use_no_tls:
+        op.options.url = "http://no-tls.omnipathdb.org"
+
+    cache_dir = os.environ.get("BAKLAVA_OMNIPATH_CACHE_DIR")
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+        op.options.cache_dir = cache_dir
+
+
+_configure_omnipath()
+
 from nichecompass.data import (SpatialAnnTorchDataset,
                                dataprocessors)
 from nichecompass.data.utils import encode_labels, sparse_mx_to_sparse_tensor

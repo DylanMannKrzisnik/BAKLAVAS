@@ -85,9 +85,34 @@ def parse_args(notebook: bool = False) -> argparse.Namespace:
         "--mlflow-base-dir",
         default=None,
         help=(
-            "Base directory for MLflow tracking DB and artifacts (e.g. BAKLAVA_base). "
-            "If set, one SQLite DB and one artifact tree are used so 'mlflow ui' can "
-            "load all runs from one place. Also respects MLFLOW_BASE_DIR env var."
+            "Base directory used for MLflow tracking state and artifacts "
+            "(e.g. BAKLAVA_base). Also respects MLFLOW_BASE_DIR env var."
+        ),
+    )
+    parser.add_argument(
+        "--mlflow-backend",
+        default="auto",
+        choices=["auto", "sqlite", "file"],
+        help=(
+            "How to configure MLflow tracking when --mlflow-tracking-uri is not set. "
+            "'auto' uses 'file' for worker/parallel contexts and 'sqlite' otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--mlflow-tracking-uri",
+        default=None,
+        help=(
+            "Explicit MLflow tracking URI (e.g. postgresql://..., "
+            "mysql+pymysql://..., sqlite:///..., file:///...). "
+            "Overrides --mlflow-backend and MLFLOW_TRACKING_URI."
+        ),
+    )
+    parser.add_argument(
+        "--allow-sqlite-lock-risk",
+        action="store_true",
+        help=(
+            "Allow SQLite tracking in worker/parallel contexts. By default this is "
+            "blocked because concurrent MLflow writers frequently lock SQLite."
         ),
     )
     if notebook:
@@ -194,6 +219,46 @@ def _dump_hpo_log_to_file(
             f.write("(no stderr output captured)\n")
 
 
+def _configure_mlflow_tracking(
+    args: argparse.Namespace,
+    mlflow,
+    mlflow_base_dir: str,
+    is_parallel_context: bool,
+) -> tuple[str, str]:
+    explicit_tracking_uri = args.mlflow_tracking_uri or os.environ.get("MLFLOW_TRACKING_URI")
+    selected_backend = "uri"
+
+    if explicit_tracking_uri:
+        tracking_uri = explicit_tracking_uri
+    else:
+        selected_backend = args.mlflow_backend
+        if selected_backend == "auto":
+            selected_backend = "file" if is_parallel_context else "sqlite"
+
+        if selected_backend == "sqlite":
+            mlflow_db_path = os.path.join(mlflow_base_dir, "mlflow.db")
+            tracking_uri = f"sqlite:///{mlflow_db_path}"
+        elif selected_backend == "file":
+            mlruns_dir = os.path.join(mlflow_base_dir, "mlruns")
+            os.makedirs(mlruns_dir, exist_ok=True)
+            tracking_uri = f"file://{mlruns_dir}"
+        else:
+            raise ValueError(f"Unsupported MLflow backend: {selected_backend}")
+
+    using_sqlite = tracking_uri.startswith("sqlite:")
+    if using_sqlite and is_parallel_context and not args.allow_sqlite_lock_risk:
+        raise ValueError(
+            "SQLite MLflow tracking is disabled for worker/parallel contexts because "
+            "it often fails with 'database is locked'. Use --mlflow-backend file, "
+            "--mlflow-tracking-uri <postgres/mysql URI>, or pass "
+            "--allow-sqlite-lock-risk to override."
+        )
+
+    mlflow.set_tracking_uri(tracking_uri)
+    print(f"MLflow tracking URI: {tracking_uri} (backend={selected_backend})")
+    return tracking_uri, selected_backend
+
+
 #%%
 def main() -> None:
     args = parse_args()
@@ -257,21 +322,20 @@ def main() -> None:
         timestamp = now.strftime("%d%m%Y_%H%M%S")
         study_name = f"{args.study_name_prefix}_{timestamp}"
 
-    # Keep MLflow in ONE place so "mlflow ui" consistently shows all runs.
-    # Default: directory above the repo (i.e., BAKLAVA_base), but can be overridden
-    # via --mlflow-base-dir or MLFLOW_BASE_DIR.
-    #
-    # Run the UI with:
-    #   mlflow ui --backend-store-uri sqlite:////<mlflow_base_dir>/mlflow_tracking/mlflow.db
+    # Keep MLflow in one place so `mlflow ui` can consistently discover runs.
     default_base_dir = str(Path(__file__).resolve().parents[2])
     mlflow_base_dir = args.mlflow_base_dir or os.environ.get("MLFLOW_BASE_DIR") or default_base_dir
     mlflow_base_dir = os.path.abspath(mlflow_base_dir)
-
-    mlflow_tracking_dir = os.path.join(mlflow_base_dir)
-    os.makedirs(mlflow_tracking_dir, exist_ok=True)
-    mlflow_db_path = os.path.join(mlflow_tracking_dir, "mlflow.db")
-    mlflow.set_tracking_uri(f"sqlite:///{mlflow_db_path}")
-    print(f"MLflow backend-store-uri: sqlite:////{mlflow_db_path.lstrip('/')}")
+    os.makedirs(mlflow_base_dir, exist_ok=True)
+    is_parallel_context = args.launch_workers or (
+        args.parent_run_id is not None and args.gpu is not None
+    )
+    _tracking_uri, mlflow_backend = _configure_mlflow_tracking(
+        args=args,
+        mlflow=mlflow,
+        mlflow_base_dir=mlflow_base_dir,
+        is_parallel_context=is_parallel_context,
+    )
 
     mlflow_artifact_dir = os.path.join(mlflow_base_dir, "mlflow_artifacts", study_name)
     os.makedirs(mlflow_artifact_dir, exist_ok=True)
@@ -307,7 +371,11 @@ def main() -> None:
                 train_cfg=train_cfg,
                 search_space=search_space,
                 study_name=study_name,
-                extra={"n_workers": len(gpu_list), "total_trials": total_trials},
+                extra={
+                    "n_workers": len(gpu_list),
+                    "total_trials": total_trials,
+                    "mlflow_backend": mlflow_backend,
+                },
             )
             _launch_workers(args, cache_dir, parent_run_id, gpu_list, study_name)
         return
@@ -337,7 +405,10 @@ def main() -> None:
             train_cfg=train_cfg,
             search_space=search_space,
             study_name=study_name,
-            extra={"total_trials": total_trials},
+            extra={
+                "total_trials": total_trials,
+                "mlflow_backend": mlflow_backend,
+            },
         )
 
     def objective(trial: optuna.Trial) -> float:
@@ -434,6 +505,8 @@ def _launch_workers(
         env["CUDA_VISIBLE_DEVICES"] = gpu
         if mlflow_base:
             env["MLFLOW_BASE_DIR"] = mlflow_base
+        if args.mlflow_tracking_uri:
+            env["MLFLOW_TRACKING_URI"] = args.mlflow_tracking_uri
         cmd = [
             sys.executable,
             os.path.abspath(__file__),
@@ -449,7 +522,13 @@ def _launch_workers(
             parent_run_id,
             "--gpu",
             gpu,
+            "--mlflow-backend",
+            args.mlflow_backend,
         ]
+        if args.allow_sqlite_lock_risk:
+            cmd.append("--allow-sqlite-lock-risk")
+        if args.mlflow_tracking_uri:
+            cmd.extend(["--mlflow-tracking-uri", args.mlflow_tracking_uri])
         if args.mlflow_base_dir:
             cmd.extend(["--mlflow-base-dir", args.mlflow_base_dir])
         if cache_dir:

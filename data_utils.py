@@ -7,6 +7,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import squidpy as sq
 
 __all__ = [
     "multimodal_latents_adata",
@@ -208,9 +209,6 @@ def load_spatial_atac_rna_mouse_brain_source(
     (adata_rna, adata_atac, source_assembly, source_name)
     """
 
-    # Local import: squidpy is optional in some environments.
-    import squidpy as sq
-
     adata = sc.read_h5ad(os.path.join(so_data_folder_path, f"{dataset}.h5ad"))
     adata_atac = sc.read_h5ad(os.path.join(so_data_folder_path, f"{dataset}_atac.h5ad"))
 
@@ -244,6 +242,80 @@ def load_spatial_atac_rna_mouse_brain_source(
 
     return adata, adata_atac, "mm10", "Spatial_ATAC_RNA"
 
+def load_mousedev_spatial_triomic_data(
+    data_dir: str,
+    make_adjacency_symmetric: bool = True,
+    adj_key: str = "spatial_connectivities",
+) -> Tuple[ad.AnnData, ad.AnnData, str, str]:
+    """Load the mousedev spatial triomic dataset."""
+
+    rna_datapath = os.path.join(data_dir, "rna_adata.h5ad")
+    atac_datapath = os.path.join(data_dir, "MouseDev_Triomic_ATAC.h5ad")
+    rna_adata = sc.read_h5ad(rna_datapath, backed="r")
+    atac_adata = sc.read_h5ad(atac_datapath, backed="r")
+
+    ## reformat atac obs_names to match rna_adata
+    atac_obs_names = atac_adata.obs_names.copy()
+    atac_adata.obs_names = atac_obs_names.str.split('_|fragments:|-').str[-2] + '_' + atac_obs_names.str.split('_|fragments:').str[2]
+
+    ## filter to only overlap
+    obs_overlap = np.intersect1d(rna_adata.obs_names, atac_adata.obs_names)
+    rna_adata = rna_adata[rna_adata.obs_names.isin(obs_overlap)].to_memory()
+    atac_adata = atac_adata[atac_adata.obs_names.isin(obs_overlap)].to_memory()
+
+    ## sort cells such that they are in the same order in both adatas
+    rna_adata = rna_adata[rna_adata.obs_names.argsort()].copy()
+    atac_adata = atac_adata[atac_adata.obs_names.argsort()].copy()
+    assert (rna_adata.obs_names == atac_adata.obs_names).all()
+
+    ## load spatial coordinates
+    coords_df_list = []
+    import tarfile
+    with tarfile.open(os.path.join(data_dir, "GSE308623.tar"), "r") as tar:
+        for member in tar.getnames():
+            if member.endswith("tissue_positions_list.csv.gz"):
+                sample_label = member.split("_")[2]
+                if sample_label.startswith("P"): # ignores non-developmental samples from LPC experiments
+                    coords_df = pd.read_csv(tar.extractfile(member), index_col=0, header=None, compression="gzip")
+                    coords_df.columns = ["in_tissue", "array_row", "array_col", "pxl_row_in_fullres", "pxl_col_in_fullres"]
+                    coords_df.index = coords_df.index.astype(str)
+                    coords_df.index.name = "barcode"
+                    coords_df.index = coords_df.index + "_" + sample_label
+                    coords_df_list.append(coords_df)
+
+    coords_df = pd.concat(coords_df_list)
+
+    rna_adata.obs = rna_adata.obs.merge(coords_df, left_index=True, right_index=True, how="left")
+    atac_adata.obs = atac_adata.obs.merge(coords_df, left_index=True, right_index=True, how="left")
+
+    in_tissue_value_counts = pd.concat([
+        rna_adata.obs["in_tissue"].value_counts(),
+        atac_adata.obs["in_tissue"].value_counts()
+        ])
+    if not in_tissue_value_counts.index.unique().tolist() == [0, 1]:
+        print("WARNING: overlapping samples don't contain both in_tissue values (0 and 1)")
+
+    ## add spatial coordinates to adatas
+    rna_adata.obsm["spatial"] = rna_adata.obs[["pxl_col_in_fullres", "pxl_row_in_fullres"]].to_numpy(dtype=float)
+    atac_adata.obsm["spatial"] = atac_adata.obs[["pxl_col_in_fullres", "pxl_row_in_fullres"]].to_numpy(dtype=float)
+
+    ## build spatial neighbors
+    sq.gr.spatial_neighbors(
+        rna_adata,
+        coord_type="generic",
+        spatial_key="spatial",
+        n_neighs=4,
+    )
+
+    if make_adjacency_symmetric and (adj_key in rna_adata.obsp):
+        rna_adata.obsp[adj_key] = rna_adata.obsp[adj_key].maximum(rna_adata.obsp[adj_key].T)
+
+    if "counts" not in rna_adata.layers:
+        rna_adata.layers["counts"] = rna_adata.X.astype(np.int32).copy()
+    if "counts" not in atac_adata.layers:
+        atac_adata.layers["counts"] = atac_adata.X.astype(np.int32).copy()
+
+    return rna_adata, atac_adata, "mm10", "mousedev_spatial_triomic"
 
 def load_10x_mouse_brain_ad_data(
     data_dir: Optional[str] = None,

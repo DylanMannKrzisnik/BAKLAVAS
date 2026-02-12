@@ -38,10 +38,8 @@ pprint(dotenv_values())
 #%% 1.1 Import Libraries
 
 import os
-import random
 import warnings
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import gdown
@@ -50,44 +48,30 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import seaborn as sns
-import squidpy as sq
 from matplotlib import gridspec
 from sklearn.preprocessing import MinMaxScaler
 import mlflow
-import mygene as mg
 import anndata as ad
-from muon import MuData
 
-from nichecompass.utils import (add_gps_from_gp_dict_to_adata,
-                                add_multimodal_mask_to_adata,
-                                create_new_color_dict,
+from nichecompass.utils import (create_new_color_dict,
                                 compute_communication_gp_network,
                                 visualize_communication_gp_network,
-                                extract_gp_dict_from_collectri_tf_network,
-                                extract_gp_dict_from_mebocost_ms_interactions,
-                                extract_gp_dict_from_nichenet_lrt_interactions,
-                                extract_gp_dict_from_omnipath_lr_interactions,
-                                filter_and_combine_gp_dict_gps_v2,
-                                get_gene_annotations,
-                                generate_enriched_gp_info_plots,
-                                generate_multimodal_mapping_dict,
-                                get_unique_genes_from_gp_dict)
+                                generate_enriched_gp_info_plots)
 
 #%% Import custom NicheCompass and DataAligner classes
 
 import sys
 
 # Allow importing `nichecompass_utils.py` from repo root when running this script
-BAKLAVA_ROOT = "/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA"
-sys.path.append(str(BAKLAVA_ROOT))
+sys.path.append(os.environ.get('BAKLAVA_ROOT'))
 from nichecompass_utils import CustomNicheCompass
-from data_aligner import DataAligner
 
 #%% 1.2 Define Parameters
 
 
 ### Dataset ###
-dataset = "spatial_atac_rna_seq_mouse_brain"
+dataset = "mousedev_spatial_triomic"
+datapath = os.path.join(os.environ.get('DATAPATH'), "MouseDev_Spatial_Triomic")
 species = "mouse"
 spatial_key = "spatial"
 n_neighbors = 4
@@ -134,35 +118,19 @@ sample_key = "batch"
 spot_size = 30
 differential_gp_test_results_key = "nichecompass_differential_gp_test_results"
 
+#%% Configure Paths
 
-#%% 1.3 Run Notebook Setup
-
-warnings.filterwarnings("ignore")
-pd.set_option("display.max_columns", None)
-
-# Notebook-style pretty display (safe fallback for script execution)
-try:
-    from IPython.display import display  # type: ignore
-except Exception:  # pragma: no cover
-    def display(x):  # type: ignore
-        print(x)
+# Define paths
+outpath = "/home/mcb/users/dmannk/BAKLAVA_base/outputs/nichecompass_mouse_brain_multimodal"
+os.makedirs(outpath, exist_ok=True)
 
 # Get time of notebook execution for timestamping saved artifacts
 now = datetime.now()
 current_timestamp = now.strftime("%d%m%Y_%H%M%S")
 
-
-#%% 1.4 Configure Paths
-
-# Define paths
-datapath = "/home/mcb/users/dmannk/BAKLAVA_base/data/Spatial_ATAC_RNA/mouse"
-outpath = "/home/mcb/users/dmannk/BAKLAVA_base/outputs/nichecompass_mouse_brain_multimodal"
-os.makedirs(datapath, exist_ok=True)
-os.makedirs(outpath, exist_ok=True)
-
-ga_data_folder_path = f"{datapath}/gene_annotations"
-gp_data_folder_path = f"{datapath}/gene_programs"
-so_data_folder_path = f"{datapath}/spatial_omics"
+ga_data_folder_path = f"{os.environ.get('DATAPATH')}/gene_annotations"
+gp_data_folder_path = f"{os.environ.get('DATAPATH')}/gene_programs"
+#so_data_folder_path = f"{datapath}/spatial_omics"
 omnipath_lr_network_file_path = f"{gp_data_folder_path}/omnipath_lr_network.csv"
 nichenet_lr_network_file_path = f"{gp_data_folder_path}/nichenet_lr_network_v2_{species}.csv"
 nichenet_ligand_target_matrix_file_path = f"{gp_data_folder_path}/nichenet_ligand_target_matrix_v2_{species}.csv"
@@ -180,20 +148,21 @@ figure_folder_path = f"{artifacts_folder_path}/multimodal/{current_timestamp}/fi
 
 os.makedirs(model_folder_path, exist_ok=True)
 os.makedirs(figure_folder_path, exist_ok=True)
-os.makedirs(so_data_folder_path, exist_ok=True)
 os.makedirs(gp_data_folder_path, exist_ok=True)
 os.makedirs(ga_data_folder_path, exist_ok=True)
+#os.makedirs(so_data_folder_path, exist_ok=True)
 
 
 #%% 1.6 Download Files (Optional)
 # You can skip this part if you have downloaded the files mentioned above manually, or you are using your own data.
-
+'''
 if not os.path.exists(os.path.join(so_data_folder_path, 'spatial_atac_rna_seq_mouse_brain_atac.h5ad')):
     gdown.download("https://drive.google.com/file/d/1WH_9PYV_AEcLd5QVNILig-_gfS-EdRVR', so_data_folder_path+'/spatial_atac_rna_seq_mouse_brain_atac.h5ad")
 if not os.path.exists(os.path.join(so_data_folder_path, 'spatial_atac_rna_seq_mouse_brain.h5ad')):
     gdown.download("https://drive.google.com/file/d/1NpRynEDnGnxab6sHJy4AeitSKnwfX2Mi', so_data_folder_path+'/spatial_atac_rna_seq_mouse_brain.h5ad")
 if not os.path.exists(os.path.join(so_data_folder_path, 'spatial_atac_rna_seq_mouse_brain_cell_type_annotations.csv')):
     gdown.download("https://drive.google.com/file/d/1w3eorJojnndhmeTicbin7eRjR8Pwj7O-', so_data_folder_path+'/spatial_atac_rna_seq_mouse_brain_cell_type_annotations.csv")
+'''
 
 #%% 2. MODEL PREPARATION
 
@@ -238,6 +207,7 @@ else:
     # Fresh rebuild from raw files.
     from data_utils import (
         load_spatial_atac_rna_mouse_brain_source,
+        load_mousedev_spatial_triomic_data,
         load_10x_mouse_brain_ad_data,
         basic_feature_processing_for_alignment,
         annotate_genes_and_peaks_for_alignment,
@@ -249,13 +219,8 @@ else:
         add_pseudocount_layers,
     )
     
-    adata, adata_atac, source_assembly, source_name = load_spatial_atac_rna_mouse_brain_source(
-        so_data_folder_path=so_data_folder_path,
-        dataset=dataset,
-        cell_type_key=cell_type_key,
-        spatial_key=spatial_key,
-        n_neighbors=n_neighbors,
-        adj_key=adj_key,
+    adata, adata_atac, source_assembly, source_name = load_mousedev_spatial_triomic_data(
+        data_dir=datapath,
     )
     target_rna, target_atac, target_assembly, target_name = load_10x_mouse_brain_ad_data()
 
@@ -1611,7 +1576,7 @@ source_model = CustomNicheCompass.load(
     gp_names_key=gp_names_key
 )
 
-source_samples = source_model.adata.obs[sample_key].unique().tolist()
+#source_samples = source_model.adata.obs[sample_key].unique().tolist()
 
 target_model = CustomNicheCompass.load(
     dir_path=model_folder_path,
@@ -1621,6 +1586,20 @@ target_model = CustomNicheCompass.load(
 )
 
 #target_samples = target_model.adata.obs[target_sample_key].unique().tolist()
+
+#%% Save target model
+
+target_model_folder_path = model_folder_path.replace('model', 'target_model')
+os.makedirs(target_model_folder_path, exist_ok=True)
+
+target_model.save(
+    dir_path=target_model_folder_path,
+    overwrite=True,
+    save_adata=True,
+    adata_file_name="target_adata.h5ad",
+    save_adata_atac=True,
+    adata_atac_file_name=f"target_adata_atac.h5ad"
+)
 
 #%% Compute neighbor graph and UMAP embedding for target data
 
@@ -1751,20 +1730,6 @@ sc.pl.umap(clip_embeddings_adata, color=['modality', 'leiden'], ncols=3, wspace=
 
 sc.tl.embedding_density(clip_embeddings_adata, groupby='modality')
 sc.pl.embedding_density(clip_embeddings_adata, key='umap_density_modality')
-
-#%% Save target model
-
-target_model_folder_path = model_folder_path.replace('model', 'target_model')
-os.makedirs(target_model_folder_path, exist_ok=True)
-
-target_model.save(
-    dir_path=target_model_folder_path,
-    overwrite=True,
-    save_adata=True,
-    adata_file_name="target_adata.h5ad",
-    save_adata_atac=True,
-    adata_atac_file_name=f"target_adata_atac.h5ad"
-)
 
 
 #%% 4.1 Visualize NicheCompass Latent GP Space (Source)

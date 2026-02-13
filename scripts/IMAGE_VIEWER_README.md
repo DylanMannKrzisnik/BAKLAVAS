@@ -2,7 +2,7 @@
 
 ## Overview
 
-The HPO script now automatically generates HTML image viewers for common artifact patterns and logs them to the parent MLflow run. This allows you to view all trial artifacts (e.g., UMAP plots, loss curves) in a single page instead of opening individual tabs for each image. Each image is automatically labeled with its trial name (e.g., "trial_0001") for easy identification.
+The HPO script now automatically generates HTML image viewers for common artifact patterns. This allows you to view all trial artifacts (e.g., UMAP plots, loss curves) in a single page instead of opening individual tabs for each image. Each image is automatically labeled with its trial name (e.g., "trial_0001") for easy identification. HTML files use relative paths and are saved at the study level for easy access.
 
 ## Features
 
@@ -13,7 +13,7 @@ The HPO script now automatically generates HTML image viewers for common artifac
   - `*loss_curves.png` - Training loss curves
   - `*embedding_*.png` - Embedding visualizations
 - **Responsive grid layout**: Images are displayed in a responsive grid with hover effects
-- **Logged as artifacts**: HTML files are logged to the parent MLflow run for easy access
+- **Saved at study level**: HTML files are saved in the study directory (not logged to MLflow) to preserve relative paths
 
 ## Usage
 
@@ -28,27 +28,56 @@ python scripts/hpo_optuna_mouse_brain.py --experiment-name my_hpo_experiment
 After the study completes, you'll see:
 ```
 Generating image viewer HTML files...
-  Logged: image_viewer_target_holdout_umap_epoch__png.html
-  Logged: image_viewer_loss_curves_png.html
-  Logged: image_viewer_embedding__png.html
+  Generated: image_viewer_target_holdout_umap_epoch__png.html
+  Generated: image_viewer_loss_curves_png.html
+  Generated: image_viewer_embedding__png.html
 ```
 
 ### Accessing the Image Viewers
 
-1. **Via MLflow UI**:
-   - Start MLflow UI: `mlflow ui --backend-store-uri sqlite:////path/to/mlflow.db`
-   - Navigate to your experiment and parent run
-   - Click on the "Artifacts" tab
-   - Download and open any `image_viewer_*.html` file in your browser
+**Where to find the paths in MLflow**:
+   - In the MLflow UI, open the parent HPO run → **Artifacts** tab.
+   - Open **image_viewer_locations.txt** to see the full paths where each HTML file was saved and how to view them.
 
-2. **Via File System**:
+**Via File System**:
    - Image viewers are saved in: `mlflow_artifacts/<study_name>/image_viewer_*.html`
-   - Open them directly in your browser or use a simple HTTP server:
-     ```bash
-     cd mlflow_artifacts/<study_name>
-     python -m http.server 8000
-     # Then navigate to http://localhost:8000/image_viewer_target_holdout_umap_epoch__png.html
-     ```
+   - They use relative paths to images, so they work when served via HTTP server (see below)
+   - To view them, use the HTTP server method described in the next section
+
+### Viewing from a server (recommended when you're SSH'd in)
+
+The generated HTML uses **relative image paths**, so you can serve it over HTTP and view it from your laptop.
+
+1. **On the server**, start an HTTP server from the **MLflow artifacts directory** (the parent directory of your study):
+
+   ```bash
+   cd /path/to/mlflow_artifacts    # e.g. ~/BAKLAVA_base/mlflow_artifacts
+   python -m http.server 8000
+   ```
+
+2. **On your laptop**, use SSH port forwarding so that `localhost:8000` on your machine is tunneled to the server’s port 8000:
+
+   ```bash
+   ssh -L 8000:localhost:8000 your_username@server_address
+   ```
+
+   (If the server is already running the HTTP server in another session, you only need this tunnel once per SSH connection.)
+
+3. **In your laptop browser**, open:
+
+   ```
+   http://localhost:8000/<study_name>/image_viewer_<pattern>.html
+   ```
+
+   Example:
+   ```
+   http://localhost:8000/hpo_13022026_095948/image_viewer_target_holdout_umap_epoch__png.html
+   ```
+
+Images will load because the HTML uses relative paths like `./run_id/artifacts/umap/...`.
+
+**Alternative: open in Cursor on the server**  
+If you use Cursor with remote SSH, you can right‑click the `.html` file and choose **“Open with Browser”** or **“Open Preview”**. The embedded browser may resolve `file://` image URLs against the server filesystem, so the viewer can work without running a separate HTTP server.
 
 ## Example Output
 

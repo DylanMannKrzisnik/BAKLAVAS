@@ -21,7 +21,7 @@ DEFAULT_TUNED_HPARAM_KEYS = [
 ]
 
 # HPO convenience override for TrainConfig.n_epochs
-HPO_N_EPOCHS = 5
+HPO_N_EPOCHS = 50
 
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"
@@ -50,7 +50,7 @@ class TrialParams:
 class TrainConfig:
     n_epochs: int = 10
     n_epochs_all_gps: int = 10
-    lr: float = 0.001
+    lr: float = 0.0001
     lambda_edge_recon: float = 500000.0
     lambda_gene_expr_recon: float = 300.0
     lambda_chrom_access_recon: float = 300.0
@@ -267,6 +267,41 @@ def run_trial(
     return metric
 
 
+def get_child_run_artifact_uris(parent_run_id: str) -> Dict[str, str]:
+    """
+    Get artifact URIs for all child runs of a parent run.
+    
+    Args:
+        parent_run_id: Parent MLflow run ID
+    
+    Returns:
+        Dictionary mapping run_id to artifact_uri
+    """
+    try:
+        from mlflow.tracking import MlflowClient
+        client = MlflowClient()
+        
+        # Get parent run to find experiment_id
+        parent_run = client.get_run(parent_run_id)
+        experiment_id = parent_run.info.experiment_id
+        
+        # Search for child runs
+        runs = client.search_runs(
+            experiment_ids=[experiment_id],
+            filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'",
+            max_results=10000,
+        )
+        
+        artifact_uris = {}
+        for run in runs:
+            artifact_uris[run.info.run_id] = run.info.artifact_uri
+        
+        return artifact_uris
+    except Exception as e:
+        print(f"Warning: Could not fetch child run artifact URIs: {e}")
+        return {}
+
+
 def find_images_by_pattern(
     base_dir: str,
     pattern: str,
@@ -295,6 +330,54 @@ def find_images_by_pattern(
     ])
     
     return image_paths
+
+
+def find_images_from_mlflow_runs(
+    parent_run_id: str,
+    pattern: str,
+) -> Dict[str, List[str]]:
+    """
+    Find images matching a pattern across all child runs by querying MLflow.
+    
+    Args:
+        parent_run_id: Parent MLflow run ID
+        pattern: Filename pattern to match (e.g., "*target_holdout_umap*.png")
+    
+    Returns:
+        Dictionary mapping run_id to list of image paths found for that run
+    """
+    artifact_uris = get_child_run_artifact_uris(parent_run_id)
+    
+    images_by_run = {}
+    for run_id, artifact_uri in artifact_uris.items():
+        # Convert file:// URI to local path
+        if artifact_uri.startswith("file://"):
+            local_path = artifact_uri[7:]  # Remove 'file://'
+        elif artifact_uri.startswith("/"):
+            local_path = artifact_uri
+        else:
+            print(f"Warning: Unsupported artifact URI scheme: {artifact_uri}")
+            continue
+        
+        # Find matching images in this run's artifact directory
+        if os.path.exists(local_path):
+            result = subprocess.run(
+                ["find", ".", "-name", pattern],
+                capture_output=True,
+                text=True,
+                cwd=local_path,
+            )
+            
+            found_images = [
+                os.path.join(local_path, line.strip().lstrip("./"))
+                for line in result.stdout.strip().split('\n')
+                if line.strip()
+            ]
+            
+            if found_images:
+                images_by_run[run_id] = found_images
+    
+    return images_by_run
 
 
 def get_trial_name_mapping(parent_run_id: Optional[str] = None) -> Dict[str, str]:
@@ -364,28 +447,54 @@ def generate_image_viewer_html(
     output_filename: str = "image_viewer.html",
     title: Optional[str] = None,
     parent_run_id: Optional[str] = None,
-) -> str:
+    serve_from_base_dir: Optional[str] = None,
+) -> Optional[str]:
     """
     Generate an HTML file that displays all matching images in a grid layout.
     
     Args:
-        base_dir: Base directory to search for images
+        base_dir: Base directory to search for images (used as output location)
         pattern: Glob pattern to match (e.g., "*target_holdout_umap_epoch_5.png")
         output_filename: Name of the output HTML file
         title: Optional title for the HTML page (defaults to pattern)
-        parent_run_id: Parent MLflow run ID to extract trial names from
+        parent_run_id: Parent MLflow run ID to extract trial names and artifact locations
+        serve_from_base_dir: Deprecated - kept for backward compatibility only.
+            Image paths are now always relative to the HTML file location, which works
+            both when opening HTML directly and when serving over HTTP.
     
     Returns:
-        Absolute path to the generated HTML file
+        Absolute path to the generated HTML file, or None if no images found
     """
-    image_paths = find_images_by_pattern(base_dir, pattern)
-    
-    if not image_paths:
-        print(f"Warning: No images found matching pattern '{pattern}' in {base_dir}")
-        return None
-    
-    # Get trial name mapping if parent_run_id is provided
-    trial_mapping = get_trial_name_mapping(parent_run_id) if parent_run_id else {}
+    # If parent_run_id is provided, use MLflow-based discovery
+    if parent_run_id:
+        images_by_run = find_images_from_mlflow_runs(parent_run_id, pattern)
+        
+        if not images_by_run:
+            print(f"Warning: No images found matching pattern '{pattern}' in MLflow child runs")
+            return None
+        
+        # Flatten to list of (run_id, image_path) tuples
+        image_items = []
+        for run_id, image_paths in images_by_run.items():
+            for img_path in image_paths:
+                image_items.append((run_id, img_path))
+        
+        # Sort by run_id for consistency
+        image_items.sort(key=lambda x: x[0])
+        
+        # Get trial name mapping
+        trial_mapping = get_trial_name_mapping(parent_run_id)
+    else:
+        # Fallback to directory-based discovery
+        image_paths = find_images_by_pattern(base_dir, pattern)
+        
+        if not image_paths:
+            print(f"Warning: No images found matching pattern '{pattern}' in {base_dir}")
+            return None
+        
+        # Convert to (run_id, path) format (run_id will be extracted from path)
+        image_items = [(None, img_path) for img_path in image_paths]
+        trial_mapping = {}
     
     if title is None:
         title = f"Image Viewer - {pattern}"
@@ -453,31 +562,64 @@ def generate_image_viewer_html(
 </head>
 <body>
     <h1>{title}</h1>
-    <div class="stats">Total images: {len(image_paths)}</div>
+    <div class="stats">Total images: {len(image_items)}</div>
     <div class="image-grid">
 """
     
+    # Determine the HTML file's directory for relative path calculation
+    output_path = os.path.join(base_dir, output_filename)
+    html_dir = os.path.dirname(os.path.abspath(output_path))
+    
     # Add each image
-    for img_path in image_paths:
-        # Extract trial name if mapping is available
+    for run_id, img_path in image_items:
+        # Get trial name
         trial_name = None
-        if trial_mapping:
-            run_id = extract_run_id_from_path(img_path)
-            if run_id and run_id in trial_mapping:
-                trial_name = trial_mapping[run_id]
+        if run_id and run_id in trial_mapping:
+            trial_name = trial_mapping[run_id]
+        elif not run_id and trial_mapping:
+            # Extract run_id from path for directory-based discovery
+            extracted_run_id = extract_run_id_from_path(img_path)
+            if extracted_run_id and extracted_run_id in trial_mapping:
+                trial_name = trial_mapping[extracted_run_id]
+        
+        # Always use relative paths from the HTML file location
+        # This ensures images work both when opening HTML directly and when served via HTTP
+        abs_img_path = img_path if os.path.isabs(img_path) else os.path.abspath(os.path.join(base_dir, img_path))
+        
+        try:
+            # Calculate relative path from HTML file directory to image
+            rel_path = os.path.relpath(abs_img_path, html_dir)
+            img_src = rel_path.replace(os.sep, "/")
+        except ValueError:
+            # If paths are on different drives (Windows) or can't be made relative,
+            # fall back to relative path from base_dir
+            try:
+                abs_base_dir = os.path.abspath(base_dir)
+                rel_path = os.path.relpath(abs_img_path, abs_base_dir)
+                img_src = rel_path.replace(os.sep, "/")
+            except ValueError:
+                # Last resort: if img_path was already relative, use it as-is
+                # Otherwise use just the filename (less reliable but better than absolute)
+                if not os.path.isabs(img_path):
+                    img_src = img_path.replace(os.sep, "/")
+                else:
+                    img_src = os.path.basename(img_path)
+        
+        # Display path shows the original path for reference
+        display_path = img_path
         
         # Build HTML with or without trial name
         if trial_name:
             html_content += f"""        <div class="image-container">
             <div class="trial-name">{trial_name}</div>
-            <div class="image-title">{img_path}</div>
-            <img src="{img_path}" alt="{img_path}" loading="lazy">
+            <div class="image-title">{display_path}</div>
+            <img src="{img_src}" alt="{display_path}" loading="lazy">
         </div>
 """
         else:
             html_content += f"""        <div class="image-container">
-            <div class="image-title">{img_path}</div>
-            <img src="{img_path}" alt="{img_path}" loading="lazy">
+            <div class="image-title">{display_path}</div>
+            <img src="{img_src}" alt="{display_path}" loading="lazy">
         </div>
 """
     
@@ -491,7 +633,7 @@ def generate_image_viewer_html(
     with open(output_path, 'w') as f:
         f.write(html_content)
     
-    print(f"Generated {output_filename} with {len(image_paths)} images")
+    print(f"Generated {output_filename} with {len(image_items)} images")
     return os.path.abspath(output_path)
 
 
@@ -499,6 +641,7 @@ def generate_image_viewers_for_study(
     artifact_dir: str,
     patterns: Optional[List[str]] = None,
     parent_run_id: Optional[str] = None,
+    serve_from_base_dir: Optional[str] = None,
 ) -> List[str]:
     """
     Generate HTML image viewers for common HPO artifact patterns.
@@ -507,6 +650,8 @@ def generate_image_viewers_for_study(
         artifact_dir: MLflow artifact directory for the study
         patterns: List of image patterns to create viewers for. If None, uses defaults.
         parent_run_id: Parent MLflow run ID to extract trial names from
+        serve_from_base_dir: Deprecated - kept for backward compatibility only.
+            Image paths are now always relative to the HTML file location.
     
     Returns:
         List of paths to generated HTML files
@@ -531,6 +676,7 @@ def generate_image_viewers_for_study(
             output_filename=output_filename,
             title=f"Image Viewer - {pattern}",
             parent_run_id=parent_run_id,
+            serve_from_base_dir=serve_from_base_dir,
         )
         
         if html_path:

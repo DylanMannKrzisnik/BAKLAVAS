@@ -312,16 +312,27 @@ def main() -> None:
             )
             _launch_workers(args, cache_dir, parent_run_id, gpu_list, study_name)
             
-            # Generate and log image viewer HTML files after all workers complete
+            # Generate image viewer HTML files after all workers complete
+            # Note: HTML files are NOT logged to MLflow to preserve relative paths
             print("\nGenerating image viewer HTML files...")
             try:
                 viewer_html_files = generate_image_viewers_for_study(
                     mlflow_artifact_dir,
                     parent_run_id=parent_run_id,
+                    serve_from_base_dir=mlflow_base_dir,
                 )
                 for html_file in viewer_html_files:
-                    mlflow.log_artifact(html_file)
-                    print(f"  Logged: {os.path.basename(html_file)}")
+                    print(f"  Generated: {os.path.basename(html_file)}")
+                # Log paths to MLflow so you can see where the HTML files were saved
+                if viewer_html_files:
+                    study_name_dir = os.path.basename(os.path.normpath(mlflow_artifact_dir))
+                    paths_content = (
+                        "Image viewer HTML files (paths below; serve from mlflow_artifacts/ to view):\n\n"
+                        + "\n".join(os.path.abspath(f) for f in viewer_html_files)
+                        + f"\n\nTo view: cd mlflow_artifacts && python -m http.server 8000\n"
+                        f"Then open: http://localhost:8000/{study_name_dir}/<filename>.html\n"
+                    )
+                    mlflow.log_text(paths_content, "image_viewer_locations.txt")
             except Exception as e:
                 print(f"Warning: Failed to generate image viewers: {e}")
         return
@@ -406,16 +417,27 @@ def main() -> None:
     _dump_hpo_log_to_file(study, stdout_output, stderr_output, log_file_path)
     mlflow.log_artifact(log_file_path, "hpo_log.txt")
     
-    # Generate and log image viewer HTML files
+    # Generate image viewer HTML files
+    # Note: HTML files are NOT logged to MLflow to preserve relative paths
     print("\nGenerating image viewer HTML files...")
     try:
         viewer_html_files = generate_image_viewers_for_study(
             mlflow_artifact_dir,
             parent_run_id=parent_run_id,
+            serve_from_base_dir=mlflow_base_dir,
         )
         for html_file in viewer_html_files:
-            mlflow.log_artifact(html_file)
-            print(f"  Logged: {os.path.basename(html_file)}")
+            print(f"  Generated: {os.path.basename(html_file)}")
+        # Log paths to MLflow so you can see where the HTML files were saved
+        if viewer_html_files:
+            study_name_dir = os.path.basename(os.path.normpath(mlflow_artifact_dir))
+            paths_content = (
+                "Image viewer HTML files (paths below; serve from mlflow_artifacts/ to view):\n\n"
+                + "\n".join(os.path.abspath(f) for f in viewer_html_files)
+                + f"\n\nTo view: cd mlflow_artifacts && python -m http.server 8000\n"
+                f"Then open: http://localhost:8000/{study_name_dir}/<filename>.html\n"
+            )
+            mlflow.log_text(paths_content, "image_viewer_locations.txt")
     except Exception as e:
         print(f"Warning: Failed to generate image viewers: {e}")
     

@@ -21,7 +21,7 @@ DEFAULT_TUNED_HPARAM_KEYS = [
 ]
 
 # HPO convenience override for TrainConfig.n_epochs
-HPO_N_EPOCHS = 50
+HPO_N_EPOCHS = 5
 
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"
@@ -297,11 +297,73 @@ def find_images_by_pattern(
     return image_paths
 
 
+def get_trial_name_mapping(parent_run_id: Optional[str] = None) -> Dict[str, str]:
+    """
+    Get mapping of MLflow run_id to run_name for all child runs.
+    
+    Args:
+        parent_run_id: Parent run ID to query child runs from. If None, uses active run.
+    
+    Returns:
+        Dictionary mapping run_id to run_name (e.g., {"abc123...": "trial_0001"})
+    """
+    if parent_run_id is None:
+        active_run = mlflow.active_run()
+        if active_run:
+            parent_run_id = active_run.info.run_id
+        else:
+            return {}
+    
+    # Get all runs with this parent
+    try:
+        from mlflow.tracking import MlflowClient
+        client = MlflowClient()
+        
+        # Get the parent run to find its experiment_id
+        parent_run = client.get_run(parent_run_id)
+        experiment_id = parent_run.info.experiment_id
+        
+        # Search for runs with the parent_run_id tag
+        runs = client.search_runs(
+            experiment_ids=[experiment_id],
+            filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'",
+            max_results=10000,
+        )
+        
+        mapping = {}
+        for run in runs:
+            mapping[run.info.run_id] = run.info.run_name
+        
+        return mapping
+    except Exception as e:
+        print(f"Warning: Could not fetch trial name mapping: {e}")
+        return {}
+
+
+def extract_run_id_from_path(image_path: str) -> Optional[str]:
+    """
+    Extract MLflow run ID from image path.
+    
+    Args:
+        image_path: Path like "./a6e99895149647e9a174ac9a880c076f/artifacts/umap/image.png"
+    
+    Returns:
+        Run ID (hex string) or None if not found
+    """
+    parts = Path(image_path).parts
+    # Look for a part that looks like a run ID (32 character hex string)
+    for part in parts:
+        if len(part) == 32 and all(c in '0123456789abcdef' for c in part):
+            return part
+    return None
+
+
 def generate_image_viewer_html(
     base_dir: str,
     pattern: str,
     output_filename: str = "image_viewer.html",
     title: Optional[str] = None,
+    parent_run_id: Optional[str] = None,
 ) -> str:
     """
     Generate an HTML file that displays all matching images in a grid layout.
@@ -311,6 +373,7 @@ def generate_image_viewer_html(
         pattern: Glob pattern to match (e.g., "*target_holdout_umap_epoch_5.png")
         output_filename: Name of the output HTML file
         title: Optional title for the HTML page (defaults to pattern)
+        parent_run_id: Parent MLflow run ID to extract trial names from
     
     Returns:
         Absolute path to the generated HTML file
@@ -320,6 +383,9 @@ def generate_image_viewer_html(
     if not image_paths:
         print(f"Warning: No images found matching pattern '{pattern}' in {base_dir}")
         return None
+    
+    # Get trial name mapping if parent_run_id is provided
+    trial_mapping = get_trial_name_mapping(parent_run_id) if parent_run_id else {}
     
     if title is None:
         title = f"Image Viewer - {pattern}"
@@ -364,6 +430,13 @@ def generate_image_viewer_html(
             word-break: break-all;
             font-family: monospace;
         }}
+        .trial-name {{
+            font-size: 14px;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 4px;
+            font-family: Arial, sans-serif;
+        }}
         img {{
             width: 100%;
             height: auto;
@@ -386,7 +459,23 @@ def generate_image_viewer_html(
     
     # Add each image
     for img_path in image_paths:
-        html_content += f"""        <div class="image-container">
+        # Extract trial name if mapping is available
+        trial_name = None
+        if trial_mapping:
+            run_id = extract_run_id_from_path(img_path)
+            if run_id and run_id in trial_mapping:
+                trial_name = trial_mapping[run_id]
+        
+        # Build HTML with or without trial name
+        if trial_name:
+            html_content += f"""        <div class="image-container">
+            <div class="trial-name">{trial_name}</div>
+            <div class="image-title">{img_path}</div>
+            <img src="{img_path}" alt="{img_path}" loading="lazy">
+        </div>
+"""
+        else:
+            html_content += f"""        <div class="image-container">
             <div class="image-title">{img_path}</div>
             <img src="{img_path}" alt="{img_path}" loading="lazy">
         </div>
@@ -409,6 +498,7 @@ def generate_image_viewer_html(
 def generate_image_viewers_for_study(
     artifact_dir: str,
     patterns: Optional[List[str]] = None,
+    parent_run_id: Optional[str] = None,
 ) -> List[str]:
     """
     Generate HTML image viewers for common HPO artifact patterns.
@@ -416,6 +506,7 @@ def generate_image_viewers_for_study(
     Args:
         artifact_dir: MLflow artifact directory for the study
         patterns: List of image patterns to create viewers for. If None, uses defaults.
+        parent_run_id: Parent MLflow run ID to extract trial names from
     
     Returns:
         List of paths to generated HTML files
@@ -439,6 +530,7 @@ def generate_image_viewers_for_study(
             pattern=pattern,
             output_filename=output_filename,
             title=f"Image Viewer - {pattern}",
+            parent_run_id=parent_run_id,
         )
         
         if html_path:

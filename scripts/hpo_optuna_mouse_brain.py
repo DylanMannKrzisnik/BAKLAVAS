@@ -315,7 +315,10 @@ def main() -> None:
             # Generate and log image viewer HTML files after all workers complete
             print("\nGenerating image viewer HTML files...")
             try:
-                viewer_html_files = generate_image_viewers_for_study(mlflow_artifact_dir)
+                viewer_html_files = generate_image_viewers_for_study(
+                    mlflow_artifact_dir,
+                    parent_run_id=parent_run_id,
+                )
                 for html_file in viewer_html_files:
                     mlflow.log_artifact(html_file)
                     print(f"  Logged: {os.path.basename(html_file)}")
@@ -406,7 +409,10 @@ def main() -> None:
     # Generate and log image viewer HTML files
     print("\nGenerating image viewer HTML files...")
     try:
-        viewer_html_files = generate_image_viewers_for_study(mlflow_artifact_dir)
+        viewer_html_files = generate_image_viewers_for_study(
+            mlflow_artifact_dir,
+            parent_run_id=parent_run_id,
+        )
         for html_file in viewer_html_files:
             mlflow.log_artifact(html_file)
             print(f"  Logged: {os.path.basename(html_file)}")

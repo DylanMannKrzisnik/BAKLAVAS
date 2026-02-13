@@ -214,6 +214,7 @@ def main() -> None:
         get_or_create_experiment_id,
         resolve_cache_dir,
         run_trial,
+        generate_image_viewers_for_study,
     )
 
     def _log_param_importances_to_mlflow(study: "optuna.Study") -> None:
@@ -310,6 +311,16 @@ def main() -> None:
                 extra={"n_workers": len(gpu_list), "total_trials": total_trials},
             )
             _launch_workers(args, cache_dir, parent_run_id, gpu_list, study_name)
+            
+            # Generate and log image viewer HTML files after all workers complete
+            print("\nGenerating image viewer HTML files...")
+            try:
+                viewer_html_files = generate_image_viewers_for_study(mlflow_artifact_dir)
+                for html_file in viewer_html_files:
+                    mlflow.log_artifact(html_file)
+                    print(f"  Logged: {os.path.basename(html_file)}")
+            except Exception as e:
+                print(f"Warning: Failed to generate image viewers: {e}")
         return
 
     # GridSampler suggests each combination exactly once; study stops when grid is exhausted.
@@ -391,6 +402,16 @@ def main() -> None:
     log_file_path = os.path.join(mlflow_artifact_dir, "hpo_log.txt")
     _dump_hpo_log_to_file(study, stdout_output, stderr_output, log_file_path)
     mlflow.log_artifact(log_file_path, "hpo_log.txt")
+    
+    # Generate and log image viewer HTML files
+    print("\nGenerating image viewer HTML files...")
+    try:
+        viewer_html_files = generate_image_viewers_for_study(mlflow_artifact_dir)
+        for html_file in viewer_html_files:
+            mlflow.log_artifact(html_file)
+            print(f"  Logged: {os.path.basename(html_file)}")
+    except Exception as e:
+        print(f"Warning: Failed to generate image viewers: {e}")
     
     if not args.parent_run_id:
         mlflow.end_run()

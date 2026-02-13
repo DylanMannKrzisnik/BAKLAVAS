@@ -1,6 +1,8 @@
 import inspect
 import os
+import subprocess
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
 import anndata as ad
@@ -263,3 +265,183 @@ def run_trial(
         )
     metric = float(logs[-1])
     return metric
+
+
+def find_images_by_pattern(
+    base_dir: str,
+    pattern: str,
+) -> List[str]:
+    """
+    Find all images matching a pattern in the base directory.
+    
+    Args:
+        base_dir: Base directory to search in
+        pattern: Glob pattern to match (e.g., "*target_holdout_umap_epoch_5.png")
+    
+    Returns:
+        List of relative paths to matching images, sorted
+    """
+    result = subprocess.run(
+        ["find", ".", "-name", pattern],
+        capture_output=True,
+        text=True,
+        cwd=base_dir,
+    )
+    
+    image_paths = sorted([
+        line.strip()
+        for line in result.stdout.strip().split('\n')
+        if line.strip()
+    ])
+    
+    return image_paths
+
+
+def generate_image_viewer_html(
+    base_dir: str,
+    pattern: str,
+    output_filename: str = "image_viewer.html",
+    title: Optional[str] = None,
+) -> str:
+    """
+    Generate an HTML file that displays all matching images in a grid layout.
+    
+    Args:
+        base_dir: Base directory to search for images
+        pattern: Glob pattern to match (e.g., "*target_holdout_umap_epoch_5.png")
+        output_filename: Name of the output HTML file
+        title: Optional title for the HTML page (defaults to pattern)
+    
+    Returns:
+        Absolute path to the generated HTML file
+    """
+    image_paths = find_images_by_pattern(base_dir, pattern)
+    
+    if not image_paths:
+        print(f"Warning: No images found matching pattern '{pattern}' in {base_dir}")
+        return None
+    
+    if title is None:
+        title = f"Image Viewer - {pattern}"
+    
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }}
+        h1 {{
+            color: #333;
+            text-align: center;
+        }}
+        .image-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+            gap: 20px;
+            padding: 20px;
+        }}
+        .image-container {{
+            background: white;
+            border-radius: 8px;
+            padding: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }}
+        .image-container:hover {{
+            transform: scale(1.02);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }}
+        .image-title {{
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 8px;
+            word-break: break-all;
+            font-family: monospace;
+        }}
+        img {{
+            width: 100%;
+            height: auto;
+            display: block;
+            border-radius: 4px;
+        }}
+        .stats {{
+            text-align: center;
+            color: #666;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }}
+    </style>
+</head>
+<body>
+    <h1>{title}</h1>
+    <div class="stats">Total images: {len(image_paths)}</div>
+    <div class="image-grid">
+"""
+    
+    # Add each image
+    for img_path in image_paths:
+        html_content += f"""        <div class="image-container">
+            <div class="image-title">{img_path}</div>
+            <img src="{img_path}" alt="{img_path}" loading="lazy">
+        </div>
+"""
+    
+    html_content += """    </div>
+</body>
+</html>
+"""
+    
+    # Write HTML file
+    output_path = os.path.join(base_dir, output_filename)
+    with open(output_path, 'w') as f:
+        f.write(html_content)
+    
+    print(f"Generated {output_filename} with {len(image_paths)} images")
+    return os.path.abspath(output_path)
+
+
+def generate_image_viewers_for_study(
+    artifact_dir: str,
+    patterns: Optional[List[str]] = None,
+) -> List[str]:
+    """
+    Generate HTML image viewers for common HPO artifact patterns.
+    
+    Args:
+        artifact_dir: MLflow artifact directory for the study
+        patterns: List of image patterns to create viewers for. If None, uses defaults.
+    
+    Returns:
+        List of paths to generated HTML files
+    """
+    if patterns is None:
+        patterns = [
+            "*target_holdout_umap_epoch_*.png",
+            "*loss_curves.png",
+            "*embedding_*.png",
+        ]
+    
+    generated_files = []
+    
+    for pattern in patterns:
+        # Create a safe filename from the pattern
+        safe_name = pattern.replace("*", "").replace("/", "_").replace(".", "_")
+        output_filename = f"image_viewer_{safe_name}.html"
+        
+        html_path = generate_image_viewer_html(
+            base_dir=artifact_dir,
+            pattern=pattern,
+            output_filename=output_filename,
+            title=f"Image Viewer - {pattern}",
+        )
+        
+        if html_path:
+            generated_files.append(html_path)
+    
+    return generated_files

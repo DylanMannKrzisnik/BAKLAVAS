@@ -1377,7 +1377,7 @@ class CustomTrainer(Trainer):
                     sc.tl.umap(clip_embeddings_adata, min_dist=0.3)
                     umap_fig = sc.pl.umap(
                         clip_embeddings_adata,
-                        color=["modality", clip_embeddings_adata.uns['label_key']],
+                        color=["modality"],
                         ncols=2,
                         wspace=0.3,
                         size=25,
@@ -1412,7 +1412,7 @@ class CustomTrainer(Trainer):
               n_epochs_no_edge_recon: int=0,
               n_epochs_no_cat_covariates_contrastive: int=5,
               target_eval_interval: int=10,
-              lr: float=0.001,
+              lr: float=0.0001,
               weight_decay: float=0.,
               lambda_edge_recon: Optional[float]=500000.,
               lambda_cat_covariates_contrastive: Optional[float]=0.,

@@ -86,12 +86,12 @@ class CustomNicheCompass(NicheCompass):
             "default": 0.25
         },
         "node_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[800]),
-            "default": 800
+            "suggest_distribution": CategoricalDistribution(choices=[1000]),
+            "default": 1000
         },
         "edge_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[400]),
-            "default": 400
+            "suggest_distribution": CategoricalDistribution(choices=[1000]),
+            "default": 1000
         },
     }
 
@@ -1162,6 +1162,10 @@ class CustomTrainer(Trainer):
         self.target_holdout_adata = None
         self.target_holdout_adata_atac = None
         self.target_latent_key = target_latent_key
+        self._source_umap_clip_rna_batches: List[np.ndarray] = []
+        self._source_umap_clip_atac_batches: List[np.ndarray] = []
+        self._source_umap_collected_n = 0
+        self._source_umap_target_n = 0
 
         if (self.log_target_multimodal_contrastive_ and
             target_adata is not None and
@@ -1230,6 +1234,118 @@ class CustomTrainer(Trainer):
             data.cat_covariates_cats = dataset.cat_covariates_cats
         data.batch_size = data.num_nodes
         return data
+
+    def _log_memory_optimized_umap(
+        self,
+        clip_embeddings_adata: AnnData,
+        artifact_path: str,
+        title: str,
+    ) -> None:
+        n_obs = int(clip_embeddings_adata.n_obs)
+        n_vars = int(clip_embeddings_adata.n_vars)
+        if n_obs < 3:
+            warnings.warn(
+                f"Skipping UMAP logging for '{artifact_path}' because n_obs={n_obs} < 3."
+            )
+            return
+
+        clip_embeddings_adata.X = np.asarray(clip_embeddings_adata.X, dtype=np.float32)
+        n_comps = min(30, n_vars, n_obs - 1)
+        n_neighbors = min(30, n_obs - 1)
+        if n_comps < 2 or n_neighbors < 2:
+            warnings.warn(
+                f"Skipping UMAP logging for '{artifact_path}' due to insufficient dimensions "
+                f"(n_comps={n_comps}, n_neighbors={n_neighbors})."
+            )
+            return
+
+        sc.pp.pca(clip_embeddings_adata, n_comps=n_comps)
+        sc.pp.neighbors(
+            clip_embeddings_adata,
+            use_rep="X_pca",
+            n_neighbors=n_neighbors,
+            method="umap",
+        )
+        sc.tl.umap(clip_embeddings_adata, min_dist=0.3, random_state=0)
+
+        umap_fig = None
+        try:
+            with plt.rc_context({"figure.dpi": 100, "savefig.dpi": 100}):
+                umap_fig = sc.pl.umap(
+                    clip_embeddings_adata,
+                    color=["modality"],
+                    size=10,
+                    frameon=False,
+                    show=False,
+                    return_fig=True,
+                    title=title,
+                )
+                for ax in umap_fig.axes:
+                    for collection in ax.collections:
+                        collection.set_rasterized(True)
+                umap_fig.set_size_inches(7, 5)
+                mlflow.log_figure(umap_fig, artifact_path)
+        finally:
+            if umap_fig is not None:
+                plt.close(umap_fig)
+            plt.close("all")
+
+    def _log_source_umap_matched_to_target(self, target_holdout_n: int) -> None:
+        if not self._source_umap_clip_rna_batches or not self._source_umap_clip_atac_batches:
+            warnings.warn(
+                "No source embeddings cached from training iterations; "
+                "skipping source UMAP logging."
+            )
+            return
+
+        source_clip_rna = np.concatenate(self._source_umap_clip_rna_batches, axis=0)
+        source_clip_atac = np.concatenate(self._source_umap_clip_atac_batches, axis=0)
+        available_n = min(source_clip_rna.shape[0], source_clip_atac.shape[0])
+        if available_n <= 0:
+            warnings.warn(
+                "Cached source embeddings are empty; skipping source UMAP logging."
+            )
+            return
+
+        source_n = target_holdout_n
+        if available_n < target_holdout_n:
+            warnings.warn(
+                f"Only {available_n} unique source samples were cached from training iterations; "
+                f"reusing cached samples to reach target size {target_holdout_n}."
+            )
+            rng = np.random.default_rng(0)
+            sample_idx = np.concatenate(
+                [
+                    np.arange(available_n, dtype=np.int64),
+                    rng.choice(
+                        available_n,
+                        size=target_holdout_n - available_n,
+                        replace=True,
+                    ),
+                ]
+            )
+        else:
+            sample_idx = np.arange(target_holdout_n, dtype=np.int64)
+
+        modality_obs = pd.DataFrame(
+            {"modality": ["rna"] * source_n + ["atac"] * source_n}
+        )
+
+        source_embeddings_adata = AnnData(
+            X=np.concatenate(
+                [
+                    source_clip_rna[sample_idx].astype(np.float32, copy=False),
+                    source_clip_atac[sample_idx].astype(np.float32, copy=False),
+                ],
+                axis=0,
+            ),
+            obs=modality_obs,
+        )
+        self._log_memory_optimized_umap(
+            clip_embeddings_adata=source_embeddings_adata,
+            artifact_path=f"umap/source_data_umap_epoch_{self.epoch + 1}.png",
+            title="Source Data UMAP",
+        )
 
     @torch.no_grad()
     def _get_target_latent_embeddings(
@@ -1332,14 +1448,14 @@ class CustomTrainer(Trainer):
         ## cocnatenate target_holdout_adata and target_holdout_adata_atac
         clip_embeddings_adata = AnnData(
             X=np.concatenate([
-                self.target_holdout_adata.obsm["nichecompass_latent"],
-                self.target_holdout_adata_atac.obsm["nichecompass_latent"]
+                self.target_holdout_adata.obsm[self.target_latent_key].astype(np.float32, copy=False),
+                self.target_holdout_adata_atac.obsm[self.target_latent_key].astype(np.float32, copy=False),
             ], axis=0),
             obs=pd.concat([
                 self.target_holdout_adata.obs.assign(modality="rna"),
                 self.target_holdout_adata_atac.obs.assign(modality="atac"),
             ], axis=0),
-            uns={"label_key": self.target_holdout_adata.uns['label_key']},
+            uns={"label_key": self.target_holdout_adata.uns["label_key"]},
             #uns={"label_key": None},
         )
 
@@ -1369,31 +1485,25 @@ class CustomTrainer(Trainer):
                 mlflow.log_metric(f"target_{key}".replace(" ", "_"), value, step=self.epoch)
 
             if self.epoch == self.n_epochs_ - 1:
-                # compute PCA, neighbors & leiden
-                sc.pp.pca(clip_embeddings_adata, n_comps=50)
-                sc.pp.neighbors(clip_embeddings_adata, use_rep='X_pca', n_neighbors=100)
-
                 try:
-                    sc.tl.umap(clip_embeddings_adata, min_dist=0.3)
-                    umap_fig = sc.pl.umap(
-                        clip_embeddings_adata,
-                        color=["modality"],
-                        ncols=2,
-                        wspace=0.3,
-                        size=25,
-                        show=False,
-                        return_fig=True,
-                    )
-                    mlflow.log_figure(
-                        umap_fig,
-                        f"umap/target_holdout_umap_epoch_{self.epoch + 1}.png",
+                    self._log_memory_optimized_umap(
+                        clip_embeddings_adata=clip_embeddings_adata.copy(),
+                        artifact_path=f"umap/target_holdout_umap_epoch_{self.epoch + 1}.png",
+                        title="Target Holdout UMAP",
                     )
                 except Exception as exc:
                     warnings.warn(
                         f"Failed to generate/log target holdout UMAP to MLflow: {exc}"
                     )
-                finally:
-                    plt.close("all")
+
+                try:
+                    self._log_source_umap_matched_to_target(
+                        target_holdout_n=int(self.target_holdout_adata.n_obs),
+                    )
+                except Exception as exc:
+                    warnings.warn(
+                        f"Failed to generate/log source UMAP to MLflow: {exc}"
+                    )
 
 
     def _get_multimodal_contrastive_weight(self, increasing: bool=True) -> float:
@@ -1550,6 +1660,20 @@ class CustomTrainer(Trainer):
             self.multimodal_contrastive_weight_ = (
                 self._get_multimodal_contrastive_weight())
 
+            collect_source_umap_from_train = (
+                self.epoch == self.n_epochs_ - 1
+                and self.target_holdout_adata is not None
+                and self.target_holdout_adata_atac is not None
+            )
+            self._source_umap_clip_rna_batches = []
+            self._source_umap_clip_atac_batches = []
+            self._source_umap_collected_n = 0
+            self._source_umap_target_n = (
+                int(self.target_holdout_adata.n_obs)
+                if collect_source_umap_from_train
+                else 0
+            )
+
             self.iter_logs = defaultdict(list)
             self.iter_logs["n_train_iter"] = 0
             self.iter_logs["n_val_iter"] = 0
@@ -1576,6 +1700,35 @@ class CustomTrainer(Trainer):
                     data_batch=node_train_data_batch,
                     decoder="omics",
                     use_only_active_gps=self.use_only_active_gps)
+                if (
+                    collect_source_umap_from_train
+                    and self._source_umap_collected_n < self._source_umap_target_n
+                ):
+                    clip_rna_batch = node_train_model_output.get("clip_rna")
+                    clip_atac_batch = node_train_model_output.get("clip_atac")
+                    if clip_rna_batch is not None and clip_atac_batch is not None:
+                        remaining = self._source_umap_target_n - self._source_umap_collected_n
+                        take_n = min(
+                            remaining,
+                            int(clip_rna_batch.size(0)),
+                            int(clip_atac_batch.size(0)),
+                        )
+                        if take_n > 0:
+                            self._source_umap_clip_rna_batches.append(
+                                clip_rna_batch[:take_n]
+                                .detach()
+                                .cpu()
+                                .numpy()
+                                .astype(np.float32, copy=False)
+                            )
+                            self._source_umap_clip_atac_batches.append(
+                                clip_atac_batch[:take_n]
+                                .detach()
+                                .cpu()
+                                .numpy()
+                                .astype(np.float32, copy=False)
+                            )
+                            self._source_umap_collected_n += take_n
 
                 # edge-level model output
                 edge_train_data_batch = edge_train_data_batch.to(self.device, non_blocking=True)

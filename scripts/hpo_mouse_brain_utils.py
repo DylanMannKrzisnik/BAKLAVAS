@@ -21,7 +21,7 @@ DEFAULT_TUNED_HPARAM_KEYS = [
 ]
 
 # HPO convenience override for TrainConfig.n_epochs
-HPO_N_EPOCHS = 5
+HPO_N_EPOCHS = 1
 
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"
@@ -659,6 +659,7 @@ def generate_image_viewers_for_study(
     if patterns is None:
         patterns = [
             "*target_holdout_umap_epoch_*.png",
+            "*source_data_umap_epoch_*.png",
             "*loss_curves.png",
             "*embedding_*.png",
         ]

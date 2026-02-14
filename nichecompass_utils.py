@@ -58,8 +58,8 @@ class CustomNicheCompass(NicheCompass):
             'default': False
         },
         'multimodal_embedding_size': {
-            'suggest_distribution': CategoricalDistribution(choices=[128]),
-            'default': 128
+            'suggest_distribution': CategoricalDistribution(choices=[32, 128]),
+            'default': 32
         },
         "encoder_input_key": {
             "suggest_distribution": CategoricalDistribution(choices=["counts", "pseudocounts"]),
@@ -591,9 +591,9 @@ class CustomNicheCompass(NicheCompass):
               n_epochs_no_cat_covariates_contrastive: int=5,
               lr: float=0.001,
               weight_decay: float=0.,
-              lambda_edge_recon: Optional[float]=500000.,
-              lambda_gene_expr_recon: float=300.,
-              lambda_chrom_access_recon: float=100.,
+              lambda_edge_recon: Optional[float]=0, #500000.,
+              lambda_gene_expr_recon: float=0, #300.,
+              lambda_chrom_access_recon: float=0, #100.,
               lambda_cat_covariates_contrastive: float=0.,
               lambda_multimodal_contrastive_loss: Optional[float]=None,
               multimodal_temperature: Optional[float]=None,
@@ -604,7 +604,7 @@ class CustomNicheCompass(NicheCompass):
               lambda_l1_masked: float=0.,
               l1_targets_categories: Optional[list]=["target_gene"],
               l1_sources_categories: Optional[list]=None,
-              lambda_l1_addon: float=30.,
+              lambda_l1_addon: float=0, #30.,
               edge_val_ratio: float=0.1,
               node_val_ratio: float=0.1,
               edge_batch_size: Optional[int]=None,

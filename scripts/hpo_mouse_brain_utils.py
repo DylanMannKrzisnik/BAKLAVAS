@@ -704,8 +704,6 @@ def generate_image_viewers_for_study(
         patterns = [
             "*target_holdout_umap_epoch_*.png",
             "*source_data_umap_epoch_*.png",
-            "*loss_curves.png",
-            "*embedding_*.png",
         ]
     
     generated_files = []

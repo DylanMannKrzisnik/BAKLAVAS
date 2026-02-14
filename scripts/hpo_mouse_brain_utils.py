@@ -1,5 +1,6 @@
 import inspect
 import os
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -21,7 +22,7 @@ DEFAULT_TUNED_HPARAM_KEYS = [
 ]
 
 # HPO convenience override for TrainConfig.n_epochs
-HPO_N_EPOCHS = 50
+HPO_N_EPOCHS = 1
 
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"
@@ -441,6 +442,56 @@ def extract_run_id_from_path(image_path: str) -> Optional[str]:
     return None
 
 
+def _extract_trial_number(trial_name: Optional[str]) -> Optional[int]:
+    """Extract numeric suffix from trial names like 'trial_0001'."""
+    if not trial_name:
+        return None
+    match = re.search(r"\btrial_(\d+)\b", trial_name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _resolve_trial_name(
+    run_id: Optional[str],
+    image_path: str,
+    trial_mapping: Dict[str, str],
+) -> Optional[str]:
+    """Resolve trial name from run_id directly or by extracting run_id from image path."""
+    if run_id and run_id in trial_mapping:
+        return trial_mapping[run_id]
+
+    if trial_mapping:
+        extracted_run_id = extract_run_id_from_path(image_path)
+        if extracted_run_id and extracted_run_id in trial_mapping:
+            return trial_mapping[extracted_run_id]
+
+    return None
+
+
+def _trial_sorted_image_items(
+    image_items: List[Tuple[Optional[str], str]],
+    trial_mapping: Dict[str, str],
+) -> List[Tuple[Optional[str], str]]:
+    """
+    Sort images primarily by trial name (trial_XXXX), then by path.
+
+    Items with recognized trial numbers come first in numeric order.
+    """
+    def sort_key(item: Tuple[Optional[str], str]) -> Tuple[int, int, str, str]:
+        run_id, img_path = item
+        trial_name = _resolve_trial_name(run_id, img_path, trial_mapping)
+        trial_number = _extract_trial_number(trial_name)
+
+        if trial_number is not None:
+            return (0, trial_number, trial_name or "", img_path)
+        if trial_name:
+            return (1, 0, trial_name, img_path)
+        return (2, 0, run_id or "", img_path)
+
+    return sorted(image_items, key=sort_key)
+
+
 def generate_image_viewer_html(
     base_dir: str,
     pattern: str,
@@ -478,10 +529,7 @@ def generate_image_viewer_html(
         for run_id, image_paths in images_by_run.items():
             for img_path in image_paths:
                 image_items.append((run_id, img_path))
-        
-        # Sort by run_id for consistency
-        image_items.sort(key=lambda x: x[0])
-        
+
         # Get trial name mapping
         trial_mapping = get_trial_name_mapping(parent_run_id)
     else:
@@ -495,6 +543,9 @@ def generate_image_viewer_html(
         # Convert to (run_id, path) format (run_id will be extracted from path)
         image_items = [(None, img_path) for img_path in image_paths]
         trial_mapping = {}
+
+    # Sort images by trial name (trial_XXXX) when available.
+    image_items = _trial_sorted_image_items(image_items, trial_mapping)
     
     if title is None:
         title = f"Image Viewer - {pattern}"
@@ -573,14 +624,7 @@ def generate_image_viewer_html(
     # Add each image
     for run_id, img_path in image_items:
         # Get trial name
-        trial_name = None
-        if run_id and run_id in trial_mapping:
-            trial_name = trial_mapping[run_id]
-        elif not run_id and trial_mapping:
-            # Extract run_id from path for directory-based discovery
-            extracted_run_id = extract_run_id_from_path(img_path)
-            if extracted_run_id and extracted_run_id in trial_mapping:
-                trial_name = trial_mapping[extracted_run_id]
+        trial_name = _resolve_trial_name(run_id, img_path, trial_mapping)
         
         # Always use relative paths from the HTML file location
         # This ensures images work both when opening HTML directly and when served via HTTP

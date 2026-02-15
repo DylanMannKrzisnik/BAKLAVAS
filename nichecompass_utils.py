@@ -70,7 +70,7 @@ class CustomNicheCompass(NicheCompass):
             "default": 10000.0
         },
         "multimodal_temperature": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.1, 1.0, 2.5]),
+            "suggest_distribution": CategoricalDistribution(choices=[1.0, 2.5, 10.0]),
             "default": 2.5
         },
         "multimodal_contrastive_anneal": {

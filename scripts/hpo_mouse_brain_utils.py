@@ -67,7 +67,7 @@ class TrainConfig:
     target_holdout_n: Optional[int] = 2000
     target_holdout_seed: int = 0
     target_paired_data: bool = True
-    target_encoder_input_key: str = "pseudocounts"
+    target_encoder_input_key: Optional[str] = None
     target_counts_key: str = DEFAULT_COUNTS_KEY
     log_target_multimodal_contrastive: bool = True
     use_early_stopping: bool = False
@@ -250,6 +250,7 @@ def run_trial(
     train_kwargs = {key: value for key, value in asdict(train_cfg).items() if value is not None}
     # Ensure HPARAMS defaults / tuned overrides take precedence over TrainConfig.
     train_kwargs.update(filter_train_hparams(resolved_hparams))
+    train_kwargs["target_encoder_input_key"] = train_kwargs.get("encoder_input_key")
 
     model.train(
         **train_kwargs,

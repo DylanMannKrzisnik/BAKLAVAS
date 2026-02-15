@@ -957,7 +957,7 @@ with mlflow.start_run(run_name=current_timestamp):
         "target_holdout_n": 500,
         "target_holdout_seed": 0,
         "target_paired_data": True,
-        "target_encoder_input_key": "pseudocounts",
+        "target_encoder_input_key": train_kwargs.get("encoder_input_key"),
         "target_counts_key": counts_key,
         "log_target_multimodal_contrastive": True,
         "use_early_stopping": False,

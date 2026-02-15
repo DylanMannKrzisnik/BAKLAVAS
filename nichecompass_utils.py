@@ -78,12 +78,12 @@ class CustomNicheCompass(NicheCompass):
             "default": False
         },
         "contrastive_logits_pos_ratio": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.25]),
+            "suggest_distribution": CategoricalDistribution(choices=[0.0]),
             "default": 0.0
         },
         "contrastive_logits_neg_ratio": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.25]),
-            "default": 0.25
+            "suggest_distribution": CategoricalDistribution(choices=[0.0]),
+            "default": 0.0
         },
         "node_batch_size": {
             "suggest_distribution": CategoricalDistribution(choices=[1000]),

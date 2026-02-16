@@ -442,6 +442,131 @@ def load_10x_mouse_brain_ad_data(
 
     return adata_rna, adata_atac, "mm10", "10x_mouse_brain_AD"
 
+def load_10x_mouse_brain_data(
+    data_dir: Optional[str] = None,
+    base_name: str = "M_Brain_Chromium_Nuc_Isolation_vs_SaltyEZ_vs_ComplexTissueDP",
+) -> Tuple[ad.AnnData, ad.AnnData, str, str]:
+    """Load 10x Multiome (RNA+ATAC) mouse brain AD dataset.
+
+    Expected files in `data_dir`:
+    - {base_name}_filtered_feature_bc_matrix.h5  (required)
+    - {base_name}_atac_peaks.bed                (optional)
+    - {base_name}_atac_peak_annotation.tsv      (optional)
+
+    Returns
+    -------
+    (target_rna, target_atac, target_assembly, target_name)
+    """
+
+    if data_dir is None:
+        # data/ folder is one level above the repo folder (BAKLAVA/)
+        repo_dir = os.path.abspath(os.path.dirname(__file__))
+        data_dir = os.path.join(repo_dir, "..", "data", "10x_mouse_brain")
+    data_dir = os.path.abspath(data_dir)
+
+    h5_path = os.path.join(data_dir, f"{base_name}_filtered_feature_bc_matrix.h5")
+    if not os.path.isfile(h5_path):
+        raise FileNotFoundError(
+            f"10x filtered feature-barcode matrix not found: {h5_path}. "
+            "Download it from 10x into data_dir."
+        )
+
+    adata_full = sc.read_10x_h5(h5_path, gex_only=False)
+    ft_col = "feature_types" if "feature_types" in adata_full.var.columns else "feature_type"
+    if ft_col not in adata_full.var.columns:
+        raise ValueError(
+            f"Expected feature type column '{ft_col}' in 10x multiome var. "
+            f"Columns: {list(adata_full.var.columns)}"
+        )
+
+    is_gex = adata_full.var[ft_col].astype(str).str.strip().str.lower().eq("gene expression")
+    is_peaks = adata_full.var[ft_col].astype(str).str.strip().str.lower().eq("peaks")
+
+    adata_rna = adata_full[:, is_gex].copy()
+    adata_atac = adata_full[:, is_peaks].copy()
+
+    for a in (adata_rna, adata_atac):
+        if ft_col in a.var.columns:
+            a.var = a.var.drop(columns=[ft_col])
+
+    adata_rna.layers["counts"] = adata_rna.X.copy()
+    adata_atac.layers["counts"] = adata_atac.X.copy()
+
+    peaks_bed_path = os.path.join(data_dir, f"{base_name}_atac_peaks.bed")
+    peak_ann_path = os.path.join(data_dir, f"{base_name}_atac_peak_annotation.tsv")
+
+    if os.path.isfile(peaks_bed_path):
+        bed = pd.read_csv(
+            peaks_bed_path,
+            sep="	",
+            header=None,
+            usecols=[0, 1, 2],
+            names=["chrom", "chromStart", "chromEnd"],
+        )
+        peak_id_bed = bed["chrom"].astype(str) + "-" + bed["chromStart"].astype(str) + "-" + bed["chromEnd"].astype(str)
+
+        if adata_atac.n_vars == len(peak_id_bed) and (adata_atac.var_names == peak_id_bed.values).all():
+            adata_atac.var["chrom"] = bed["chrom"].values
+            adata_atac.var["chromStart"] = bed["chromStart"].values
+            adata_atac.var["chromEnd"] = bed["chromEnd"].values
+        else:
+            adata_atac.var["peak"] = adata_atac.var_names
+            coords = adata_atac.var["peak"].str.split(":|-", n=2, expand=True)
+            adata_atac.var["chrom"] = coords[0]
+            adata_atac.var["chromStart"] = pd.to_numeric(coords[1], errors="coerce") if coords.shape[1] > 1 else ""
+            adata_atac.var["chromEnd"] = pd.to_numeric(coords[2], errors="coerce") if coords.shape[1] > 2 else ""
+    else:
+        adata_atac.var["peak"] = adata_atac.var_names
+        coords = adata_atac.var["peak"].str.split(":|-", n=2, expand=True)
+        adata_atac.var["chrom"] = coords[0]
+        adata_atac.var["chromStart"] = pd.to_numeric(coords[1], errors="coerce") if coords.shape[1] > 1 else ""
+        adata_atac.var["chromEnd"] = pd.to_numeric(coords[2], errors="coerce") if coords.shape[1] > 2 else ""
+
+    if os.path.isfile(peak_ann_path):
+        ann = pd.read_csv(peak_ann_path, sep="	")
+        peak_col = "Peak" if "Peak" in ann.columns else ("peak" if "peak" in ann.columns else None)
+        if peak_col is not None:
+            ann_indexed = ann.set_index(peak_col)
+            extra = [c for c in ann_indexed.columns if c not in adata_atac.var.columns]
+            if extra:
+                adata_atac.var = adata_atac.var.merge(
+                    ann_indexed[extra], left_index=True, right_index=True, how="left"
+                )
+
+    # Unpack {base_name}_analysis.tar.gz in the data_dir if present
+    analysis_dir = _resolve_analysis_dir(data_dir, base_name)
+    tar_path = os.path.join(data_dir, f"{base_name}_analysis.tar.gz")
+    if os.path.isfile(tar_path) and analysis_dir is None:
+        import tarfile
+        print(f"Found tar archive: {tar_path}. Extracting...")
+        with tarfile.open(tar_path, "r:gz") as tar:
+            tar.extractall(path=data_dir)
+        print("Extraction completed.")
+        analysis_dir = _resolve_analysis_dir(data_dir, base_name)
+
+    if analysis_dir is not None:
+        print(f"Found Cell Ranger ARC analysis directory: {analysis_dir}.")
+        _add_cellranger_arc_analysis_metadata(adata_rna, adata_atac, analysis_dir)
+
+    # set 'arc_gex_graphclust_Cluster' as the reference clusters
+    reference_clusters_rna_and_atac = adata_rna.obs['arc_gex_graphclust_Cluster']
+    reference_clusters_key = 'REF_arc_gex_graphclust_Cluster'
+
+    adata_rna.uns['label_key'] = reference_clusters_key
+    adata_atac.uns['label_key'] = reference_clusters_key
+    adata_rna.obs[reference_clusters_key] = reference_clusters_rna_and_atac
+    adata_atac.obs[reference_clusters_key] = reference_clusters_rna_and_atac
+
+    # convert non-string columns in uns to string representation
+    for ad in (adata_rna, adata_atac):
+        for k, v in list(ad.uns.items()):
+            if isinstance(v, pd.DataFrame) and not all(isinstance(c, str) for c in v.columns):
+                v = v.copy()
+                v.columns = v.columns.astype(str) 
+                ad.uns[k] = v
+
+    return adata_rna, adata_atac, "mm10", "10x_mouse_brain"
+
 
 def basic_feature_processing_for_alignment(
     adata: ad.AnnData,

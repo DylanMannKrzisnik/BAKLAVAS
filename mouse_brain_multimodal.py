@@ -209,6 +209,7 @@ else:
         load_spatial_atac_rna_mouse_brain_source,
         load_mousedev_spatial_triomic_data,
         load_10x_mouse_brain_ad_data,
+        load_10x_mouse_brain_data,
         basic_feature_processing_for_alignment,
         annotate_genes_and_peaks_for_alignment,
         filter_spatially_variable_features,
@@ -222,7 +223,7 @@ else:
     adata, adata_atac, source_assembly, source_name = load_mousedev_spatial_triomic_data(
         data_dir=datapath,
     )
-    target_rna, target_atac, target_assembly, target_name = load_10x_mouse_brain_ad_data()
+    target_rna, target_atac, target_assembly, target_name = load_10x_mouse_brain_data()
 
     #%%
     # Build prior GPs (needed for filtering - tutorial section 2.1)
@@ -948,7 +949,7 @@ with mlflow.start_run(run_name=current_timestamp):
         "lambda_l1_masked": lambda_l1_masked,
         "lambda_l1_addon": lambda_l1_addon,
         "edge_batch_size": 64,
-        "node_batch_size": 128,
+        "node_batch_size": 500,
         "use_cuda_if_available": use_cuda_if_available,
         "n_sampled_neighbors": n_sampled_neighbors,
         "target_adata": target_rna,

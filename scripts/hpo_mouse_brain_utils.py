@@ -20,7 +20,7 @@ DEFAULT_TUNED_HPARAM_KEYS = [
 TRAINER_EXTRA_HPARAM_KEYS = {"target_latent_key", "use_early_stopping", "verbose"}
 
 # HPO convenience override for TrainConfig.n_epochs
-HPO_N_EPOCHS = 100
+HPO_N_EPOCHS = 5
 
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"
@@ -47,29 +47,29 @@ class TrialParams:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    n_epochs: int = 10
-    n_epochs_all_gps: int = 10
-    lr: float = 0.0001
-    lambda_edge_recon: float = 500000.0
-    lambda_gene_expr_recon: float = 300.0
-    lambda_chrom_access_recon: float = 300.0
-    lambda_l1_masked: float = 0.0
-    lambda_l1_addon: float = 30.0
-    lambda_multimodal_contrastive_loss: float = 100000.0
-    edge_batch_size: int = 64
-    node_batch_size: int = 256
-    use_cuda_if_available: bool = True
-    n_sampled_neighbors: int = 4
-    multimodal_contrastive_anneal: bool = False
-    target_holdout_frac: float = 0.1
-    target_holdout_n: Optional[int] = 2000
-    target_holdout_seed: int = 0
-    target_paired_data: bool = True
+    n_epochs: Optional[int] = None
+    n_epochs_all_gps: Optional[int] = None
+    lr: Optional[float] = None
+    lambda_edge_recon: Optional[float] = None
+    lambda_gene_expr_recon: Optional[float] = None
+    lambda_chrom_access_recon: Optional[float] = None
+    lambda_l1_masked: Optional[float] = None
+    lambda_l1_addon: Optional[float] = None
+    lambda_multimodal_contrastive_loss: Optional[float] = None
+    edge_batch_size: Optional[int] = None
+    node_batch_size: Optional[int] = None
+    use_cuda_if_available: Optional[bool] = None
+    n_sampled_neighbors: Optional[int] = None
+    multimodal_contrastive_anneal: Optional[bool] = None
+    target_holdout_frac: Optional[float] = None
+    target_holdout_n: Optional[int] = None
+    target_holdout_seed: Optional[int] = None
+    target_paired_data: Optional[bool] = None
     target_encoder_input_key: Optional[str] = None
-    target_counts_key: str = DEFAULT_COUNTS_KEY
-    log_target_multimodal_contrastive: bool = True
-    use_early_stopping: bool = False
-    verbose: bool = False
+    target_counts_key: Optional[str] = None
+    log_target_multimodal_contrastive: Optional[bool] = None
+    use_early_stopping: Optional[bool] = None
+    verbose: Optional[bool] = None
 
 def _find_latest_cache_dir(root: str) -> Optional[str]:
     if not os.path.isdir(root):

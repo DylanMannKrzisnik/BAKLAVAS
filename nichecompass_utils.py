@@ -487,7 +487,7 @@ class CustomNicheCompass(NicheCompass):
         },
         "log_target_multimodal_contrastive": {
             "suggest_distribution": CategoricalDistribution(choices=[False, True]),
-            "default": False,
+            "default": True,
         },
         "mlflow_experiment_id": {
             "suggest_distribution": CategoricalDistribution(choices=[None]),
@@ -563,78 +563,197 @@ class CustomNicheCompass(NicheCompass):
                 result[key] = value
         return result
 
+    @staticmethod
+    def _coerce_numpy_dtype(dtype: type) -> type:
+        if isinstance(dtype, str):
+            if dtype == "float32":
+                return np.float32
+            if dtype == "float64":
+                return np.float64
+            return np.dtype(dtype).type
+        return dtype
+
     def __init__(self,
                  adata: AnnData,
                  adata_atac: Optional[AnnData]=None,
-                 counts_key: Optional[str]="counts",
+                 counts_key: Optional[str]=None,
                  encoder_input_key: Optional[str]=None,
-                 adj_key: str="spatial_connectivities",
-                 gp_names_key: str="nichecompass_gp_names",
-                 active_gp_names_key: str="nichecompass_active_gp_names",
-                 gp_targets_mask_key: str="nichecompass_gp_targets",
-                 gp_targets_categories_mask_key: str="nichecompass_gp_targets_categories",
-                 targets_categories_label_encoder_key: str="nichecompass_targets_categories_label_encoder",
-                 gp_sources_mask_key: str="nichecompass_gp_sources",
-                 gp_sources_categories_mask_key: str="nichecompass_gp_sources_categories",
-                 sources_categories_label_encoder_key: str="nichecompass_sources_categories_label_encoder",
-                 ca_targets_mask_key: Optional[str]="nichecompass_ca_targets",
-                 ca_sources_mask_key: Optional[str]="nichecompass_ca_sources",
-                 latent_key: str="nichecompass_latent",
+                 adj_key: str=None,
+                 gp_names_key: str=None,
+                 active_gp_names_key: str=None,
+                 gp_targets_mask_key: str=None,
+                 gp_targets_categories_mask_key: str=None,
+                 targets_categories_label_encoder_key: str=None,
+                 gp_sources_mask_key: str=None,
+                 gp_sources_categories_mask_key: str=None,
+                 sources_categories_label_encoder_key: str=None,
+                 ca_targets_mask_key: Optional[str]=None,
+                 ca_sources_mask_key: Optional[str]=None,
+                 latent_key: str=None,
                  cat_covariates_embeds_keys: Optional[List[str]]=None,
                  cat_covariates_embeds_injection: Optional[List[
                      Literal["encoder",
                              "gene_expr_decoder",
-                             "chrom_access_decoder"]]]=["gene_expr_decoder",
-                                                        "chrom_access_decoder"],
+                             "chrom_access_decoder"]]]=None,
                  cat_covariates_keys: Optional[List[str]]=None,
                  cat_covariates_no_edges: Optional[List[bool]]=None,
-                 genes_idx_key: str="nichecompass_genes_idx",
-                 target_genes_idx_key: str="nichecompass_target_genes_idx",
-                 source_genes_idx_key: str="nichecompass_source_genes_idx",
-                 peaks_idx_key: str="nichecompass_peaks_idx",
-                 target_peaks_idx_key: str="nichecompass_target_peaks_idx",
-                 source_peaks_idx_key: str="nichecompass_source_peaks_idx",
-                 gene_peaks_mask_key: str="nichecompass_gene_peaks",
-                 recon_adj_key: Optional[str]="nichecompass_recon_connectivities",
-                 agg_weights_key: Optional[str]="nichecompass_agg_weights",
-                 include_edge_recon_loss: bool=True,
-                 include_gene_expr_recon_loss: bool=True,
-                 include_chrom_access_recon_loss: Optional[bool]=True,
-                 include_cat_covariates_contrastive_loss: bool=False,
-                 gene_expr_recon_dist: Literal["nb"]="nb",
-                 log_variational: bool=True,
+                 genes_idx_key: str=None,
+                 target_genes_idx_key: str=None,
+                 source_genes_idx_key: str=None,
+                 peaks_idx_key: str=None,
+                 target_peaks_idx_key: str=None,
+                 source_peaks_idx_key: str=None,
+                 gene_peaks_mask_key: str=None,
+                 recon_adj_key: Optional[str]=None,
+                 agg_weights_key: Optional[str]=None,
+                 include_edge_recon_loss: bool=None,
+                 include_gene_expr_recon_loss: bool=None,
+                 include_chrom_access_recon_loss: Optional[bool]=None,
+                 include_cat_covariates_contrastive_loss: bool=None,
+                 gene_expr_recon_dist: Literal["nb"]=None,
+                 log_variational: bool=None,
                  node_label_method: Literal[
                     "one-hop-sum",
                     "one-hop-norm",
-                    "one-hop-attention"]="one-hop-norm",
-                 active_gp_thresh_ratio: float=0.01,
-                 active_gp_type: Literal["mixed", "separate"]="separate",
-                 n_fc_layers_encoder: int=1,
-                 n_layers_encoder: int=1,
+                    "one-hop-attention"]=None,
+                 active_gp_thresh_ratio: float=None,
+                 active_gp_type: Literal["mixed", "separate"]=None,
+                 n_fc_layers_encoder: int=None,
+                 n_layers_encoder: int=None,
                  n_hidden_encoder: Optional[int]=None,
-                 conv_layer_encoder: Literal["gcnconv", "gatv2conv"]="gcnconv",
-                 encoder_n_attention_heads: Optional[int]=4,
-                 encoder_use_bn: bool=False,
-                 dropout_rate_encoder: float=0.,
-                 dropout_rate_graph_decoder: float=0.,
+                 conv_layer_encoder: Literal["gcnconv", "gatv2conv"]=None,
+                 encoder_n_attention_heads: Optional[int]=None,
+                 encoder_use_bn: bool=None,
+                 dropout_rate_encoder: float=None,
+                 dropout_rate_graph_decoder: float=None,
                  cat_covariates_cats: Optional[List[List]]=None,
-                 n_addon_gp: int=100,
+                 n_addon_gp: int=None,
                  multimodal_embedding_size: Optional[int]=None,
                  multimodal_layer_series: Optional[bool]=None,
                  cat_covariates_embeds_nums: Optional[List[int]]=None,
-                 include_edge_kl_loss: bool=True,
-                 use_cuda_if_available: bool=True,
-                 seed: int=0,
+                 include_edge_kl_loss: bool=None,
+                 use_cuda_if_available: bool=None,
+                 seed: int=None,
                  **kwargs):
-        # Apply HPARAMS defaults for relevant parameters if not provided.
+        # Apply HPARAMS defaults centrally for constructor parameters.
         hparam_kwargs = self.__class__._apply_hparam_defaults(
+            adata_atac=adata_atac,
+            counts_key=counts_key,
             encoder_input_key=encoder_input_key,
+            adj_key=adj_key,
+            gp_names_key=gp_names_key,
+            active_gp_names_key=active_gp_names_key,
+            gp_targets_mask_key=gp_targets_mask_key,
+            gp_targets_categories_mask_key=gp_targets_categories_mask_key,
+            targets_categories_label_encoder_key=targets_categories_label_encoder_key,
+            gp_sources_mask_key=gp_sources_mask_key,
+            gp_sources_categories_mask_key=gp_sources_categories_mask_key,
+            sources_categories_label_encoder_key=sources_categories_label_encoder_key,
+            ca_targets_mask_key=ca_targets_mask_key,
+            ca_sources_mask_key=ca_sources_mask_key,
+            latent_key=latent_key,
+            cat_covariates_embeds_keys=cat_covariates_embeds_keys,
+            cat_covariates_embeds_injection=cat_covariates_embeds_injection,
+            cat_covariates_keys=cat_covariates_keys,
+            cat_covariates_no_edges=cat_covariates_no_edges,
+            genes_idx_key=genes_idx_key,
+            target_genes_idx_key=target_genes_idx_key,
+            source_genes_idx_key=source_genes_idx_key,
+            peaks_idx_key=peaks_idx_key,
+            target_peaks_idx_key=target_peaks_idx_key,
+            source_peaks_idx_key=source_peaks_idx_key,
+            gene_peaks_mask_key=gene_peaks_mask_key,
+            recon_adj_key=recon_adj_key,
+            agg_weights_key=agg_weights_key,
+            include_edge_recon_loss=include_edge_recon_loss,
+            include_gene_expr_recon_loss=include_gene_expr_recon_loss,
+            include_chrom_access_recon_loss=include_chrom_access_recon_loss,
+            include_cat_covariates_contrastive_loss=include_cat_covariates_contrastive_loss,
+            gene_expr_recon_dist=gene_expr_recon_dist,
+            log_variational=log_variational,
+            node_label_method=node_label_method,
+            active_gp_thresh_ratio=active_gp_thresh_ratio,
+            active_gp_type=active_gp_type,
+            n_fc_layers_encoder=n_fc_layers_encoder,
+            n_layers_encoder=n_layers_encoder,
+            n_hidden_encoder=n_hidden_encoder,
+            conv_layer_encoder=conv_layer_encoder,
+            encoder_n_attention_heads=encoder_n_attention_heads,
+            encoder_use_bn=encoder_use_bn,
+            dropout_rate_encoder=dropout_rate_encoder,
+            dropout_rate_graph_decoder=dropout_rate_graph_decoder,
+            cat_covariates_cats=cat_covariates_cats,
+            n_addon_gp=n_addon_gp,
             multimodal_embedding_size=multimodal_embedding_size,
             multimodal_layer_series=multimodal_layer_series,
+            cat_covariates_embeds_nums=cat_covariates_embeds_nums,
+            include_edge_kl_loss=include_edge_kl_loss,
+            use_cuda_if_available=use_cuda_if_available,
+            seed=seed,
         )
+        adata_atac = hparam_kwargs["adata_atac"]
+        counts_key = hparam_kwargs["counts_key"]
         encoder_input_key = hparam_kwargs["encoder_input_key"]
+        adj_key = hparam_kwargs["adj_key"]
+        gp_names_key = hparam_kwargs["gp_names_key"]
+        active_gp_names_key = hparam_kwargs["active_gp_names_key"]
+        gp_targets_mask_key = hparam_kwargs["gp_targets_mask_key"]
+        gp_targets_categories_mask_key = hparam_kwargs["gp_targets_categories_mask_key"]
+        targets_categories_label_encoder_key = hparam_kwargs[
+            "targets_categories_label_encoder_key"
+        ]
+        gp_sources_mask_key = hparam_kwargs["gp_sources_mask_key"]
+        gp_sources_categories_mask_key = hparam_kwargs["gp_sources_categories_mask_key"]
+        sources_categories_label_encoder_key = hparam_kwargs[
+            "sources_categories_label_encoder_key"
+        ]
+        ca_targets_mask_key = hparam_kwargs["ca_targets_mask_key"]
+        ca_sources_mask_key = hparam_kwargs["ca_sources_mask_key"]
+        latent_key = hparam_kwargs["latent_key"]
+        cat_covariates_embeds_keys = hparam_kwargs["cat_covariates_embeds_keys"]
+        cat_covariates_embeds_injection = hparam_kwargs[
+            "cat_covariates_embeds_injection"
+        ]
+        cat_covariates_keys = hparam_kwargs["cat_covariates_keys"]
+        cat_covariates_no_edges = hparam_kwargs["cat_covariates_no_edges"]
+        genes_idx_key = hparam_kwargs["genes_idx_key"]
+        target_genes_idx_key = hparam_kwargs["target_genes_idx_key"]
+        source_genes_idx_key = hparam_kwargs["source_genes_idx_key"]
+        peaks_idx_key = hparam_kwargs["peaks_idx_key"]
+        target_peaks_idx_key = hparam_kwargs["target_peaks_idx_key"]
+        source_peaks_idx_key = hparam_kwargs["source_peaks_idx_key"]
+        gene_peaks_mask_key = hparam_kwargs["gene_peaks_mask_key"]
+        recon_adj_key = hparam_kwargs["recon_adj_key"]
+        agg_weights_key = hparam_kwargs["agg_weights_key"]
+        include_edge_recon_loss = hparam_kwargs["include_edge_recon_loss"]
+        include_gene_expr_recon_loss = hparam_kwargs["include_gene_expr_recon_loss"]
+        include_chrom_access_recon_loss = hparam_kwargs[
+            "include_chrom_access_recon_loss"
+        ]
+        include_cat_covariates_contrastive_loss = hparam_kwargs[
+            "include_cat_covariates_contrastive_loss"
+        ]
+        gene_expr_recon_dist = hparam_kwargs["gene_expr_recon_dist"]
+        log_variational = hparam_kwargs["log_variational"]
+        node_label_method = hparam_kwargs["node_label_method"]
+        active_gp_thresh_ratio = hparam_kwargs["active_gp_thresh_ratio"]
+        active_gp_type = hparam_kwargs["active_gp_type"]
+        n_fc_layers_encoder = hparam_kwargs["n_fc_layers_encoder"]
+        n_layers_encoder = hparam_kwargs["n_layers_encoder"]
+        n_hidden_encoder = hparam_kwargs["n_hidden_encoder"]
+        conv_layer_encoder = hparam_kwargs["conv_layer_encoder"]
+        encoder_n_attention_heads = hparam_kwargs["encoder_n_attention_heads"]
+        encoder_use_bn = hparam_kwargs["encoder_use_bn"]
+        dropout_rate_encoder = hparam_kwargs["dropout_rate_encoder"]
+        dropout_rate_graph_decoder = hparam_kwargs["dropout_rate_graph_decoder"]
+        cat_covariates_cats = hparam_kwargs["cat_covariates_cats"]
+        n_addon_gp = hparam_kwargs["n_addon_gp"]
         multimodal_embedding_size = hparam_kwargs["multimodal_embedding_size"]
         multimodal_layer_series = hparam_kwargs["multimodal_layer_series"]
+        cat_covariates_embeds_nums = hparam_kwargs["cat_covariates_embeds_nums"]
+        include_edge_kl_loss = hparam_kwargs["include_edge_kl_loss"]
+        use_cuda_if_available = hparam_kwargs["use_cuda_if_available"]
+        seed = hparam_kwargs["seed"]
         self.adata = adata
         self.adata_atac = adata_atac
         self.counts_key_ = counts_key
@@ -1026,61 +1145,110 @@ class CustomNicheCompass(NicheCompass):
                 unfreeze_cat_covariates_embedder_weights))
 
     def train(self,
-              n_epochs: int=100,
-              n_epochs_all_gps: int=25,
-              n_epochs_no_edge_recon: int=0,
-              n_epochs_no_cat_covariates_contrastive: int=5,
-              lr: float=0.001,
-              weight_decay: float=0.,
-              lambda_edge_recon: Optional[float]=0, #500000.,
-              lambda_gene_expr_recon: float=0, #300.,
-              lambda_chrom_access_recon: float=0, #100.,
-              lambda_cat_covariates_contrastive: float=0.,
+              n_epochs: int=None,
+              n_epochs_all_gps: int=None,
+              n_epochs_no_edge_recon: int=None,
+              n_epochs_no_cat_covariates_contrastive: int=None,
+              lr: float=None,
+              weight_decay: float=None,
+              lambda_edge_recon: Optional[float]=None, #500000.,
+              lambda_gene_expr_recon: float=None, #300.,
+              lambda_chrom_access_recon: float=None, #100.,
+              lambda_cat_covariates_contrastive: float=None,
               lambda_multimodal_contrastive_loss: Optional[float]=None,
               multimodal_temperature: Optional[float]=None,
               multimodal_contrastive_anneal: Optional[bool]=None,
               contrastive_logits_pos_ratio: Optional[float]=None,
               contrastive_logits_neg_ratio: Optional[float]=None,
-              lambda_group_lasso: float=0.,
-              lambda_l1_masked: float=0.,
-              l1_targets_categories: Optional[list]=["target_gene"],
+              lambda_group_lasso: float=None,
+              lambda_l1_masked: float=None,
+              l1_targets_categories: Optional[list]=None,
               l1_sources_categories: Optional[list]=None,
-              lambda_l1_addon: float=0, #30.,
-              edge_val_ratio: float=0.1,
-              node_val_ratio: float=0.1,
+              lambda_l1_addon: float=None, #30.,
+              edge_val_ratio: float=None,
+              node_val_ratio: float=None,
               edge_batch_size: Optional[int]=None,
               node_batch_size: Optional[int]=None,
-              paired_data: bool=True,
+              paired_data: bool=None,
               target_adata: Optional[AnnData]=None,
               target_adata_atac: Optional[AnnData]=None,
-              target_holdout_frac: float=0.1,
+              target_holdout_frac: float=None,
               target_holdout_n: Optional[int]=None,
-              target_holdout_seed: int=0,
-              target_paired_data: bool=True,
+              target_holdout_seed: int=None,
+              target_paired_data: bool=None,
               target_encoder_input_key: Optional[str]=None,
               target_counts_key: Optional[str]=None,
-              log_target_multimodal_contrastive: bool=False,
+              log_target_multimodal_contrastive: bool=None,
               mlflow_experiment_id: Optional[str]=None,
               mlflow_parent_run_id: Optional[str]=None,
-              retrieve_cat_covariates_embeds: bool=False,
-              retrieve_recon_edge_probs: bool=False,
-              retrieve_agg_weights: bool=False,
-              use_cuda_if_available: bool=True,
-              n_sampled_neighbors: int=-1,
-              latent_dtype: type=np.float64,
+              retrieve_cat_covariates_embeds: bool=None,
+              retrieve_recon_edge_probs: bool=None,
+              retrieve_agg_weights: bool=None,
+              use_cuda_if_available: bool=None,
+              n_sampled_neighbors: int=None,
+              latent_dtype: type=None,
               **trainer_kwargs):
         """
         Train the CustomNicheCompass model using CustomTrainer.
         """
         hparam_kwargs = self.__class__._apply_hparam_defaults(
+            n_epochs=n_epochs,
+            n_epochs_all_gps=n_epochs_all_gps,
+            n_epochs_no_edge_recon=n_epochs_no_edge_recon,
+            n_epochs_no_cat_covariates_contrastive=n_epochs_no_cat_covariates_contrastive,
+            lr=lr,
+            weight_decay=weight_decay,
+            lambda_edge_recon=lambda_edge_recon,
+            lambda_gene_expr_recon=lambda_gene_expr_recon,
+            lambda_chrom_access_recon=lambda_chrom_access_recon,
+            lambda_cat_covariates_contrastive=lambda_cat_covariates_contrastive,
             lambda_multimodal_contrastive_loss=lambda_multimodal_contrastive_loss,
             multimodal_temperature=multimodal_temperature,
             multimodal_contrastive_anneal=multimodal_contrastive_anneal,
             contrastive_logits_pos_ratio=contrastive_logits_pos_ratio,
             contrastive_logits_neg_ratio=contrastive_logits_neg_ratio,
+            lambda_group_lasso=lambda_group_lasso,
+            lambda_l1_masked=lambda_l1_masked,
+            l1_targets_categories=l1_targets_categories,
+            l1_sources_categories=l1_sources_categories,
+            lambda_l1_addon=lambda_l1_addon,
+            edge_val_ratio=edge_val_ratio,
+            node_val_ratio=node_val_ratio,
             edge_batch_size=edge_batch_size,
             node_batch_size=node_batch_size,
+            paired_data=paired_data,
+            target_adata=target_adata,
+            target_adata_atac=target_adata_atac,
+            target_holdout_frac=target_holdout_frac,
+            target_holdout_n=target_holdout_n,
+            target_holdout_seed=target_holdout_seed,
+            target_paired_data=target_paired_data,
+            target_encoder_input_key=target_encoder_input_key,
+            target_counts_key=target_counts_key,
+            log_target_multimodal_contrastive=log_target_multimodal_contrastive,
+            mlflow_experiment_id=mlflow_experiment_id,
+            mlflow_parent_run_id=mlflow_parent_run_id,
+            retrieve_cat_covariates_embeds=retrieve_cat_covariates_embeds,
+            retrieve_recon_edge_probs=retrieve_recon_edge_probs,
+            retrieve_agg_weights=retrieve_agg_weights,
+            use_cuda_if_available=use_cuda_if_available,
+            n_sampled_neighbors=n_sampled_neighbors,
+            latent_dtype=latent_dtype,
         )
+        n_epochs = hparam_kwargs["n_epochs"]
+        n_epochs_all_gps = hparam_kwargs["n_epochs_all_gps"]
+        n_epochs_no_edge_recon = hparam_kwargs["n_epochs_no_edge_recon"]
+        n_epochs_no_cat_covariates_contrastive = hparam_kwargs[
+            "n_epochs_no_cat_covariates_contrastive"
+        ]
+        lr = hparam_kwargs["lr"]
+        weight_decay = hparam_kwargs["weight_decay"]
+        lambda_edge_recon = hparam_kwargs["lambda_edge_recon"]
+        lambda_gene_expr_recon = hparam_kwargs["lambda_gene_expr_recon"]
+        lambda_chrom_access_recon = hparam_kwargs["lambda_chrom_access_recon"]
+        lambda_cat_covariates_contrastive = hparam_kwargs[
+            "lambda_cat_covariates_contrastive"
+        ]
         lambda_multimodal_contrastive_loss = hparam_kwargs[
             "lambda_multimodal_contrastive_loss"
         ]
@@ -1094,8 +1262,47 @@ class CustomNicheCompass(NicheCompass):
         contrastive_logits_neg_ratio = hparam_kwargs[
             "contrastive_logits_neg_ratio"
         ]
+        lambda_group_lasso = hparam_kwargs["lambda_group_lasso"]
+        lambda_l1_masked = hparam_kwargs["lambda_l1_masked"]
+        l1_targets_categories = hparam_kwargs["l1_targets_categories"]
+        l1_sources_categories = hparam_kwargs["l1_sources_categories"]
+        lambda_l1_addon = hparam_kwargs["lambda_l1_addon"]
+        edge_val_ratio = hparam_kwargs["edge_val_ratio"]
+        node_val_ratio = hparam_kwargs["node_val_ratio"]
         edge_batch_size = hparam_kwargs["edge_batch_size"]
         node_batch_size = hparam_kwargs["node_batch_size"]
+        paired_data = hparam_kwargs["paired_data"]
+        target_adata = hparam_kwargs["target_adata"]
+        target_adata_atac = hparam_kwargs["target_adata_atac"]
+        target_holdout_frac = hparam_kwargs["target_holdout_frac"]
+        target_holdout_n = hparam_kwargs["target_holdout_n"]
+        target_holdout_seed = hparam_kwargs["target_holdout_seed"]
+        target_paired_data = hparam_kwargs["target_paired_data"]
+        target_encoder_input_key = hparam_kwargs["target_encoder_input_key"]
+        target_counts_key = hparam_kwargs["target_counts_key"]
+        log_target_multimodal_contrastive = hparam_kwargs[
+            "log_target_multimodal_contrastive"
+        ]
+        mlflow_experiment_id = hparam_kwargs["mlflow_experiment_id"]
+        mlflow_parent_run_id = hparam_kwargs["mlflow_parent_run_id"]
+        retrieve_cat_covariates_embeds = hparam_kwargs[
+            "retrieve_cat_covariates_embeds"
+        ]
+        retrieve_recon_edge_probs = hparam_kwargs["retrieve_recon_edge_probs"]
+        retrieve_agg_weights = hparam_kwargs["retrieve_agg_weights"]
+        use_cuda_if_available = hparam_kwargs["use_cuda_if_available"]
+        n_sampled_neighbors = hparam_kwargs["n_sampled_neighbors"]
+        latent_dtype = self.__class__._coerce_numpy_dtype(hparam_kwargs["latent_dtype"])
+
+        # Apply HPARAM defaults for trainer kwargs passed through **trainer_kwargs.
+        trainer_default_kwargs = self.__class__._apply_hparam_defaults(
+            target_latent_key=trainer_kwargs.get("target_latent_key"),
+            use_early_stopping=trainer_kwargs.get("use_early_stopping"),
+            verbose=trainer_kwargs.get("verbose"),
+        )
+        for key, value in trainer_default_kwargs.items():
+            if trainer_kwargs.get(key) is None:
+                trainer_kwargs[key] = value
         self.trainer = CustomTrainer(
             adata=self.adata,
             adata_atac=self.adata_atac,
@@ -1219,15 +1426,15 @@ class CustomNicheCompass(NicheCompass):
             self,
             adata: Optional[AnnData]=None,
             adata_atac: Optional[AnnData]=None,
-            counts_key: Optional[str]="counts",
+            counts_key: Optional[str]=None,
             encoder_input_key: Optional[str]=None,
-            adj_key: str="spatial_connectivities",
+            adj_key: str=None,
             cat_covariates_keys: Optional[List[str]]=None,
-            paired_data: bool=True,
+            paired_data: bool=None,
             only_active_gps: bool=True,
             return_mu_std: bool=False,
             node_batch_size: Optional[int]=None,
-            dtype: type=np.float64,
+            dtype: type=None,
             separate_modalities: bool=False,
             return_clip_embeddings: bool=False,
             ) -> np.ndarray:
@@ -1256,12 +1463,20 @@ class CustomNicheCompass(NicheCompass):
             adata = self.adata
         if (adata_atac is None) & hasattr(self, "adata_atac"):
             adata_atac = self.adata_atac
+        if counts_key is None:
+            counts_key = self.counts_key_
         if encoder_input_key is None:
             encoder_input_key = self.encoder_input_key_
+        if adj_key is None:
+            adj_key = self.adj_key_
         hparam_kwargs = self.__class__._apply_hparam_defaults(
+            paired_data=paired_data,
             node_batch_size=node_batch_size,
+            latent_dtype=dtype,
         )
+        paired_data = hparam_kwargs["paired_data"]
         node_batch_size = hparam_kwargs["node_batch_size"]
+        dtype = self.__class__._coerce_numpy_dtype(hparam_kwargs["latent_dtype"])
 
         # Create single dataloader containing entire dataset
         data_dict = prepare_data(
@@ -1428,7 +1643,7 @@ class CustomNicheCompass(NicheCompass):
             self,
             adata: Optional[AnnData]=None,
             adata_atac: Optional[AnnData]=None,
-            paired_data: bool=True,
+            paired_data: bool=None,
             only_active_gps: bool=True,
             node_batch_size: Optional[int]=None,
             encoder_input_key: Optional[str]=None,
@@ -1447,8 +1662,10 @@ class CustomNicheCompass(NicheCompass):
         if encoder_input_key is None:
             encoder_input_key = self.encoder_input_key_
         hparam_kwargs = self.__class__._apply_hparam_defaults(
+            paired_data=paired_data,
             node_batch_size=node_batch_size,
         )
+        paired_data = hparam_kwargs["paired_data"]
         node_batch_size = hparam_kwargs["node_batch_size"]
 
         # Create single dataloader containing entire dataset
@@ -1527,25 +1744,57 @@ class CustomTrainer(Trainer):
     def __init__(
         self,
         *args,
-        paired_data: bool=True,
+        paired_data: bool=None,
         encoder_input_key: Optional[str]=None,
         target_adata: Optional[AnnData]=None,
         target_adata_atac: Optional[AnnData]=None,
-        target_holdout_frac: float=0.1,
+        target_holdout_frac: float=None,
         target_holdout_n: Optional[int]=None,
-        target_holdout_seed: int=0,
-        target_paired_data: bool=True,
+        target_holdout_seed: int=None,
+        target_paired_data: bool=None,
         target_encoder_input_key: Optional[str]=None,
         target_counts_key: Optional[str]=None,
-        log_target_multimodal_contrastive: bool=False,
-        target_latent_key: str="nichecompass_latent",
+        log_target_multimodal_contrastive: bool=None,
+        target_latent_key: str=None,
         **kwargs
     ):
+        latent_dtype = kwargs.pop("latent_dtype", None)
         hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+            paired_data=paired_data,
             encoder_input_key=encoder_input_key,
+            target_adata=target_adata,
+            target_adata_atac=target_adata_atac,
+            target_holdout_frac=target_holdout_frac,
+            target_holdout_n=target_holdout_n,
+            target_holdout_seed=target_holdout_seed,
+            target_paired_data=target_paired_data,
+            target_encoder_input_key=target_encoder_input_key,
+            target_counts_key=target_counts_key,
+            log_target_multimodal_contrastive=log_target_multimodal_contrastive,
+            target_latent_key=target_latent_key,
+            latent_dtype=latent_dtype,
+            use_early_stopping=kwargs.get("use_early_stopping"),
+            verbose=kwargs.get("verbose"),
         )
+        paired_data = hparam_kwargs["paired_data"]
         encoder_input_key = hparam_kwargs["encoder_input_key"]
-        self.latent_dtype_ = kwargs.pop("latent_dtype", np.float64)
+        target_adata = hparam_kwargs["target_adata"]
+        target_adata_atac = hparam_kwargs["target_adata_atac"]
+        target_holdout_frac = hparam_kwargs["target_holdout_frac"]
+        target_holdout_n = hparam_kwargs["target_holdout_n"]
+        target_holdout_seed = hparam_kwargs["target_holdout_seed"]
+        target_paired_data = hparam_kwargs["target_paired_data"]
+        target_encoder_input_key = hparam_kwargs["target_encoder_input_key"]
+        target_counts_key = hparam_kwargs["target_counts_key"]
+        log_target_multimodal_contrastive = hparam_kwargs[
+            "log_target_multimodal_contrastive"
+        ]
+        target_latent_key = hparam_kwargs["target_latent_key"]
+        kwargs["use_early_stopping"] = hparam_kwargs["use_early_stopping"]
+        kwargs["verbose"] = hparam_kwargs["verbose"]
+        self.latent_dtype_ = CustomNicheCompass._coerce_numpy_dtype(
+            hparam_kwargs["latent_dtype"]
+        )
         super().__init__(*args, **kwargs)
 
         data_dict = prepare_data(
@@ -1958,39 +2207,66 @@ class CustomTrainer(Trainer):
             return k * self.lambda_multimodal_contrastive_loss_
 
     def train(self,
-              n_epochs: int=100,
-              n_epochs_all_gps: int=25,
-              n_epochs_no_edge_recon: int=0,
-              n_epochs_no_cat_covariates_contrastive: int=5,
+              n_epochs: int=None,
+              n_epochs_all_gps: int=None,
+              n_epochs_no_edge_recon: int=None,
+              n_epochs_no_cat_covariates_contrastive: int=None,
               target_eval_interval: int=10,
-              lr: float=0.0001,
-              weight_decay: float=0.,
-              lambda_edge_recon: Optional[float]=500000.,
-              lambda_cat_covariates_contrastive: Optional[float]=0.,
+              lr: float=None,
+              weight_decay: float=None,
+              lambda_edge_recon: Optional[float]=None,
+              lambda_cat_covariates_contrastive: Optional[float]=None,
               lambda_multimodal_contrastive_loss: Optional[float]=None,
               multimodal_temperature: Optional[float]=None,
               multimodal_contrastive_anneal: Optional[bool]=None,
               contrastive_logits_pos_ratio: Optional[float]=None,
               contrastive_logits_neg_ratio: Optional[float]=None,
-              lambda_gene_expr_recon: float=100.,
-              lambda_chrom_access_recon: float=10.,
-              lambda_group_lasso: float=0.,
-              lambda_l1_masked: float=0.,
+              lambda_gene_expr_recon: float=None,
+              lambda_chrom_access_recon: float=None,
+              lambda_group_lasso: float=None,
+              lambda_l1_masked: float=None,
               l1_targets_mask: Optional[torch.Tensor]=None,
               l1_sources_mask: Optional[torch.Tensor]=None,
-              lambda_l1_addon: float=0.,
+              lambda_l1_addon: float=None,
               mlflow_experiment_id: Optional[str]=None,
               mlflow_parent_run_id: Optional[str]=None):
         """
         Train the CustomNicheCompass model.
         """
         hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+            n_epochs=n_epochs,
+            n_epochs_all_gps=n_epochs_all_gps,
+            n_epochs_no_edge_recon=n_epochs_no_edge_recon,
+            n_epochs_no_cat_covariates_contrastive=n_epochs_no_cat_covariates_contrastive,
+            lr=lr,
+            weight_decay=weight_decay,
+            lambda_edge_recon=lambda_edge_recon,
+            lambda_cat_covariates_contrastive=lambda_cat_covariates_contrastive,
             lambda_multimodal_contrastive_loss=lambda_multimodal_contrastive_loss,
             multimodal_temperature=multimodal_temperature,
             multimodal_contrastive_anneal=multimodal_contrastive_anneal,
             contrastive_logits_pos_ratio=contrastive_logits_pos_ratio,
             contrastive_logits_neg_ratio=contrastive_logits_neg_ratio,
+            lambda_gene_expr_recon=lambda_gene_expr_recon,
+            lambda_chrom_access_recon=lambda_chrom_access_recon,
+            lambda_group_lasso=lambda_group_lasso,
+            lambda_l1_masked=lambda_l1_masked,
+            lambda_l1_addon=lambda_l1_addon,
+            mlflow_experiment_id=mlflow_experiment_id,
+            mlflow_parent_run_id=mlflow_parent_run_id,
         )
+        n_epochs = hparam_kwargs["n_epochs"]
+        n_epochs_all_gps = hparam_kwargs["n_epochs_all_gps"]
+        n_epochs_no_edge_recon = hparam_kwargs["n_epochs_no_edge_recon"]
+        n_epochs_no_cat_covariates_contrastive = hparam_kwargs[
+            "n_epochs_no_cat_covariates_contrastive"
+        ]
+        lr = hparam_kwargs["lr"]
+        weight_decay = hparam_kwargs["weight_decay"]
+        lambda_edge_recon = hparam_kwargs["lambda_edge_recon"]
+        lambda_cat_covariates_contrastive = hparam_kwargs[
+            "lambda_cat_covariates_contrastive"
+        ]
         lambda_multimodal_contrastive_loss = hparam_kwargs[
             "lambda_multimodal_contrastive_loss"
         ]
@@ -2004,6 +2280,13 @@ class CustomTrainer(Trainer):
         contrastive_logits_neg_ratio = hparam_kwargs[
             "contrastive_logits_neg_ratio"
         ]
+        lambda_gene_expr_recon = hparam_kwargs["lambda_gene_expr_recon"]
+        lambda_chrom_access_recon = hparam_kwargs["lambda_chrom_access_recon"]
+        lambda_group_lasso = hparam_kwargs["lambda_group_lasso"]
+        lambda_l1_masked = hparam_kwargs["lambda_l1_masked"]
+        lambda_l1_addon = hparam_kwargs["lambda_l1_addon"]
+        mlflow_experiment_id = hparam_kwargs["mlflow_experiment_id"]
+        mlflow_parent_run_id = hparam_kwargs["mlflow_parent_run_id"]
         self.n_epochs_ = n_epochs
         self.n_epochs_all_gps_ = n_epochs_all_gps
         self.n_epochs_no_edge_recon_ = n_epochs_no_edge_recon
@@ -2291,6 +2574,8 @@ class CustomTrainer(Trainer):
 
             # Evaluate on target data
             if (self.epoch % target_eval_interval == 0) or (self.epoch == self.n_epochs_-1):
+                target_holdout_clip_embeddings_rna = None
+                target_holdout_clip_embeddings_atac = None
 
                 # Fetch target embeddings once before any metrics are computed.
                 if (self.log_target_multimodal_contrastive_  and self.target_holdout_adata is not None and self.target_holdout_adata_atac is not None):
@@ -2305,7 +2590,12 @@ class CustomTrainer(Trainer):
                     )
 
                 # Compute metrics after embeddings are available.
-                if self.log_target_multimodal_contrastive_ and self.target_paired_data_:
+                if (
+                    self.log_target_multimodal_contrastive_
+                    and self.target_paired_data_
+                    and target_holdout_clip_embeddings_rna is not None
+                    and target_holdout_clip_embeddings_atac is not None
+                ):
 
                     self._log_target_paired_metrics(
                             temperature=self.multimodal_temperature_,
@@ -2313,9 +2603,17 @@ class CustomTrainer(Trainer):
                             clip_embeddings_atac=target_holdout_clip_embeddings_atac,
                     )
 
-                if self.target_adata is not None:
+                if (
+                    self.target_adata is not None
+                    and self.target_holdout_adata is not None
+                    and target_holdout_clip_embeddings_rna is not None
+                ):
                     self.target_holdout_adata.obsm[self.target_latent_key] = target_holdout_clip_embeddings_rna
-                    if self.target_adata_atac is not None:
+                    if (
+                        self.target_adata_atac is not None
+                        and self.target_holdout_adata_atac is not None
+                        and target_holdout_clip_embeddings_atac is not None
+                    ):
                         self.target_holdout_adata_atac.obsm[self.target_latent_key] = target_holdout_clip_embeddings_atac
 
                     self._log_target_unpaired_metrics()
@@ -3691,10 +3989,10 @@ class CustomVGPGAE(VGPGAE):
              l1_sources_mask: torch.Tensor,
              lambda_l1_addon: float,
              lambda_group_lasso: float,
-             lambda_gene_expr_recon: float=300.,
-             lambda_chrom_access_recon: float=100.,
-             lambda_edge_recon: Optional[float]=500000.,
-             lambda_cat_covariates_contrastive: Optional[float]=100000.,
+             lambda_gene_expr_recon: float=None,
+             lambda_chrom_access_recon: float=None,
+             lambda_edge_recon: Optional[float]=None,
+             lambda_cat_covariates_contrastive: Optional[float]=None,
              contrastive_logits_pos_ratio: Optional[float]=None,
              contrastive_logits_neg_ratio: Optional[float]=None,
              edge_recon_active: bool=True,
@@ -3703,11 +4001,21 @@ class CustomVGPGAE(VGPGAE):
              multimodal_temperature: Optional[float]=None,
              multimodal_contrastive_active: bool=True) -> dict:
         hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+            lambda_gene_expr_recon=lambda_gene_expr_recon,
+            lambda_chrom_access_recon=lambda_chrom_access_recon,
+            lambda_edge_recon=lambda_edge_recon,
+            lambda_cat_covariates_contrastive=lambda_cat_covariates_contrastive,
             contrastive_logits_pos_ratio=contrastive_logits_pos_ratio,
             contrastive_logits_neg_ratio=contrastive_logits_neg_ratio,
             lambda_multimodal_contrastive_loss=lambda_multimodal_contrastive_loss,
             multimodal_temperature=multimodal_temperature,
         )
+        lambda_gene_expr_recon = hparam_kwargs["lambda_gene_expr_recon"]
+        lambda_chrom_access_recon = hparam_kwargs["lambda_chrom_access_recon"]
+        lambda_edge_recon = hparam_kwargs["lambda_edge_recon"]
+        lambda_cat_covariates_contrastive = hparam_kwargs[
+            "lambda_cat_covariates_contrastive"
+        ]
         contrastive_logits_pos_ratio = hparam_kwargs[
             "contrastive_logits_pos_ratio"
         ]
@@ -3809,17 +4117,23 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
                  adata: AnnData,
                  cat_covariates_label_encoders: List[dict],
                  adata_atac: Optional[AnnData]=None,
-                 counts_key: Optional[str]="counts",
+                 counts_key: Optional[str]=None,
                  encoder_input_key: Optional[str]=None,
-                 adj_key: str="spatial_connectivities",
+                 adj_key: str=None,
                  edge_label_adj_key: str="edge_label_spatial_connectivities",
                  self_loops: bool=True,
                  cat_covariates_keys: Optional[List[str]]=None,
-                 paired_data: bool=True):
+                 paired_data: bool=None):
         hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+            counts_key=counts_key,
             encoder_input_key=encoder_input_key,
+            adj_key=adj_key,
+            paired_data=paired_data,
         )
+        counts_key = hparam_kwargs["counts_key"]
         encoder_input_key = hparam_kwargs["encoder_input_key"]
+        adj_key = hparam_kwargs["adj_key"]
+        paired_data = hparam_kwargs["paired_data"]
         input_key = encoder_input_key if encoder_input_key is not None else counts_key
 
         if input_key is None:
@@ -4031,23 +4345,33 @@ class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
 def prepare_data(adata: AnnData,
                  cat_covariates_label_encoders: List[dict],
                  adata_atac: Optional[AnnData]=None,
-                 counts_key: Optional[str]="counts",
+                 counts_key: Optional[str]=None,
                  encoder_input_key: Optional[str]=None,
-                 adj_key: str="spatial_connectivities",
+                 adj_key: str=None,
                  cat_covariates_keys: Optional[List[str]]=None,
-                 paired_data: bool=True,
-                 edge_val_ratio: float=0.1,
+                 paired_data: bool=None,
+                 edge_val_ratio: float=None,
                  edge_test_ratio: float=0.,
-                 node_val_ratio: float=0.1,
+                 node_val_ratio: float=None,
                  node_test_ratio: float=0.) -> dict:
     """
     Project-specific prepare_data function imitating nichecompass.data.dataprocessors.prepare_data().
     """
     data_dict = {}
     hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
+        counts_key=counts_key,
         encoder_input_key=encoder_input_key,
+        adj_key=adj_key,
+        paired_data=paired_data,
+        edge_val_ratio=edge_val_ratio,
+        node_val_ratio=node_val_ratio,
     )
+    counts_key = hparam_kwargs["counts_key"]
     encoder_input_key = hparam_kwargs["encoder_input_key"]
+    adj_key = hparam_kwargs["adj_key"]
+    paired_data = hparam_kwargs["paired_data"]
+    edge_val_ratio = hparam_kwargs["edge_val_ratio"]
+    node_val_ratio = hparam_kwargs["node_val_ratio"]
     dataset = CustomSpatialAnnTorchDataset(
         adata=adata,
         adata_atac=adata_atac,

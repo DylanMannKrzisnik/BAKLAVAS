@@ -70,8 +70,8 @@ from nichecompass_utils import CustomNicheCompass
 
 
 ### Dataset ###
-dataset = "mousedev_spatial_triomic"
-datapath = os.path.join(os.environ.get('DATAPATH'), "MouseDev_Spatial_Triomic")
+dataset = "Spatial_ATAC_RNA"
+datapath = os.path.join(os.environ.get('DATAPATH'), dataset)
 species = "mouse"
 spatial_key = "spatial"
 n_neighbors = 4
@@ -220,8 +220,13 @@ else:
         add_pseudocount_layers,
     )
     
-    adata, adata_atac, source_assembly, source_name = load_mousedev_spatial_triomic_data(
-        data_dir=datapath,
+    adata, adata_atac, source_assembly, source_name = load_spatial_atac_rna_mouse_brain_source(
+        so_data_folder_path = f"/home/mcb/users/dmannk/BAKLAVA_base/data/Spatial_ATAC_RNA/mouse/spatial_omics",
+        dataset = "spatial_atac_rna_seq_mouse_brain",
+        cell_type_key = cell_type_key,
+        spatial_key = spatial_key,
+        n_neighbors = n_neighbors,
+        adj_key = adj_key,
     )
     target_rna, target_atac, target_assembly, target_name = load_10x_mouse_brain_data()
 

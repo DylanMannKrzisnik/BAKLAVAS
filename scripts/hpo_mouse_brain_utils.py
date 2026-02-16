@@ -2,7 +2,6 @@ import inspect
 import os
 import re
 import subprocess
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
@@ -19,7 +18,7 @@ DEFAULT_TUNED_HPARAM_KEYS = [
 ]
 TRAINER_EXTRA_HPARAM_KEYS = {"target_latent_key", "use_early_stopping", "verbose"}
 
-# HPO convenience override for TrainConfig.n_epochs
+# HPO convenience override for train n_epochs.
 HPO_N_EPOCHS = 5
 
 DEFAULT_COUNTS_KEY = "counts"
@@ -31,45 +30,6 @@ DEFAULT_GP_TARGETS_CATEGORIES_MASK_KEY = "nichecompass_gp_targets_categories"
 DEFAULT_GP_SOURCES_MASK_KEY = "nichecompass_gp_sources"
 DEFAULT_GP_SOURCES_CATEGORIES_MASK_KEY = "nichecompass_gp_sources_categories"
 DEFAULT_LATENT_KEY = "nichecompass_latent"
-
-@dataclass(frozen=True)
-class TrialParams:
-    encoder_input_key: Optional[str] = None
-    multimodal_layer_series: Optional[bool] = None
-    lambda_multimodal_contrastive_loss: Optional[float] = None
-    multimodal_temperature: Optional[float] = None
-    multimodal_contrastive_anneal: Optional[bool] = None
-    contrastive_logits_pos_ratio: Optional[float] = None
-    contrastive_logits_neg_ratio: Optional[float] = None
-    multimodal_embedding_size: Optional[int] = None
-    node_batch_size: Optional[int] = None
-
-
-@dataclass(frozen=True)
-class TrainConfig:
-    n_epochs: Optional[int] = None
-    n_epochs_all_gps: Optional[int] = None
-    lr: Optional[float] = None
-    lambda_edge_recon: Optional[float] = None
-    lambda_gene_expr_recon: Optional[float] = None
-    lambda_chrom_access_recon: Optional[float] = None
-    lambda_l1_masked: Optional[float] = None
-    lambda_l1_addon: Optional[float] = None
-    lambda_multimodal_contrastive_loss: Optional[float] = None
-    edge_batch_size: Optional[int] = None
-    node_batch_size: Optional[int] = None
-    use_cuda_if_available: Optional[bool] = None
-    n_sampled_neighbors: Optional[int] = None
-    multimodal_contrastive_anneal: Optional[bool] = None
-    target_holdout_frac: Optional[float] = None
-    target_holdout_n: Optional[int] = None
-    target_holdout_seed: Optional[int] = None
-    target_paired_data: Optional[bool] = None
-    target_encoder_input_key: Optional[str] = None
-    target_counts_key: Optional[str] = None
-    log_target_multimodal_contrastive: Optional[bool] = None
-    use_early_stopping: Optional[bool] = None
-    verbose: Optional[bool] = None
 
 def _find_latest_cache_dir(root: str) -> Optional[str]:
     if not os.path.isdir(root):
@@ -114,11 +74,17 @@ def load_cached_inputs(cache_dir: str) -> Tuple[ad.AnnData, ad.AnnData]:
     return ad.read_h5ad(adata_path), ad.read_h5ad(adata_atac_path)
 
 
-def _trial_params_to_overrides(params: Optional[TrialParams]) -> Dict[str, Any]:
-    if params is None:
+def _validate_hparam_overrides(
+    overrides: Optional[Dict[str, Any]], *, context: str
+) -> Dict[str, Any]:
+    if not overrides:
         return {}
-    overrides = asdict(params)
-    return {key: value for key, value in overrides.items() if value is not None}
+    cleaned = {key: value for key, value in overrides.items() if value is not None}
+    hparam_keys = set(get_hparams().keys())
+    unknown = sorted(set(cleaned) - hparam_keys)
+    if unknown:
+        raise KeyError(f"Unknown HPARAMS keys in {context}: {unknown}")
+    return cleaned
 
 
 def _hparam_defaults() -> Dict[str, Any]:
@@ -186,10 +152,12 @@ def get_search_space(tuned_keys: Optional[List[str]] = None) -> Dict[str, List[A
 def build_model(
     adata: ad.AnnData,
     adata_atac: ad.AnnData,
-    params: TrialParams,
+    trial_overrides: Optional[Dict[str, Any]] = None,
 ) -> CustomNicheCompass:
-    hparam_overrides = _trial_params_to_overrides(params)
-    resolved_hparams = resolve_hparams(hparam_overrides)
+    trial_overrides = _validate_hparam_overrides(
+        trial_overrides, context="trial_overrides"
+    )
+    resolved_hparams = resolve_hparams(trial_overrides)
     model_hparams = filter_model_hparams(resolved_hparams)
     model_hparams.update(
         {
@@ -237,30 +205,33 @@ def get_hparams(key=None):
 
 
 def run_trial(
-    params: TrialParams,
+    trial_overrides: Optional[Dict[str, Any]],
     cache_dir: str,
-    train_cfg: TrainConfig,
+    train_overrides: Optional[Dict[str, Any]] = None,
     mlflow_experiment_id: Optional[str] = None,
     optimization_metric: str = "compound_metric",
 ) -> float:
     adata, adata_atac = load_cached_inputs(cache_dir)
-    hparam_overrides = _trial_params_to_overrides(params)
-    model = build_model(adata, adata_atac, params)
+    trial_overrides = _validate_hparam_overrides(
+        trial_overrides, context="trial_overrides"
+    )
+    train_overrides = _validate_hparam_overrides(
+        train_overrides, context="train_overrides"
+    )
+    model = build_model(adata, adata_atac, trial_overrides=trial_overrides)
 
     target_rna, target_atac = load_cached_targets(cache_dir)
 
     # Log only trial params to the child (current) run.
-    mlflow.log_params(hparam_overrides)
+    mlflow.log_params(trial_overrides)
 
     # Build train kwargs with precedence:
     # 1) HPARAMS defaults
-    # 2) TrainConfig
+    # 2) train_overrides
     # 3) Trial overrides
     train_kwargs = filter_train_hparams(resolve_hparams())
-    train_kwargs.update(
-        {key: value for key, value in asdict(train_cfg).items() if value is not None}
-    )
-    train_kwargs.update(filter_train_hparams(hparam_overrides))
+    train_kwargs.update(filter_train_hparams(train_overrides))
+    train_kwargs.update(filter_train_hparams(trial_overrides))
     train_kwargs["target_encoder_input_key"] = train_kwargs.get("encoder_input_key")
     train_kwargs["target_adata"] = target_rna
     train_kwargs["target_adata_atac"] = target_atac

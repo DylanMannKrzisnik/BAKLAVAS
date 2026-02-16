@@ -15,7 +15,6 @@ sys.path.append(os.path.join(os.environ.get("BAKLAVA_ROOT"), "scripts"))
 import argparse
 import io
 import subprocess
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -207,8 +206,6 @@ def main() -> None:
     import datetime
 
     from hpo_mouse_brain_utils import (
-        TrainConfig,
-        TrialParams,
         get_search_space,
         HPO_N_EPOCHS,
         get_or_create_experiment_id,
@@ -283,7 +280,10 @@ def main() -> None:
     # Now that the experiment exists (with the desired artifact location), activate it.
     mlflow.set_experiment(args.experiment_name)
 
-    train_cfg = TrainConfig(n_epochs=HPO_N_EPOCHS, n_epochs_all_gps=HPO_N_EPOCHS)
+    train_overrides = {
+        "n_epochs": HPO_N_EPOCHS,
+        "n_epochs_all_gps": HPO_N_EPOCHS,
+    }
     search_space = get_search_space()
 
     if args.launch_workers:
@@ -305,7 +305,7 @@ def main() -> None:
                 mlflow=mlflow,
                 cache_dir=cache_dir,
                 args=args,
-                train_cfg=train_cfg,
+                train_overrides=train_overrides,
                 search_space=search_space,
                 study_name=study_name,
                 extra={"n_workers": len(gpu_list), "total_trials": total_trials},
@@ -359,7 +359,7 @@ def main() -> None:
             mlflow=mlflow,
             cache_dir=cache_dir,
             args=args,
-            train_cfg=train_cfg,
+            train_overrides=train_overrides,
             search_space=search_space,
             study_name=study_name,
             extra={"total_trials": total_trials},
@@ -370,7 +370,7 @@ def main() -> None:
             key: trial.suggest_categorical(key, values)
             for key, values in search_space.items()
         }
-        params = TrialParams(**kwargs)
+        trial_overrides = kwargs
         with mlflow.start_run(
             run_name=f"trial_{trial.number:04d}", nested=True
         ) as child_run:
@@ -379,9 +379,9 @@ def main() -> None:
             mlflow.set_tag("optuna_trial_number", trial.number)
             mlflow.set_tag("optuna_study_name", study.study_name)
             return run_trial(
-                params=params,
+                trial_overrides=trial_overrides,
                 cache_dir=cache_dir,
-                train_cfg=train_cfg,
+                train_overrides=train_overrides,
                 mlflow_experiment_id=experiment_id,
                 optimization_metric="compound_metric",
             )
@@ -453,7 +453,7 @@ def _log_parent_params(
     mlflow,
     cache_dir: str,
     args: argparse.Namespace,
-    train_cfg: Any,
+    train_overrides: dict,
     search_space: dict,
     study_name: str,
     extra: Optional[dict] = None,
@@ -466,7 +466,10 @@ def _log_parent_params(
         mlflow.log_param(f"search_space_{key}", str(values))
     if extra:
         mlflow.log_params(extra)
-    mlflow.log_params(asdict(train_cfg))
+    if train_overrides:
+        mlflow.log_params(
+            {key: value for key, value in train_overrides.items() if value is not None}
+        )
 
 
 def _launch_workers(

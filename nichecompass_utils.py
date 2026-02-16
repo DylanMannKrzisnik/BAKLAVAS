@@ -392,6 +392,12 @@ class CustomNicheCompass(NicheCompass):
             ),
             "default": 10000.0,
         },
+        "lambda_knowledge_distillation": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=[0.0, 100.0, 1000.0]
+            ),
+            "default": 1000.0,
+        },
         "multimodal_temperature": {
             "suggest_distribution": CategoricalDistribution(choices=[1.0, 2.5, 10.0]),
             "default": 2.5,
@@ -1119,6 +1125,10 @@ class CustomNicheCompass(NicheCompass):
             cat_covariates_embeds_injection=self.cat_covariates_embeds_injection_,
             include_edge_kl_loss=self.include_edge_kl_loss_)
 
+        # Stage-2 distillation models are created after stage-1 training.
+        self.teacher_model = None
+        self.student_model = None
+
         self.is_trained_ = False
 
         # Store init params for saving and loading
@@ -1158,49 +1168,50 @@ class CustomNicheCompass(NicheCompass):
                 unfreeze_cat_covariates_embedder_weights))
 
     def train(self,
-              n_epochs: int=None,
-              n_epochs_all_gps: int=None,
-              n_epochs_no_edge_recon: int=None,
-              n_epochs_no_cat_covariates_contrastive: int=None,
-              lr: float=None,
-              weight_decay: float=None,
-              lambda_edge_recon: Optional[float]=None, #500000.,
-              lambda_gene_expr_recon: float=None, #300.,
-              lambda_chrom_access_recon: float=None, #100.,
-              lambda_cat_covariates_contrastive: float=None,
-              lambda_multimodal_contrastive_loss: Optional[float]=None,
-              multimodal_temperature: Optional[float]=None,
-              multimodal_contrastive_anneal: Optional[bool]=None,
-              contrastive_logits_pos_ratio: Optional[float]=None,
-              contrastive_logits_neg_ratio: Optional[float]=None,
-              lambda_group_lasso: float=None,
-              lambda_l1_masked: float=None,
-              l1_targets_categories: Optional[list]=None,
-              l1_sources_categories: Optional[list]=None,
-              lambda_l1_addon: float=None, #30.,
-              edge_val_ratio: float=None,
-              node_val_ratio: float=None,
-              edge_batch_size: Optional[int]=None,
-              node_batch_size: Optional[int]=None,
-              paired_data: bool=None,
-              target_adata: Optional[AnnData]=None,
-              target_adata_atac: Optional[AnnData]=None,
-              target_holdout_frac: float=None,
-              target_holdout_n: Optional[int]=None,
-              target_holdout_seed: int=None,
-              target_paired_data: bool=None,
-              target_encoder_input_key: Optional[str]=None,
-              target_counts_key: Optional[str]=None,
-              log_target_multimodal_contrastive: bool=None,
-              mlflow_experiment_id: Optional[str]=None,
-              mlflow_parent_run_id: Optional[str]=None,
-              retrieve_cat_covariates_embeds: bool=None,
-              retrieve_recon_edge_probs: bool=None,
-              retrieve_agg_weights: bool=None,
-              use_cuda_if_available: bool=None,
-              n_sampled_neighbors: int=None,
-              latent_dtype: type=None,
-              **trainer_kwargs):
+                n_epochs: int=None,
+                n_epochs_all_gps: int=None,
+                n_epochs_no_edge_recon: int=None,
+                n_epochs_no_cat_covariates_contrastive: int=None,
+                lr: float=None,
+                weight_decay: float=None,
+                lambda_edge_recon: Optional[float]=None, #500000.,
+                lambda_gene_expr_recon: float=None, #300.,
+                lambda_chrom_access_recon: float=None, #100.,
+                lambda_cat_covariates_contrastive: float=None,
+                lambda_multimodal_contrastive_loss: Optional[float]=None,
+                lambda_knowledge_distillation: Optional[float]=None,
+                multimodal_temperature: Optional[float]=None,
+                multimodal_contrastive_anneal: Optional[bool]=None,
+                contrastive_logits_pos_ratio: Optional[float]=None,
+                contrastive_logits_neg_ratio: Optional[float]=None,
+                lambda_group_lasso: float=None,
+                lambda_l1_masked: float=None,
+                l1_targets_categories: Optional[list]=None,
+                l1_sources_categories: Optional[list]=None,
+                lambda_l1_addon: float=None, #30.,
+                edge_val_ratio: float=None,
+                node_val_ratio: float=None,
+                edge_batch_size: Optional[int]=None,
+                node_batch_size: Optional[int]=None,
+                paired_data: bool=None,
+                target_adata: Optional[AnnData]=None,
+                target_adata_atac: Optional[AnnData]=None,
+                target_holdout_frac: float=None,
+                target_holdout_n: Optional[int]=None,
+                target_holdout_seed: int=None,
+                target_paired_data: bool=None,
+                target_encoder_input_key: Optional[str]=None,
+                target_counts_key: Optional[str]=None,
+                log_target_multimodal_contrastive: bool=None,
+                mlflow_experiment_id: Optional[str]=None,
+                mlflow_parent_run_id: Optional[str]=None,
+                retrieve_cat_covariates_embeds: bool=None,
+                retrieve_recon_edge_probs: bool=None,
+                retrieve_agg_weights: bool=None,
+                use_cuda_if_available: bool=None,
+                n_sampled_neighbors: int=None,
+                latent_dtype: type=None,
+                **trainer_kwargs):
         """
         Train the CustomNicheCompass model using CustomTrainer.
         """
@@ -1216,6 +1227,7 @@ class CustomNicheCompass(NicheCompass):
             lambda_chrom_access_recon=lambda_chrom_access_recon,
             lambda_cat_covariates_contrastive=lambda_cat_covariates_contrastive,
             lambda_multimodal_contrastive_loss=lambda_multimodal_contrastive_loss,
+            lambda_knowledge_distillation=lambda_knowledge_distillation,
             multimodal_temperature=multimodal_temperature,
             multimodal_contrastive_anneal=multimodal_contrastive_anneal,
             contrastive_logits_pos_ratio=contrastive_logits_pos_ratio,
@@ -1264,6 +1276,9 @@ class CustomNicheCompass(NicheCompass):
         ]
         lambda_multimodal_contrastive_loss = hparam_kwargs[
             "lambda_multimodal_contrastive_loss"
+        ]
+        lambda_knowledge_distillation = hparam_kwargs[
+            "lambda_knowledge_distillation"
         ]
         multimodal_temperature = hparam_kwargs["multimodal_temperature"]
         multimodal_contrastive_anneal = hparam_kwargs[
@@ -1316,7 +1331,8 @@ class CustomNicheCompass(NicheCompass):
         for key, value in trainer_default_kwargs.items():
             if trainer_kwargs.get(key) is None:
                 trainer_kwargs[key] = value
-        self.trainer = CustomTrainer(
+
+        self.trainer_stage1 = CustomTrainer(
             adata=self.adata,
             adata_atac=self.adata_atac,
             model=self.model,
@@ -1375,7 +1391,7 @@ class CustomNicheCompass(NicheCompass):
             l1_targets_mask = None
             l1_sources_mask = None
 
-        self.trainer.train(
+        self.trainer_stage1.train(
             n_epochs=n_epochs,
             n_epochs_no_edge_recon=n_epochs_no_edge_recon,
             n_epochs_no_cat_covariates_contrastive=n_epochs_no_cat_covariates_contrastive,
@@ -1396,11 +1412,99 @@ class CustomNicheCompass(NicheCompass):
             l1_targets_mask=l1_targets_mask,
             l1_sources_mask=l1_sources_mask,
             lambda_l1_addon=lambda_l1_addon,
+            lambda_knowledge_distillation=0.0,
             mlflow_experiment_id=mlflow_experiment_id,
             mlflow_parent_run_id=mlflow_parent_run_id)
-        
-        self.node_batch_size_ = self.trainer.node_batch_size_
-        
+
+        self.trainer = self.trainer_stage1
+        self.node_batch_size_ = self.trainer_stage1.node_batch_size_
+
+        self.teacher_model = copy.deepcopy(self.model).to(self.trainer_stage1.device)
+        self.teacher_model.eval()
+        for teacher_param in self.teacher_model.parameters():
+            teacher_param.requires_grad = False
+
+        run_stage2 = (
+            lambda_knowledge_distillation > 0
+            and target_adata is not None
+            and target_adata_atac is not None
+        )
+        if run_stage2:
+            stage2_counts_key = (
+                self.counts_key_ if target_counts_key is None else target_counts_key
+            )
+            stage2_encoder_input_key = (
+                self.encoder_input_key_
+                if target_encoder_input_key is None
+                else target_encoder_input_key
+            )
+            self.student_model = copy.deepcopy(self.model).to(self.trainer_stage1.device)
+            self.trainer_stage2 = CustomTrainer(
+                adata=target_adata,
+                adata_atac=target_adata_atac,
+                model=self.student_model,
+                counts_key=stage2_counts_key,
+                encoder_input_key=stage2_encoder_input_key,
+                adj_key=self.adj_key_,
+                gp_targets_mask_key=self.gp_targets_mask_key_,
+                gp_sources_mask_key=self.gp_sources_mask_key_,
+                cat_covariates_keys=self.cat_covariates_keys_,
+                edge_val_ratio=0.0,
+                node_val_ratio=0.0,
+                edge_batch_size=edge_batch_size,
+                node_batch_size=node_batch_size,
+                paired_data=False, # will need to be more flexible for future use cases
+                target_adata=target_adata,
+                target_adata_atac=target_adata_atac,
+                target_holdout_frac=target_holdout_frac,
+                target_holdout_n=target_holdout_n,
+                target_holdout_seed=target_holdout_seed,
+                target_paired_data=target_paired_data,
+                target_encoder_input_key=target_encoder_input_key,
+                target_counts_key=target_counts_key,
+                log_target_multimodal_contrastive=log_target_multimodal_contrastive,
+                teacher_model=self.teacher_model,
+                use_cuda_if_available=use_cuda_if_available,
+                n_sampled_neighbors=n_sampled_neighbors,
+                latent_dtype=latent_dtype,
+                **trainer_kwargs,
+            )
+
+            self.trainer_stage2.train(
+                n_epochs=n_epochs,
+                lr=self.trainer_stage1.lr_,
+                weight_decay=self.trainer_stage1.weight_decay_,
+                lambda_edge_recon=0.0,
+                lambda_gene_expr_recon=0.0,
+                lambda_chrom_access_recon=0.0,
+                lambda_cat_covariates_contrastive=0.0,
+                lambda_multimodal_contrastive_loss=0.0,
+                lambda_knowledge_distillation=lambda_knowledge_distillation,
+                multimodal_temperature=self.trainer_stage1.multimodal_temperature_,
+                multimodal_contrastive_anneal=self.trainer_stage1.multimodal_contrastive_anneal_,
+                contrastive_logits_pos_ratio=self.trainer_stage1.contrastive_logits_pos_ratio_,
+                contrastive_logits_neg_ratio=self.trainer_stage1.contrastive_logits_neg_ratio_,
+                lambda_group_lasso=0.0,
+                lambda_l1_masked=0.0,
+                lambda_l1_addon=0.0,
+                mlflow_experiment_id=mlflow_experiment_id,
+                mlflow_parent_run_id=mlflow_parent_run_id,
+            )
+
+            # Use the distilled student as active model while keeping the
+            # frozen teacher available for analysis/debugging.
+            self.model = self.student_model
+            self.trainer = self.trainer_stage2
+            self.node_batch_size_ = self.trainer_stage2.node_batch_size_
+        else:
+            self.trainer_stage2 = None
+            self.student_model = None
+            if lambda_knowledge_distillation > 0:
+                warnings.warn(
+                    "Skipping stage-2 knowledge distillation because target_adata "
+                    "and/or target_adata_atac were not provided."
+                )
+
         self.is_trained_ = True
         self.model.eval()
 
@@ -1434,6 +1538,7 @@ class CustomNicheCompass(NicheCompass):
         if mlflow_experiment_id is not None:
             mlflow.log_metric("n_active_gps",
                               len(self.adata.uns[self.active_gp_names_key_]))
+
 
     def get_latent_representation(
             self,
@@ -1769,6 +1874,7 @@ class CustomTrainer(Trainer):
         target_counts_key: Optional[str]=None,
         log_target_multimodal_contrastive: bool=None,
         target_latent_key: str=None,
+        teacher_model: Optional[torch.nn.Module]=None,
         **kwargs
     ):
         latent_dtype = kwargs.pop("latent_dtype", None)
@@ -1809,6 +1915,12 @@ class CustomTrainer(Trainer):
             hparam_kwargs["latent_dtype"]
         )
         super().__init__(*args, **kwargs)
+        self.teacher_model = teacher_model
+        if self.teacher_model is not None:
+            self.teacher_model = self.teacher_model.to(self.device)
+            self.teacher_model.eval()
+            for teacher_param in self.teacher_model.parameters():
+                teacher_param.requires_grad = False
 
         data_dict = prepare_data(
             adata=self.adata,
@@ -2230,6 +2342,7 @@ class CustomTrainer(Trainer):
               lambda_edge_recon: Optional[float]=None,
               lambda_cat_covariates_contrastive: Optional[float]=None,
               lambda_multimodal_contrastive_loss: Optional[float]=None,
+              lambda_knowledge_distillation: Optional[float]=None,
               multimodal_temperature: Optional[float]=None,
               multimodal_contrastive_anneal: Optional[bool]=None,
               contrastive_logits_pos_ratio: Optional[float]=None,
@@ -2256,6 +2369,7 @@ class CustomTrainer(Trainer):
             lambda_edge_recon=lambda_edge_recon,
             lambda_cat_covariates_contrastive=lambda_cat_covariates_contrastive,
             lambda_multimodal_contrastive_loss=lambda_multimodal_contrastive_loss,
+            lambda_knowledge_distillation=lambda_knowledge_distillation,
             multimodal_temperature=multimodal_temperature,
             multimodal_contrastive_anneal=multimodal_contrastive_anneal,
             contrastive_logits_pos_ratio=contrastive_logits_pos_ratio,
@@ -2282,6 +2396,9 @@ class CustomTrainer(Trainer):
         ]
         lambda_multimodal_contrastive_loss = hparam_kwargs[
             "lambda_multimodal_contrastive_loss"
+        ]
+        lambda_knowledge_distillation = hparam_kwargs[
+            "lambda_knowledge_distillation"
         ]
         multimodal_temperature = hparam_kwargs["multimodal_temperature"]
         multimodal_contrastive_anneal = hparam_kwargs[
@@ -2314,6 +2431,7 @@ class CustomTrainer(Trainer):
             lambda_cat_covariates_contrastive)
         self.lambda_multimodal_contrastive_loss_ = (
             lambda_multimodal_contrastive_loss)
+        self.lambda_knowledge_distillation_ = lambda_knowledge_distillation
         self.multimodal_temperature_ = multimodal_temperature
         self.multimodal_contrastive_anneal_ = multimodal_contrastive_anneal
         self.contrastive_logits_pos_ratio_ = contrastive_logits_pos_ratio
@@ -2325,6 +2443,15 @@ class CustomTrainer(Trainer):
         self.lambda_l1_addon_ = lambda_l1_addon
         self.mlflow_experiment_id = mlflow_experiment_id
         self.mlflow_parent_run_id = mlflow_parent_run_id
+
+        if self.lambda_knowledge_distillation_ is None:
+            self.lambda_knowledge_distillation_ = 0.0
+        if self.lambda_knowledge_distillation_ > 0 and self.teacher_model is None:
+            warnings.warn(
+                "lambda_knowledge_distillation > 0 but no teacher_model was "
+                "provided to CustomTrainer; disabling KD for this training run."
+            )
+            self.lambda_knowledge_distillation_ = 0.0
 
         print("\n--- MODEL TRAINING ---")
 
@@ -2426,6 +2553,10 @@ class CustomTrainer(Trainer):
                     (), device=self.device
                 )
                 self.iter_logs["train_multimodal_contrastive_loss_count"] = 0
+                self.iter_logs["train_knowledge_distillation_loss_sum"] = torch.zeros(
+                    (), device=self.device
+                )
+                self.iter_logs["train_knowledge_distillation_loss_count"] = 0
 
             for edge_train_data_batch, node_train_data_batch in zip(
                     self.edge_train_loader,
@@ -2433,16 +2564,39 @@ class CustomTrainer(Trainer):
 
                 # node-level model output
                 node_train_data_batch = node_train_data_batch.to(self.device, non_blocking=True)
+
                 node_train_model_output = self.model(
                     data_batch=node_train_data_batch,
                     decoder="omics",
                     use_only_active_gps=self.use_only_active_gps)
+
+                if self.lambda_knowledge_distillation_ > 0:
+                    with torch.no_grad():
+                        teacher_node_train_model_output = self.teacher_model(
+                            data_batch=node_train_data_batch,
+                            decoder="omics",
+                            use_only_active_gps=self.use_only_active_gps,
+                        )
+                    node_train_model_output["student_clip_rna"] = node_train_model_output.get(
+                        "clip_rna"
+                    )
+                    node_train_model_output["student_clip_atac"] = node_train_model_output.get(
+                        "clip_atac"
+                    )
+                    node_train_model_output["teacher_clip_rna"] = teacher_node_train_model_output.get(
+                        "clip_rna"
+                    )
+                    node_train_model_output["teacher_clip_atac"] = teacher_node_train_model_output.get(
+                        "clip_atac"
+                    )
+
                 if (
                     collect_source_umap_from_train
                     and self._source_umap_collected_n < self._source_umap_target_n
                 ):
                     clip_rna_batch = node_train_model_output.get("clip_rna")
                     clip_atac_batch = node_train_model_output.get("clip_atac")
+
                     if clip_rna_batch is not None and clip_atac_batch is not None:
                         remaining = self._source_umap_target_n - self._source_umap_collected_n
                         take_n = min(
@@ -2483,6 +2637,7 @@ class CustomTrainer(Trainer):
                     lambda_chrom_access_recon=self.lambda_chrom_access_recon_,
                     lambda_cat_covariates_contrastive=self.lambda_cat_covariates_contrastive_,
                     lambda_multimodal_contrastive_loss=self.multimodal_contrastive_weight_,
+                    lambda_knowledge_distillation=self.lambda_knowledge_distillation_,
                     multimodal_temperature=self.multimodal_temperature_,
                     multimodal_contrastive_active=(
                         self.multimodal_contrastive_weight_ > 0),
@@ -2511,6 +2666,11 @@ class CustomTrainer(Trainer):
                             train_loss_dict["multimodal_contrastive_loss"].detach()
                         )
                         self.iter_logs["train_multimodal_contrastive_loss_count"] += 1
+                    if "knowledge_distillation_loss" in train_loss_dict:
+                        self.iter_logs["train_knowledge_distillation_loss_sum"] += (
+                            train_loss_dict["knowledge_distillation_loss"].detach()
+                        )
+                        self.iter_logs["train_knowledge_distillation_loss_count"] += 1
                 self.iter_logs["n_train_iter"] += 1
 
                 self.optimizer.zero_grad()
@@ -2566,6 +2726,18 @@ class CustomTrainer(Trainer):
                     self.epoch_logs["train_multimodal_contrastive_loss"].append(train_mmc_loss)
                     if self.mlflow_experiment_id is not None:
                         mlflow.log_metric("train_multimodal_contrastive_loss", train_mmc_loss, step=self.epoch)
+                kd_count = int(self.iter_logs.get("train_knowledge_distillation_loss_count", 0))
+                if kd_count > 0:
+                    train_kd_loss = (
+                        self.iter_logs["train_knowledge_distillation_loss_sum"] / kd_count
+                    ).item()
+                    self.epoch_logs["train_knowledge_distillation_loss"].append(train_kd_loss)
+                    if self.mlflow_experiment_id is not None:
+                        mlflow.log_metric(
+                            "train_knowledge_distillation_loss",
+                            train_kd_loss,
+                            step=self.epoch,
+                        )
 
                 n_val = int(self.iter_logs.get("n_val_iter", 0))
                 if n_val > 0 and "val_global_loss_sum" in self.iter_logs:
@@ -2583,6 +2755,18 @@ class CustomTrainer(Trainer):
                         self.epoch_logs["val_multimodal_contrastive_loss"].append(val_mmc_loss)
                         if self.mlflow_experiment_id is not None:
                             mlflow.log_metric("val_multimodal_contrastive_loss", val_mmc_loss, step=self.epoch)
+                    val_kd_count = int(self.iter_logs.get("val_knowledge_distillation_loss_count", 0))
+                    if val_kd_count > 0:
+                        val_kd_loss = (
+                            self.iter_logs["val_knowledge_distillation_loss_sum"] / val_kd_count
+                        ).item()
+                        self.epoch_logs["val_knowledge_distillation_loss"].append(val_kd_loss)
+                        if self.mlflow_experiment_id is not None:
+                            mlflow.log_metric(
+                                "val_knowledge_distillation_loss",
+                                val_kd_loss,
+                                step=self.epoch,
+                            )
 
 
             # Evaluate on target data
@@ -2731,6 +2915,10 @@ class CustomTrainer(Trainer):
                 (), device=self.device
             )
             self.iter_logs["val_multimodal_contrastive_loss_count"] = 0
+            self.iter_logs["val_knowledge_distillation_loss_sum"] = torch.zeros(
+                (), device=self.device
+            )
+            self.iter_logs["val_knowledge_distillation_loss_count"] = 0
 
         for edge_val_data_batch, node_val_data_batch in zip(
                 self.edge_val_loader, _cycle_iterable(self.node_val_loader)):
@@ -2739,6 +2927,24 @@ class CustomTrainer(Trainer):
                 data_batch=node_val_data_batch,
                 decoder="omics",
                 use_only_active_gps=self.use_only_active_gps)
+            if self.lambda_knowledge_distillation_ > 0:
+                teacher_node_val_model_output = self.teacher_model(
+                    data_batch=node_val_data_batch,
+                    decoder="omics",
+                    use_only_active_gps=self.use_only_active_gps,
+                )
+                node_val_model_output["student_clip_rna"] = node_val_model_output.get(
+                    "clip_rna"
+                )
+                node_val_model_output["student_clip_atac"] = node_val_model_output.get(
+                    "clip_atac"
+                )
+                node_val_model_output["teacher_clip_rna"] = teacher_node_val_model_output.get(
+                    "clip_rna"
+                )
+                node_val_model_output["teacher_clip_atac"] = teacher_node_val_model_output.get(
+                    "clip_atac"
+                )
 
             edge_val_data_batch = edge_val_data_batch.to(self.device, non_blocking=True)
             edge_val_model_output = self.model(
@@ -2754,6 +2960,7 @@ class CustomTrainer(Trainer):
                 lambda_chrom_access_recon=self.lambda_chrom_access_recon_,
                 lambda_cat_covariates_contrastive=self.lambda_cat_covariates_contrastive_,
                 lambda_multimodal_contrastive_loss=multimodal_contrastive_weight,
+                lambda_knowledge_distillation=self.lambda_knowledge_distillation_,
                 multimodal_temperature=self.multimodal_temperature_,
                 multimodal_contrastive_active=(multimodal_contrastive_weight > 0),
                 contrastive_logits_pos_ratio=self.contrastive_logits_pos_ratio_,
@@ -2779,6 +2986,11 @@ class CustomTrainer(Trainer):
                         val_loss_dict["multimodal_contrastive_loss"].detach()
                     )
                     self.iter_logs["val_multimodal_contrastive_loss_count"] += 1
+                if "knowledge_distillation_loss" in val_loss_dict:
+                    self.iter_logs["val_knowledge_distillation_loss_sum"] += (
+                        val_loss_dict["knowledge_distillation_loss"].detach()
+                    )
+                    self.iter_logs["val_knowledge_distillation_loss_count"] += 1
             self.iter_logs["n_val_iter"] += 1
 
             edge_recon_probs_val = torch.sigmoid(
@@ -4012,7 +4224,9 @@ class CustomVGPGAE(VGPGAE):
              cat_covariates_contrastive_active: bool=True,
              lambda_multimodal_contrastive_loss: Optional[float]=None,
              multimodal_temperature: Optional[float]=None,
-             multimodal_contrastive_active: bool=True) -> dict:
+             multimodal_contrastive_active: bool=True,
+             lambda_knowledge_distillation: Optional[float]=None) -> dict:
+
         hparam_kwargs = CustomNicheCompass._apply_hparam_defaults(
             lambda_gene_expr_recon=lambda_gene_expr_recon,
             lambda_chrom_access_recon=lambda_chrom_access_recon,
@@ -4022,6 +4236,7 @@ class CustomVGPGAE(VGPGAE):
             contrastive_logits_neg_ratio=contrastive_logits_neg_ratio,
             lambda_multimodal_contrastive_loss=lambda_multimodal_contrastive_loss,
             multimodal_temperature=multimodal_temperature,
+            lambda_knowledge_distillation=lambda_knowledge_distillation,
         )
         lambda_gene_expr_recon = hparam_kwargs["lambda_gene_expr_recon"]
         lambda_chrom_access_recon = hparam_kwargs["lambda_chrom_access_recon"]
@@ -4039,6 +4254,7 @@ class CustomVGPGAE(VGPGAE):
             "lambda_multimodal_contrastive_loss"
         ]
         multimodal_temperature = hparam_kwargs["multimodal_temperature"]
+        lambda_knowledge_distillation = hparam_kwargs["lambda_knowledge_distillation"]
 
         loss_dict = super().loss(
             edge_model_output=edge_model_output,
@@ -4078,6 +4294,31 @@ class CustomVGPGAE(VGPGAE):
             loss_dict["optim_loss"] += loss_dict[
                 "multimodal_contrastive_loss"]
 
+        if (
+                lambda_knowledge_distillation > 0
+                and "student_clip_rna" in node_model_output
+                and "student_clip_atac" in node_model_output
+                and "teacher_clip_rna" in node_model_output
+                and "teacher_clip_atac" in node_model_output):
+
+            student_similarity_matrix = self.get_multimodal_similarity(
+                clip_embeddings_rna=node_model_output["student_clip_rna"],
+                clip_embeddings_atac=node_model_output["student_clip_atac"])
+            teacher_similarity_matrix = self.get_multimodal_similarity(
+                clip_embeddings_rna=node_model_output["teacher_clip_rna"],
+                clip_embeddings_atac=node_model_output["teacher_clip_atac"])
+
+            loss_dict["knowledge_distillation_loss"] = (
+                lambda_knowledge_distillation *
+                self.compute_knowledge_distillation_loss(
+                    student_similarity_matrix,
+                    teacher_similarity_matrix))
+
+            loss_dict["global_loss"] += loss_dict[
+                "knowledge_distillation_loss"]
+            loss_dict["optim_loss"] += loss_dict[
+                "knowledge_distillation_loss"]
+
         return loss_dict
 
     def get_multimodal_similarity(
@@ -4114,6 +4355,25 @@ class CustomVGPGAE(VGPGAE):
         loss_rna = F.cross_entropy(logits, labels)
         loss_atac = F.cross_entropy(logits.t(), labels)
         return 0.5 * (loss_rna + loss_atac)
+
+    def compute_knowledge_distillation_loss(
+            self,
+            student_similarity_matrix: torch.Tensor,
+            teacher_similarity_matrix: torch.Tensor) -> torch.Tensor:
+
+        kd_cols = F.kl_div(
+            F.log_softmax(student_similarity_matrix, dim=1),
+            F.log_softmax(teacher_similarity_matrix, dim=1),
+            reduction="batchmean",
+            log_target=True)
+
+        kd_rows = F.kl_div(
+            F.log_softmax(student_similarity_matrix, dim=0),
+            F.log_softmax(teacher_similarity_matrix, dim=0),
+            reduction="batchmean",
+            log_target=True)
+
+        return 0.5 * (kd_cols.mean() + kd_rows.mean())
 
 
 class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):
@@ -4385,6 +4645,7 @@ def prepare_data(adata: AnnData,
     paired_data = hparam_kwargs["paired_data"]
     edge_val_ratio = hparam_kwargs["edge_val_ratio"]
     node_val_ratio = hparam_kwargs["node_val_ratio"]
+
     dataset = CustomSpatialAnnTorchDataset(
         adata=adata,
         adata_atac=adata_atac,

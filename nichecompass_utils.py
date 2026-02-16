@@ -53,45 +53,486 @@ class CustomNicheCompass(NicheCompass):
     """
 
     HPARAMS = {
-        'multimodal_layer_series': {
-            'suggest_distribution': CategoricalDistribution(choices=[False]),
-            'default': False
+        # __init__ parameters
+        "adata": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
         },
-        'multimodal_embedding_size': {
-            'suggest_distribution': CategoricalDistribution(choices=[32, 128]),
-            'default': 32
+        "adata_atac": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
+        },
+        "counts_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["counts", "pseudocounts"]
+            ),
+            "default": "counts",
         },
         "encoder_input_key": {
-            "suggest_distribution": CategoricalDistribution(choices=["counts", "pseudocounts"]),
-            "default": "counts"
+            "suggest_distribution": CategoricalDistribution(
+                choices=["counts", "pseudocounts"]
+            ),
+            "default": "counts",
+            "sample_during_hpo": True,
+        },
+        "adj_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["spatial_connectivities"]
+            ),
+            "default": "spatial_connectivities",
+        },
+        "gp_names_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_gp_names"]
+            ),
+            "default": "nichecompass_gp_names",
+        },
+        "active_gp_names_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_active_gp_names"]
+            ),
+            "default": "nichecompass_active_gp_names",
+        },
+        "gp_targets_mask_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_gp_targets"]
+            ),
+            "default": "nichecompass_gp_targets",
+        },
+        "gp_targets_categories_mask_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_gp_targets_categories"]
+            ),
+            "default": "nichecompass_gp_targets_categories",
+        },
+        "targets_categories_label_encoder_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_targets_categories_label_encoder"]
+            ),
+            "default": "nichecompass_targets_categories_label_encoder",
+        },
+        "gp_sources_mask_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_gp_sources"]
+            ),
+            "default": "nichecompass_gp_sources",
+        },
+        "gp_sources_categories_mask_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_gp_sources_categories"]
+            ),
+            "default": "nichecompass_gp_sources_categories",
+        },
+        "sources_categories_label_encoder_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_sources_categories_label_encoder"]
+            ),
+            "default": "nichecompass_sources_categories_label_encoder",
+        },
+        "ca_targets_mask_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_ca_targets", None]
+            ),
+            "default": "nichecompass_ca_targets",
+        },
+        "ca_sources_mask_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_ca_sources", None]
+            ),
+            "default": "nichecompass_ca_sources",
+        },
+        "latent_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_latent"]
+            ),
+            "default": "nichecompass_latent",
+        },
+        "cat_covariates_embeds_keys": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
+        },
+        "cat_covariates_embeds_injection": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": ["gene_expr_decoder", "chrom_access_decoder"],
+        },
+        "cat_covariates_keys": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
+        },
+        "cat_covariates_no_edges": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
+        },
+        "genes_idx_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_genes_idx"]
+            ),
+            "default": "nichecompass_genes_idx",
+        },
+        "target_genes_idx_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_target_genes_idx"]
+            ),
+            "default": "nichecompass_target_genes_idx",
+        },
+        "source_genes_idx_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_source_genes_idx"]
+            ),
+            "default": "nichecompass_source_genes_idx",
+        },
+        "peaks_idx_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_peaks_idx"]
+            ),
+            "default": "nichecompass_peaks_idx",
+        },
+        "target_peaks_idx_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_target_peaks_idx"]
+            ),
+            "default": "nichecompass_target_peaks_idx",
+        },
+        "source_peaks_idx_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_source_peaks_idx"]
+            ),
+            "default": "nichecompass_source_peaks_idx",
+        },
+        "gene_peaks_mask_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_gene_peaks"]
+            ),
+            "default": "nichecompass_gene_peaks",
+        },
+        "recon_adj_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_recon_connectivities", None]
+            ),
+            "default": "nichecompass_recon_connectivities",
+        },
+        "agg_weights_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_agg_weights", None]
+            ),
+            "default": "nichecompass_agg_weights",
+        },
+        "include_edge_recon_loss": {
+            "suggest_distribution": CategoricalDistribution(choices=[True, False]),
+            "default": True,
+        },
+        "include_gene_expr_recon_loss": {
+            "suggest_distribution": CategoricalDistribution(choices=[True, False]),
+            "default": True,
+        },
+        "include_chrom_access_recon_loss": {
+            "suggest_distribution": CategoricalDistribution(choices=[True, False]),
+            "default": True,
+        },
+        "include_cat_covariates_contrastive_loss": {
+            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "default": False,
+        },
+        "gene_expr_recon_dist": {
+            "suggest_distribution": CategoricalDistribution(choices=["nb"]),
+            "default": "nb",
+        },
+        "log_variational": {
+            "suggest_distribution": CategoricalDistribution(choices=[True, False]),
+            "default": True,
+        },
+        "node_label_method": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["one-hop-sum", "one-hop-norm", "one-hop-attention"]
+            ),
+            "default": "one-hop-norm",
+        },
+        "active_gp_thresh_ratio": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=[0.001, 0.01, 0.05]
+            ),
+            "default": 0.01,
+        },
+        "active_gp_type": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["mixed", "separate"]
+            ),
+            "default": "separate",
+        },
+        "n_fc_layers_encoder": {
+            "suggest_distribution": CategoricalDistribution(choices=[1, 2]),
+            "default": 1,
+        },
+        "n_layers_encoder": {
+            "suggest_distribution": CategoricalDistribution(choices=[1, 2]),
+            "default": 1,
+        },
+        "n_hidden_encoder": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=[None, 128, 256, 512]
+            ),
+            "default": None,
+        },
+        "conv_layer_encoder": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["gcnconv", "gatv2conv"]
+            ),
+            "default": "gcnconv",
+        },
+        "encoder_n_attention_heads": {
+            "suggest_distribution": CategoricalDistribution(choices=[1, 2, 4, 8]),
+            "default": 4,
+        },
+        "encoder_use_bn": {
+            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "default": False,
+        },
+        "dropout_rate_encoder": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.1, 0.2]),
+            "default": 0.0,
+        },
+        "dropout_rate_graph_decoder": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.1, 0.2]),
+            "default": 0.0,
+        },
+        "cat_covariates_cats": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
+        },
+        "n_addon_gp": {
+            "suggest_distribution": CategoricalDistribution(choices=[0, 50, 100]),
+            "default": 100,
+        },
+        "multimodal_embedding_size": {
+            "suggest_distribution": CategoricalDistribution(choices=[32, 128]),
+            "default": 32,
+            "sample_during_hpo": True,
+        },
+        "multimodal_layer_series": {
+            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "default": False,
+        },
+        "cat_covariates_embeds_nums": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
+        },
+        "include_edge_kl_loss": {
+            "suggest_distribution": CategoricalDistribution(choices=[True, False]),
+            "default": True,
+        },
+        "use_cuda_if_available": {
+            "suggest_distribution": CategoricalDistribution(choices=[True, False]),
+            "default": True,
+        },
+        "seed": {
+            "suggest_distribution": CategoricalDistribution(choices=[0, 1, 42]),
+            "default": 0,
+        },
+        # train() parameters
+        "n_epochs": {
+            "suggest_distribution": CategoricalDistribution(choices=[50, 100, 200]),
+            "default": 100,
+        },
+        "n_epochs_all_gps": {
+            "suggest_distribution": CategoricalDistribution(choices=[10, 25, 50]),
+            "default": 25,
+        },
+        "n_epochs_no_edge_recon": {
+            "suggest_distribution": CategoricalDistribution(choices=[0, 5, 10]),
+            "default": 0,
+        },
+        "n_epochs_no_cat_covariates_contrastive": {
+            "suggest_distribution": CategoricalDistribution(choices=[0, 5, 10]),
+            "default": 5,
+        },
+        "lr": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=[0.0001, 0.0005, 0.001]
+            ),
+            "default": 0.001,
+        },
+        "weight_decay": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=[0.0, 0.00001, 0.0001]
+            ),
+            "default": 0.0,
+        },
+        "lambda_edge_recon": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=[0.0, 500000.0]
+            ),
+            "default": 0.0,
+        },
+        "lambda_gene_expr_recon": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=[0.0, 100.0, 300.0]
+            ),
+            "default": 0.0,
+        },
+        "lambda_chrom_access_recon": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=[0.0, 10.0, 100.0, 300.0]
+            ),
+            "default": 0.0,
+        },
+        "lambda_cat_covariates_contrastive": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.1, 1.0]),
+            "default": 0.0,
         },
         "lambda_multimodal_contrastive_loss": {
-            "suggest_distribution": CategoricalDistribution(choices=[10000.0]),
-            "default": 10000.0
+            "suggest_distribution": CategoricalDistribution(
+                choices=[1000.0, 10000.0, 100000.0]
+            ),
+            "default": 10000.0,
         },
         "multimodal_temperature": {
             "suggest_distribution": CategoricalDistribution(choices=[1.0, 2.5, 10.0]),
-            "default": 2.5
+            "default": 2.5,
+            "sample_during_hpo": True,
         },
         "multimodal_contrastive_anneal": {
-            "suggest_distribution": CategoricalDistribution(choices=[False]),
-            "default": False
+            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "default": False,
         },
         "contrastive_logits_pos_ratio": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.0]),
-            "default": 0.0
+            "suggest_distribution": CategoricalDistribution(
+                choices=[0.0, 0.05, 0.1]
+            ),
+            "default": 0.0,
+            "sample_during_hpo": True,
         },
         "contrastive_logits_neg_ratio": {
-            "suggest_distribution": CategoricalDistribution(choices=[0.0]),
-            "default": 0.0
+            "suggest_distribution": CategoricalDistribution(
+                choices=[0.0, 0.05, 0.1]
+            ),
+            "default": 0.0,
+            "sample_during_hpo": True,
         },
-        "node_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[1000]),
-            "default": 1000
+        "lambda_group_lasso": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.0, 1.0, 10.0]),
+            "default": 0.0,
+        },
+        "lambda_l1_masked": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.0, 1.0, 10.0]),
+            "default": 0.0,
+        },
+        "l1_targets_categories": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": ["target_gene"],
+        },
+        "l1_sources_categories": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
+        },
+        "lambda_l1_addon": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.0, 10.0, 30.0]),
+            "default": 0.0,
+        },
+        "edge_val_ratio": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.05, 0.1, 0.2]),
+            "default": 0.1,
+        },
+        "node_val_ratio": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.05, 0.1, 0.2]),
+            "default": 0.1,
         },
         "edge_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[1000]),
-            "default": 1000
+            "suggest_distribution": CategoricalDistribution(choices=[256, 512, 1000]),
+            "default": 1000,
+        },
+        "node_batch_size": {
+            "suggest_distribution": CategoricalDistribution(choices=[500, 1000, 2000]),
+            "default": 1000,
+            "sample_during_hpo": True,
+        },
+        "paired_data": {
+            "suggest_distribution": CategoricalDistribution(choices=[True, False]),
+            "default": True,
+        },
+        "target_adata": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
+        },
+        "target_adata_atac": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
+        },
+        "target_holdout_frac": {
+            "suggest_distribution": CategoricalDistribution(choices=[0.05, 0.1, 0.2]),
+            "default": 0.1,
+        },
+        "target_holdout_n": {
+            "suggest_distribution": CategoricalDistribution(choices=[None, 500, 2000]),
+            "default": None,
+        },
+        "target_holdout_seed": {
+            "suggest_distribution": CategoricalDistribution(choices=[0, 1, 42]),
+            "default": 0,
+        },
+        "target_paired_data": {
+            "suggest_distribution": CategoricalDistribution(choices=[True, False]),
+            "default": True,
+        },
+        "target_encoder_input_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=[None, "counts", "pseudocounts"]
+            ),
+            "default": None,
+        },
+        "target_counts_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=[None, "counts", "pseudocounts"]
+            ),
+            "default": None,
+        },
+        "log_target_multimodal_contrastive": {
+            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "default": False,
+        },
+        "mlflow_experiment_id": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
+        },
+        "mlflow_parent_run_id": {
+            "suggest_distribution": CategoricalDistribution(choices=[None]),
+            "default": None,
+        },
+        "retrieve_cat_covariates_embeds": {
+            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "default": False,
+        },
+        "retrieve_recon_edge_probs": {
+            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "default": False,
+        },
+        "retrieve_agg_weights": {
+            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "default": False,
+        },
+        "n_sampled_neighbors": {
+            "suggest_distribution": CategoricalDistribution(choices=[-1, 4, 8, 16]),
+            "default": -1,
+        },
+        "latent_dtype": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["float64", "float32"]
+            ),
+            "default": np.float64,
+        },
+        # trainer_kwargs commonly used with train()
+        "target_latent_key": {
+            "suggest_distribution": CategoricalDistribution(
+                choices=["nichecompass_latent"]
+            ),
+            "default": "nichecompass_latent",
+        },
+        "use_early_stopping": {
+            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "default": False,
+        },
+        "verbose": {
+            "suggest_distribution": CategoricalDistribution(choices=[False, True]),
+            "default": False,
         },
     }
 

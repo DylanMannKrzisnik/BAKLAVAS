@@ -13,13 +13,11 @@ from optuna.distributions import CategoricalDistribution
 from nichecompass_utils import CustomNicheCompass
 
 DEFAULT_TUNED_HPARAM_KEYS = [
-    "encoder_input_key",
-    "multimodal_temperature",
-    "contrastive_logits_pos_ratio",
-    "contrastive_logits_neg_ratio",
-    "multimodal_embedding_size",
-    "node_batch_size",
+    key
+    for key, spec in CustomNicheCompass.get_hparams().items()
+    if isinstance(spec, dict) and spec.get("sample_during_hpo", False)
 ]
+TRAINER_EXTRA_HPARAM_KEYS = {"target_latent_key", "use_early_stopping", "verbose"}
 
 # HPO convenience override for TrainConfig.n_epochs
 HPO_N_EPOCHS = 100
@@ -138,7 +136,9 @@ def resolve_hparams(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     return resolved
 
 
-def _filter_hparams_for_signature(func, hparams: Dict[str, Any]) -> Dict[str, Any]:
+def _filter_hparams_for_signature(
+    func, hparams: Dict[str, Any], extra_allowed_keys: Optional[set] = None
+) -> Dict[str, Any]:
     signature = inspect.signature(func)
     allowed = set(signature.parameters)
     allowed.discard("self")
@@ -146,6 +146,8 @@ def _filter_hparams_for_signature(func, hparams: Dict[str, Any]) -> Dict[str, An
     allowed.discard("adata_atac")
     allowed.discard("kwargs")
     allowed.discard("trainer_kwargs")
+    if extra_allowed_keys:
+        allowed.update(extra_allowed_keys)
     return {key: value for key, value in hparams.items() if key in allowed}
 
 
@@ -154,7 +156,11 @@ def filter_model_hparams(hparams: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def filter_train_hparams(hparams: Dict[str, Any]) -> Dict[str, Any]:
-    return _filter_hparams_for_signature(CustomNicheCompass.train, hparams)
+    return _filter_hparams_for_signature(
+        CustomNicheCompass.train,
+        hparams,
+        extra_allowed_keys=TRAINER_EXTRA_HPARAM_KEYS,
+    )
 
 
 def get_search_space(tuned_keys: Optional[List[str]] = None) -> Dict[str, List[Any]]:
@@ -185,20 +191,20 @@ def build_model(
     hparam_overrides = _trial_params_to_overrides(params)
     resolved_hparams = resolve_hparams(hparam_overrides)
     model_hparams = filter_model_hparams(resolved_hparams)
-    return CustomNicheCompass(
-        adata,
-        adata_atac,
-        counts_key=DEFAULT_COUNTS_KEY,
-        adj_key=DEFAULT_ADJ_KEY,
-        gp_names_key=DEFAULT_GP_NAMES_KEY,
-        active_gp_names_key=DEFAULT_ACTIVE_GP_NAMES_KEY,
-        gp_targets_mask_key=DEFAULT_GP_TARGETS_MASK_KEY,
-        gp_targets_categories_mask_key=DEFAULT_GP_TARGETS_CATEGORIES_MASK_KEY,
-        gp_sources_mask_key=DEFAULT_GP_SOURCES_MASK_KEY,
-        gp_sources_categories_mask_key=DEFAULT_GP_SOURCES_CATEGORIES_MASK_KEY,
-        latent_key=DEFAULT_LATENT_KEY,
-        **model_hparams,
+    model_hparams.update(
+        {
+            "counts_key": DEFAULT_COUNTS_KEY,
+            "adj_key": DEFAULT_ADJ_KEY,
+            "gp_names_key": DEFAULT_GP_NAMES_KEY,
+            "active_gp_names_key": DEFAULT_ACTIVE_GP_NAMES_KEY,
+            "gp_targets_mask_key": DEFAULT_GP_TARGETS_MASK_KEY,
+            "gp_targets_categories_mask_key": DEFAULT_GP_TARGETS_CATEGORIES_MASK_KEY,
+            "gp_sources_mask_key": DEFAULT_GP_SOURCES_MASK_KEY,
+            "gp_sources_categories_mask_key": DEFAULT_GP_SOURCES_CATEGORIES_MASK_KEY,
+            "latent_key": DEFAULT_LATENT_KEY,
+        }
     )
+    return CustomNicheCompass(adata, adata_atac, **model_hparams)
 
 
 def get_or_create_experiment_id(
@@ -239,7 +245,6 @@ def run_trial(
 ) -> float:
     adata, adata_atac = load_cached_inputs(cache_dir)
     hparam_overrides = _trial_params_to_overrides(params)
-    resolved_hparams = resolve_hparams(hparam_overrides)
     model = build_model(adata, adata_atac, params)
 
     target_rna, target_atac = load_cached_targets(cache_dir)
@@ -247,17 +252,21 @@ def run_trial(
     # Log only trial params to the child (current) run.
     mlflow.log_params(hparam_overrides)
 
-    train_kwargs = {key: value for key, value in asdict(train_cfg).items() if value is not None}
-    # Ensure HPARAMS defaults / tuned overrides take precedence over TrainConfig.
-    train_kwargs.update(filter_train_hparams(resolved_hparams))
-    train_kwargs["target_encoder_input_key"] = train_kwargs.get("encoder_input_key")
-
-    model.train(
-        **train_kwargs,
-        target_adata=target_rna,
-        target_adata_atac=target_atac,
-        mlflow_experiment_id=mlflow_experiment_id,
+    # Build train kwargs with precedence:
+    # 1) HPARAMS defaults
+    # 2) TrainConfig
+    # 3) Trial overrides
+    train_kwargs = filter_train_hparams(resolve_hparams())
+    train_kwargs.update(
+        {key: value for key, value in asdict(train_cfg).items() if value is not None}
     )
+    train_kwargs.update(filter_train_hparams(hparam_overrides))
+    train_kwargs["target_encoder_input_key"] = train_kwargs.get("encoder_input_key")
+    train_kwargs["target_adata"] = target_rna
+    train_kwargs["target_adata_atac"] = target_atac
+    train_kwargs["mlflow_experiment_id"] = mlflow_experiment_id
+
+    model.train(**train_kwargs)
 
     logs = model.trainer.epoch_logs.get(optimization_metric, [])
     if not logs:

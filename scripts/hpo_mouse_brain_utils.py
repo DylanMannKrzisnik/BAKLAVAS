@@ -12,7 +12,7 @@ from optuna.distributions import CategoricalDistribution
 from nichecompass_utils import CustomNicheCompass
 
 # HPO convenience override for train n_epochs.
-HPO_N_EPOCHS = 50
+HPO_N_EPOCHS = 100
 
 DEFAULT_TUNED_HPARAM_KEYS = [
     key for key in CustomNicheCompass.get_hparams_sample_during_hpo()

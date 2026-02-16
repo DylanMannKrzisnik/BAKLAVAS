@@ -53,9 +53,12 @@ class CustomNicheCompass(NicheCompass):
     """
 
     HPARAMS_SAMPLE_DURING_HPO = [
-        "multimodal_embedding_size",
+        "contrastive_logits_neg_ratio",
+        "contrastive_logits_pos_ratio",
         "encoder_input_key",
+        "multimodal_embedding_size",
         "multimodal_temperature",
+        "node_batch_size",
     ]
 
     HPARAMS = {
@@ -353,7 +356,7 @@ class CustomNicheCompass(NicheCompass):
             "suggest_distribution": CategoricalDistribution(
                 choices=[0.0001, 0.0005, 0.001]
             ),
-            "default": 0.001,
+            "default": 0.0001,
         },
         "weight_decay": {
             "suggest_distribution": CategoricalDistribution(
@@ -365,19 +368,19 @@ class CustomNicheCompass(NicheCompass):
             "suggest_distribution": CategoricalDistribution(
                 choices=[0.0, 500000.0]
             ),
-            "default": 0.0,
+            "default": 500000.0,
         },
         "lambda_gene_expr_recon": {
             "suggest_distribution": CategoricalDistribution(
                 choices=[0.0, 100.0, 300.0]
             ),
-            "default": 0.0,
+            "default": 300.0,
         },
         "lambda_chrom_access_recon": {
             "suggest_distribution": CategoricalDistribution(
                 choices=[0.0, 10.0, 100.0, 300.0]
             ),
-            "default": 0.0,
+            "default": 300.0,
         },
         "lambda_cat_covariates_contrastive": {
             "suggest_distribution": CategoricalDistribution(choices=[0.0, 0.1, 1.0]),
@@ -399,13 +402,13 @@ class CustomNicheCompass(NicheCompass):
         },
         "contrastive_logits_pos_ratio": {
             "suggest_distribution": CategoricalDistribution(
-                choices=[0.0, 0.05, 0.1]
+                choices=[0.0]
             ),
             "default": 0.0,
         },
         "contrastive_logits_neg_ratio": {
             "suggest_distribution": CategoricalDistribution(
-                choices=[0.0, 0.05, 0.1]
+                choices=[0.0]
             ),
             "default": 0.0,
         },
@@ -427,7 +430,7 @@ class CustomNicheCompass(NicheCompass):
         },
         "lambda_l1_addon": {
             "suggest_distribution": CategoricalDistribution(choices=[0.0, 10.0, 30.0]),
-            "default": 0.0,
+            "default": 30.0,
         },
         "edge_val_ratio": {
             "suggest_distribution": CategoricalDistribution(choices=[0.05, 0.1, 0.2]),
@@ -442,7 +445,7 @@ class CustomNicheCompass(NicheCompass):
             "default": 1000,
         },
         "node_batch_size": {
-            "suggest_distribution": CategoricalDistribution(choices=[500, 1000, 2000]),
+            "suggest_distribution": CategoricalDistribution(choices=[1000]),
             "default": 1000,
         },
         "paired_data": {
@@ -511,7 +514,7 @@ class CustomNicheCompass(NicheCompass):
         },
         "n_sampled_neighbors": {
             "suggest_distribution": CategoricalDistribution(choices=[-1, 4, 8, 16]),
-            "default": -1,
+            "default": 4,
         },
         "latent_dtype": {
             "suggest_distribution": CategoricalDistribution(

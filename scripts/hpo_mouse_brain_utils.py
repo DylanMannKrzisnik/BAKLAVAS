@@ -11,15 +11,13 @@ from optuna.distributions import CategoricalDistribution
 
 from nichecompass_utils import CustomNicheCompass
 
+# HPO convenience override for train n_epochs.
+HPO_N_EPOCHS = 50
+
 DEFAULT_TUNED_HPARAM_KEYS = [
-    key
-    for key, spec in CustomNicheCompass.get_hparams().items()
-    if isinstance(spec, dict) and spec.get("sample_during_hpo", False)
+    key for key in CustomNicheCompass.get_hparams_sample_during_hpo()
 ]
 TRAINER_EXTRA_HPARAM_KEYS = {"target_latent_key", "use_early_stopping", "verbose"}
-
-# HPO convenience override for train n_epochs.
-HPO_N_EPOCHS = 5
 
 DEFAULT_COUNTS_KEY = "counts"
 DEFAULT_ADJ_KEY = "spatial_connectivities"

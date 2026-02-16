@@ -52,6 +52,12 @@ class CustomNicheCompass(NicheCompass):
     Project-specific NicheCompass with custom behavior.
     """
 
+    HPARAMS_SAMPLE_DURING_HPO = [
+        "multimodal_embedding_size",
+        "encoder_input_key",
+        "multimodal_temperature",
+    ]
+
     HPARAMS = {
         # __init__ parameters
         "adata": {
@@ -73,7 +79,6 @@ class CustomNicheCompass(NicheCompass):
                 choices=["counts", "pseudocounts"]
             ),
             "default": "counts",
-            "sample_during_hpo": True,
         },
         "adj_key": {
             "suggest_distribution": CategoricalDistribution(
@@ -306,7 +311,6 @@ class CustomNicheCompass(NicheCompass):
         "multimodal_embedding_size": {
             "suggest_distribution": CategoricalDistribution(choices=[32, 128]),
             "default": 32,
-            "sample_during_hpo": True,
         },
         "multimodal_layer_series": {
             "suggest_distribution": CategoricalDistribution(choices=[False, True]),
@@ -388,7 +392,6 @@ class CustomNicheCompass(NicheCompass):
         "multimodal_temperature": {
             "suggest_distribution": CategoricalDistribution(choices=[1.0, 2.5, 10.0]),
             "default": 2.5,
-            "sample_during_hpo": True,
         },
         "multimodal_contrastive_anneal": {
             "suggest_distribution": CategoricalDistribution(choices=[False, True]),
@@ -399,14 +402,12 @@ class CustomNicheCompass(NicheCompass):
                 choices=[0.0, 0.05, 0.1]
             ),
             "default": 0.0,
-            "sample_during_hpo": True,
         },
         "contrastive_logits_neg_ratio": {
             "suggest_distribution": CategoricalDistribution(
                 choices=[0.0, 0.05, 0.1]
             ),
             "default": 0.0,
-            "sample_during_hpo": True,
         },
         "lambda_group_lasso": {
             "suggest_distribution": CategoricalDistribution(choices=[0.0, 1.0, 10.0]),
@@ -443,7 +444,6 @@ class CustomNicheCompass(NicheCompass):
         "node_batch_size": {
             "suggest_distribution": CategoricalDistribution(choices=[500, 1000, 2000]),
             "default": 1000,
-            "sample_during_hpo": True,
         },
         "paired_data": {
             "suggest_distribution": CategoricalDistribution(choices=[True, False]),
@@ -541,6 +541,16 @@ class CustomNicheCompass(NicheCompass):
         if key is not None:
             return copy.deepcopy(cls.HPARAMS[key])
         return copy.deepcopy(cls.HPARAMS)
+
+    @classmethod
+    def get_hparams_sample_during_hpo(cls):
+        keys = copy.deepcopy(cls.HPARAMS_SAMPLE_DURING_HPO)
+        unknown_keys = sorted(set(keys) - set(cls.HPARAMS))
+        if unknown_keys:
+            raise KeyError(
+                f"Unknown HPARAMS keys in HPARAMS_SAMPLE_DURING_HPO: {unknown_keys}"
+            )
+        return keys
 
     @classmethod
     def _get_hparam_defaults(cls):

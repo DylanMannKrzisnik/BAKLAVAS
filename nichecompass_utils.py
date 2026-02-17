@@ -14,6 +14,7 @@ import os
 import math
 import time
 import warnings
+from contextlib import nullcontext
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
@@ -1128,6 +1129,7 @@ class CustomNicheCompass(NicheCompass):
         # Stage-2 distillation models are created after stage-1 training.
         self.teacher_model = None
         self.student_model = None
+        self.stage2_mlflow_run_id_ = None
 
         self.is_trained_ = False
 
@@ -1430,6 +1432,7 @@ class CustomNicheCompass(NicheCompass):
             and target_adata_atac is not None
         )
         if run_stage2:
+            from ot import solve as ot_solve
             stage2_counts_key = (
                 self.counts_key_ if target_counts_key is None else target_counts_key
             )
@@ -1470,26 +1473,50 @@ class CustomNicheCompass(NicheCompass):
                 **trainer_kwargs,
             )
 
-            self.trainer_stage2.train(
-                n_epochs=n_epochs,
-                lr=self.trainer_stage1.lr_,
-                weight_decay=self.trainer_stage1.weight_decay_,
-                lambda_edge_recon=0.0,
-                lambda_gene_expr_recon=0.0,
-                lambda_chrom_access_recon=0.0,
-                lambda_cat_covariates_contrastive=0.0,
-                lambda_multimodal_contrastive_loss=0.0,
-                lambda_knowledge_distillation=lambda_knowledge_distillation,
-                multimodal_temperature=self.trainer_stage1.multimodal_temperature_,
-                multimodal_contrastive_anneal=self.trainer_stage1.multimodal_contrastive_anneal_,
-                contrastive_logits_pos_ratio=self.trainer_stage1.contrastive_logits_pos_ratio_,
-                contrastive_logits_neg_ratio=self.trainer_stage1.contrastive_logits_neg_ratio_,
-                lambda_group_lasso=0.0,
-                lambda_l1_masked=0.0,
-                lambda_l1_addon=0.0,
-                mlflow_experiment_id=mlflow_experiment_id,
-                mlflow_parent_run_id=mlflow_parent_run_id,
-            )
+            stage2_run_context = nullcontext()
+            if mlflow_experiment_id is not None:
+                active_run = mlflow.active_run()
+                parent_run_name = None
+                if active_run is not None:
+                    parent_run_name = active_run.data.tags.get("mlflow.runName")
+                stage2_run_name = (
+                    "stage2_distillation"
+                    if not parent_run_name
+                    else f"{parent_run_name}_stage2"
+                )
+                stage2_run_context = mlflow.start_run(
+                    run_name=stage2_run_name,
+                    nested=True,
+                )
+
+            with stage2_run_context as stage2_run:
+                self.stage2_mlflow_run_id_ = (
+                    stage2_run.info.run_id if stage2_run is not None else None
+                )
+                if stage2_run is not None:
+                    mlflow.set_tag("training_stage", "stage2_distillation")
+                    mlflow.set_tag("teacher_student_distillation", "true")
+
+                self.trainer_stage2.train(
+                    n_epochs=n_epochs,
+                    lr=self.trainer_stage1.lr_,
+                    weight_decay=self.trainer_stage1.weight_decay_,
+                    lambda_edge_recon=0.0,
+                    lambda_gene_expr_recon=0.0,
+                    lambda_chrom_access_recon=0.0,
+                    lambda_cat_covariates_contrastive=0.0,
+                    lambda_multimodal_contrastive_loss=0.0,
+                    lambda_knowledge_distillation=lambda_knowledge_distillation,
+                    multimodal_temperature=self.trainer_stage1.multimodal_temperature_,
+                    multimodal_contrastive_anneal=self.trainer_stage1.multimodal_contrastive_anneal_,
+                    contrastive_logits_pos_ratio=self.trainer_stage1.contrastive_logits_pos_ratio_,
+                    contrastive_logits_neg_ratio=self.trainer_stage1.contrastive_logits_neg_ratio_,
+                    lambda_group_lasso=0.0,
+                    lambda_l1_masked=0.0,
+                    lambda_l1_addon=0.0,
+                    mlflow_experiment_id=mlflow_experiment_id,
+                    mlflow_parent_run_id=mlflow_parent_run_id,
+                )
 
             # Use the distilled student as active model while keeping the
             # frozen teacher available for analysis/debugging.
@@ -1499,6 +1526,7 @@ class CustomNicheCompass(NicheCompass):
         else:
             self.trainer_stage2 = None
             self.student_model = None
+            self.stage2_mlflow_run_id_ = None
             if lambda_knowledge_distillation > 0:
                 warnings.warn(
                     "Skipping stage-2 knowledge distillation because target_adata "
@@ -4308,16 +4336,23 @@ class CustomVGPGAE(VGPGAE):
                 clip_embeddings_rna=node_model_output["teacher_clip_rna"],
                 clip_embeddings_atac=node_model_output["teacher_clip_atac"])
 
-            loss_dict["knowledge_distillation_loss"] = (
+            soft_KD_loss = (
                 lambda_knowledge_distillation *
                 self.compute_knowledge_distillation_loss(
                     student_similarity_matrix,
                     teacher_similarity_matrix))
 
-            loss_dict["global_loss"] += loss_dict[
-                "knowledge_distillation_loss"]
-            loss_dict["optim_loss"] += loss_dict[
-                "knowledge_distillation_loss"]
+            ot_clip_loss = (
+                lambda_knowledge_distillation *
+                self.compute_ot_clip_loss(
+                    student_similarity_matrix,
+                    teacher_similarity_matrix))
+
+            lambd = 0.1
+            eclare_loss = lambd * soft_KD_loss + (1 - lambd) * ot_clip_loss
+
+            loss_dict["global_loss"] += eclare_loss
+            loss_dict["optim_loss"] += eclare_loss
 
         return loss_dict
 
@@ -4374,6 +4409,24 @@ class CustomVGPGAE(VGPGAE):
             log_target=True)
 
         return 0.5 * (kd_cols.mean() + kd_rows.mean())
+
+    def compute_ot_clip_loss(
+            self,
+            student_similarity_matrix: torch.Tensor,
+            teacher_similarity_matrix: torch.Tensor) -> torch.Tensor:
+
+            teacher_cost = 1 - (teacher_similarity_matrix / torch.exp(1/self.multimodal_temperature))
+
+            plan = ot_solve(teacher_cost).plan
+            plan_T = ot_solve(teacher_cost.T).plan  # empirically, plan_T != plan.T
+
+            labels = torch.argmax(plan, dim=1)
+            labels_T = torch.argmax(plan_T, dim=1)  # plan_T != plan.T
+
+            ot_clip_loss = torch.nn.functional.cross_entropy(student_similarity_matrix, labels, reduction='none')
+            ot_clip_loss_T = torch.nn.functional.cross_entropy(student_similarity_matrix.T, labels_T, reduction='none')
+
+            return 0.5 * (ot_clip_loss.mean() + ot_clip_loss_T.mean())
 
 
 class CustomSpatialAnnTorchDataset(SpatialAnnTorchDataset):

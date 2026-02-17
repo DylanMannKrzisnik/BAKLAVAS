@@ -30,6 +30,7 @@ from torch_geometric.data import Data
 from torch_geometric.loader import LinkNeighborLoader, NeighborLoader
 from torch_geometric.utils import add_self_loops, remove_self_loops
 
+from ot import solve as ot_solve
 from optuna.distributions import CategoricalDistribution
 
 from nichecompass.data import (SpatialAnnTorchDataset,
@@ -1432,7 +1433,6 @@ class CustomNicheCompass(NicheCompass):
             and target_adata_atac is not None
         )
         if run_stage2:
-            from ot import solve as ot_solve
             stage2_counts_key = (
                 self.counts_key_ if target_counts_key is None else target_counts_key
             )
@@ -4415,7 +4415,8 @@ class CustomVGPGAE(VGPGAE):
             student_similarity_matrix: torch.Tensor,
             teacher_similarity_matrix: torch.Tensor) -> torch.Tensor:
 
-            teacher_cost = 1 - (teacher_similarity_matrix / torch.exp(1/self.multimodal_temperature))
+            multimodal_temperature = torch.tensor(1.)
+            teacher_cost = 1 - (teacher_similarity_matrix / torch.exp(1/multimodal_temperature))
 
             plan = ot_solve(teacher_cost).plan
             plan_T = ot_solve(teacher_cost.T).plan  # empirically, plan_T != plan.T

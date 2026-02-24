@@ -887,15 +887,6 @@ model_hparams = filter_model_hparams(hparam_defaults)
 model = CustomNicheCompass(
     adata,
     adata_atac,
-    counts_key=counts_key,
-    adj_key=adj_key,
-    gp_names_key=gp_names_key,
-    active_gp_names_key=active_gp_names_key,
-    gp_targets_mask_key=gp_targets_mask_key,
-    gp_targets_categories_mask_key=gp_targets_categories_mask_key,
-    gp_sources_mask_key=gp_sources_mask_key,
-    gp_sources_categories_mask_key=gp_sources_categories_mask_key,
-    latent_key=latent_key,
     **model_hparams,
 )
 

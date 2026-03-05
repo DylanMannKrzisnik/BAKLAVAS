@@ -612,6 +612,11 @@ def basic_feature_processing_for_alignment(
     sc.pp.pca(target_atac, n_comps=n_pcs)
     sc.pp.neighbors(target_atac, use_rep="X_pca", n_neighbors=target_knn)
 
+    sc.pp.highly_variable_genes(adata)
+    sc.pp.highly_variable_genes(adata_atac)
+    sc.pp.highly_variable_genes(target_rna)
+    sc.pp.highly_variable_genes(target_atac)
+
     return adata, adata_atac, target_rna, target_atac
 
 

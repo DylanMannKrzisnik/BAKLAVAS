@@ -5,15 +5,54 @@ from pybedtools import BedTool
 import numpy as np
 from scipy.stats import pearsonr
 import pandas as pd
-from pyliftover import LiftOver
 from pyranges import PyRanges, read_gtf
 import os
 import subprocess
-from scipy.sparse import csr_matrix, eye
+from scipy.sparse import eye
 
 from nichecompass_utils import CustomNicheCompass
 
 __all__ = ["DataAligner"]
+
+def _safe_intersect_obs(mdata: MuData, *, modalities: list[str] | None = None) -> MuData:
+    """Intersect obs across modalities without breaking aligned mappings.
+
+    `muon.pp.intersect_obs` can leave stale `.obsm`/`.layers` entries when it
+    reindexes `.obs` in-place. Here we subset with standard AnnData slicing,
+    which keeps aligned mappings consistent.
+    """
+    mods = list(mdata.mod.keys()) if modalities is None else [m for m in modalities if m in mdata.mod]
+    if len(mods) <= 1:
+        return mdata
+
+    base = mdata.mod[mods[0]].obs_names
+    common = base
+    for mod in mods[1:]:
+        common = common.intersection(mdata.mod[mod].obs_names)
+
+    # Preserve base modality order for stable downstream alignment.
+    common_ordered = base[base.isin(common)]
+    if common_ordered.size == base.size and all(
+        mdata.mod[mod].n_obs == common_ordered.size for mod in mods
+    ):
+        return mdata
+
+    new_modalities = {k: v[common_ordered].copy() for k, v in mdata.mod.items()}
+    out = MuData(new_modalities)
+
+    # Preserve MuData-level obs columns when possible.
+    try:
+        out.obs = mdata.obs.loc[common_ordered].copy()
+    except Exception:
+        pass
+
+    # Preserve MuData-level metadata containers best-effort.
+    try:
+        out.uns = dict(getattr(mdata, "uns", {}))
+    except Exception:
+        pass
+
+    return out
 
 class DataAligner:
     def __init__(
@@ -24,13 +63,16 @@ class DataAligner:
         target_assembly: str,
         source_name: str = "source",
         target_name: str = "target",
+        paired_target: bool = True,
     ):
 
         ## force source data to share same obs_names across modalitiies
         if not source_data['rna'].obs_names.equals(source_data['atac'].obs_names):
-            import muon as mu
-            print(f"Intersecting source data obs_names across modalities")
-            mu.pp.intersect_obs(source_data)
+            print(f"[INFO] Intersecting source data obs_names across modalities")
+            source_data = _safe_intersect_obs(source_data, modalities=["rna", "atac"])
+        if paired_target and (not target_data['rna'].obs_names.equals(target_data['atac'].obs_names)):
+            print(f"[INFO] Intersecting target data obs_names across modalities")
+            target_data = _safe_intersect_obs(target_data, modalities=["rna", "atac"])
 
         ## set metadata
         source_data.obs["dataset_name"] = source_name
@@ -53,6 +95,7 @@ class DataAligner:
             print(f"Source and target data are from the same assembly: {self.source_data.obs['assembly'].unique()[0]}")
         else:
             print(f"Source and target data are from different assemblies: {self.source_data.obs['assembly'].unique()[0]} and {self.target_data.obs['assembly'].unique()[0]}")
+            from pyliftover import LiftOver
             self.do_liftOver()
 
         ## check that all gene names are unique
@@ -535,3 +578,5 @@ class DataAligner:
         else:
             self.source_data["atac"] = source_atac
 
+
+# %%

@@ -62,13 +62,19 @@ FIGSHARE_FILES_API = (
 #   Mouse striatum (DHB, positive): v11l12-038-a1  v11l12-038-b1  v11l12-038-d1
 #                                   v11l12-109-a1  v11l12-109-b1  v11l12-109-c1
 #   Human striatum:                 v11t17-085_a1  v11t17-085_b1  v11t17-085_c1
-'''
-msi = read_h5ad("/home/mcb/users/dmannk/BAKLAVA_base/data/vicari_2023/sma_msi.h5ad", backed='r')
+
+sample_name = "V11L12-038_D1_9AA_metabolites"
+msi = read_h5ad(f"/home/mcb/users/dmannk/BAKLAVA_base/data/vicari_2023/msi_h5ad/{sample_name}.h5ad", backed='r')
 msi_sample_name = list(msi.uns['spatial'].keys())[0]
-SAMPLE_NAME = dict({msi_sample_name: "v11l12-109-b1"}).get(msi_sample_name)
+sample_name_to_figshare_stem = {
+    "V11L12-038_A1": "v11l12-038-a1",
+    "V11L12-038_B1": "v11l12-038-b1",
+    "V11L12-038_D1": "v11l12-038-d1",
+    "V11L12-109_B1": "v11l12-109-b1",
+    "V11L12-109_C1": "v11l12-109-c1",
+}
+SAMPLE_NAME = sample_name_to_figshare_stem.get(msi_sample_name)
 print(f"Detected sample name from MSI: {msi_sample_name}. Using Figshare stem: {SAMPLE_NAME}")
-'''
-SAMPLE_NAME = "v11l12-038-d1"
 
 DATASET_NAME = f"SMA_{SAMPLE_NAME}"
 

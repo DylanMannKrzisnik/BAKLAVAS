@@ -14,10 +14,12 @@ as the upload completes.
 """
 
 from pathlib import Path
+import ast
 import tempfile
 import time
 import json
 import requests
+import numpy as np
 import pandas as pd
 from metaspace import SMInstance
 from anndata import read_h5ad
@@ -106,8 +108,13 @@ DATABASES = [
 
 FDR = 0.20
 PPM = 3.0
+# Slightly wider than METASPACE's search PPM to account for rounding in the
+# peak m/z values stored in the h5ad (var['mz_raw']).
+PPM_MATCH_TOL = 5.0
 NUM_ISOTOPIC_PEAKS = 4
 POLL_SECONDS = 60
+
+MSI_PATH = Path(f"/home/mcb/users/dmannk/BAKLAVA_base/data/vicari_2023/msi_h5ad/{sample_name}.h5ad")
 
 OUT_DIR = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/metaspace_output")
 OUT_DIR.mkdir(exist_ok=True)
@@ -466,6 +473,81 @@ def submit_from_figshare(sm: SMInstance) -> str:
     return dataset_id
 
 
+def annotate_msi_peaks(msi_path: Path) -> None:
+    """
+    Match METASPACE annotations back onto MSI peaks by PPM-tolerance m/z
+    lookup and write the result to the h5ad var['annotated'] column.
+
+    All per-database CSVs previously exported for DATASET_NAME are combined
+    before matching so that annotations from every database contribute.
+    Duplicate (mz, adduct) pairs across databases are deduplicated.
+
+    The updated h5ad is written alongside the original with a
+    '.metaspace_annotated.h5ad' suffix.
+    """
+    import anndata as ad
+
+    # Collect and combine all annotation CSVs for this dataset.
+    csv_files = [
+        f for f in OUT_DIR.glob(f"{DATASET_NAME}.*.fdr{FDR}.csv")
+        if "summary" not in f.name
+    ]
+    if not csv_files:
+        print("No annotation CSVs found — skipping MSI annotation step.")
+        return
+
+    results = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+    results = results.drop_duplicates(subset=["mz", "adduct"])
+    print(f"Loaded {len(results)} unique annotations from {len(csv_files)} database(s).")
+
+    # Load MSI AnnData in full (not backed) so var can be modified.
+    msi = ad.read_h5ad(msi_path)
+    mz_peaks = msi.var["mz_raw"].astype(float).values   # (n_peaks,)
+    mz_anno  = results["mz"].astype(float).values        # (n_anno,)
+
+    # PPM distance matrix — shape (n_anno, n_peaks).
+    ppm_dist = np.abs(mz_anno[:, None] - mz_peaks[None, :]) / mz_peaks[None, :] * 1e6
+    anno_idx, peak_idx = np.where(ppm_dist < PPM_MATCH_TOL)
+
+    if len(anno_idx) == 0:
+        print("No peaks matched within PPM tolerance — var['annotated'] unchanged.")
+        return
+
+    # Parse moleculeNames from its stringified-list representation.
+    def _names(val):
+        try:
+            names = ast.literal_eval(val)
+            return ", ".join(names) if isinstance(names, list) else str(val)
+        except Exception:
+            return str(val)
+
+    matched = pd.DataFrame({
+        "peak_var_name": msi.var.index[peak_idx],
+        "ion":           results["ion"].iloc[anno_idx].values,
+        "moleculeNames": [_names(v) for v in results["moleculeNames"].iloc[anno_idx].values],
+        "fdr":           results["fdr"].iloc[anno_idx].values,
+    })
+
+    # One peak can match multiple annotations — join them with ' | '.
+    annotation_str = (
+        matched.groupby("peak_var_name", sort=False)
+        .apply(lambda g: " | ".join(
+            f"{row.ion} ({row.moleculeNames}) FDR={row.fdr:.2f}"
+            for _, row in g.iterrows()
+        ))
+        .rename("annotated")
+    )
+
+    msi.var["annotated"] = annotation_str   # NaN for unmatched peaks
+
+    n_annotated = msi.var["annotated"].notna().sum()
+    print(f"Annotated {n_annotated}/{len(msi.var)} peaks (PPM_TOL={PPM_MATCH_TOL}, FDR<={FDR}).")
+
+    out_path = msi_path.with_suffix(".metaspace_annotated.h5ad")
+    msi.write_h5ad(out_path)
+    print(f"Saved annotated MSI to {out_path}")
+
+
 def main():
     sm = SMInstance()
 
@@ -477,6 +559,7 @@ def main():
         ds = find_processed_dataset(sm, SAMPLE_NAME)
         if ds is not None:
             export_results(ds, ds.id)
+            annotate_msi_peaks(MSI_PATH)
             return
         print(
             f"No processed METASPACE dataset found for {SAMPLE_NAME!r}; "
@@ -488,6 +571,7 @@ def main():
     ds = sm.dataset(id=dataset_id)
     print("Annotation finished.")
     export_results(ds, dataset_id)
+    annotate_msi_peaks(MSI_PATH)
 
 
 if __name__ == "__main__":

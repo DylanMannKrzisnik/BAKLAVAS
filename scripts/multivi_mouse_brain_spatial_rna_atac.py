@@ -1401,6 +1401,7 @@ def main():
     num_epochs = args.stage1_epochs
 
     data_bundle = load_and_prepare_data_bundle(args)
+    '''
     train_graph_bundle = build_graph_bundle(data_bundle)
     eval_graph_bundle = build_graph_bundle_from_domains(
         source_domain=data_bundle.source.eval,
@@ -1409,6 +1410,41 @@ def main():
         graph_type=train_graph_bundle.graph_type,
         protein_value=train_graph_bundle.protein_value,
     )
+    '''
+
+    mdata = mu.MuData({
+        "rna": data_bundle.source.train.rna,
+        "atac": data_bundle.source.train.atac
+    })
+
+    scvi.model.MULTIVI.setup_mudata(
+        mdata,
+        modalities={
+            "rna_layer": "rna",
+            "atac_layer": "atac",
+        },
+    )
+
+    model = scvi.model.MULTIVI(
+        mdata,
+        n_genes=len(mdata.mod["rna"].var),
+        n_regions=len(mdata.mod["atac"].var),
+    )
+
+    model.view_anndata_setup()
+
+    # For our sparse matrices, we want CSR rather than CSC as training will be faster
+    # We convert here since our downloaded dataset uses CSC (might not be the case for other datasets)
+    mdata.mod["rna"].X = mdata.mod["rna"].layers['counts'].tocsr()
+    mdata.mod["atac"].X = mdata.mod["atac"].layers['counts'].tocsr()
+    mdata.update()
+
+    model.train(max_epochs=num_epochs)
+
+    model_dir = os.path.join(os.getenv("OUTPATH"), "multivi_mouse_brain_spatial_rna_atac")
+    model.save(model_dir, overwrite=True)
+
+    print(f"Model saved to {model_dir}")
 
 if __name__ == "__main__":
     main()

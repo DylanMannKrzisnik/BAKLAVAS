@@ -56,11 +56,18 @@ def bootstrap_runtime():
             "'/home/mcb/users/dmannk/BAKLAVA_base'."
         )
 
+    REPO_ROOT = os.path.join(baklava_base_dir, "MultiGATE")
+    if REPO_ROOT not in sys.path:
+        sys.path.insert(0, REPO_ROOT)
+
     baklava_repo_root = os.path.join(baklava_base_dir, "BAKLAVA")
     if os.path.isdir(baklava_repo_root) and baklava_repo_root not in sys.path:
         sys.path.insert(0, baklava_repo_root)
 
     BASE_PATH = os.path.join(datapath, "aligned_data")
+
+    import MultiGATE
+    import scvi
 
 
 import matplotlib.pyplot as plt
@@ -80,7 +87,6 @@ import pickle
 
 import warnings
 warnings.filterwarnings("ignore")
-
 
 @dataclass
 class DomainData:
@@ -1293,16 +1299,8 @@ def load_and_prepare_data_bundle(args):
         source=source_split_bundle,
         target=target_split_bundle,
         split_metadata={},
-        combined_gp_dict=combined_gp_dict,
+        combined_gp_dict=None,
     )
-
-    if args.switcharoo:
-        data_bundle = DataBundle(
-            source=data_bundle.target,
-            target=data_bundle.source,
-            split_metadata={},
-            combined_gp_dict=combined_gp_dict,
-        )
 
     data_bundle.source = configure_source_train_eval_bundle(
         data_bundle.source,

@@ -699,6 +699,7 @@ def main():
     mdata.mod["rna"].obsm[MULTIVI_RNA_LATENT_KEY] = model.get_latent_representation(modality="expression")
     mdata.mod["atac"].obsm[MULTIVI_ATAC_LATENT_KEY] = model.get_latent_representation(modality="accessibility")
 
+    # compute UMAP and Leiden clustering
     sc.pp.neighbors(mdata, use_rep=MULTIVI_LATENT_KEY)
     sc.tl.umap(mdata, min_dist=0.2)
     sc.tl.leiden(mdata, resolution=0.25)
@@ -706,16 +707,18 @@ def main():
     sc.pp.neighbors(mdata.mod['rna'], use_rep=MULTIVI_RNA_LATENT_KEY)
     sc.tl.umap(mdata.mod['rna'], min_dist=0.2)
     sc.tl.leiden(mdata.mod['rna'], resolution=0.2)
+
     sc.pp.neighbors(mdata.mod['atac'], use_rep=MULTIVI_ATAC_LATENT_KEY)
     sc.tl.umap(mdata.mod['atac'], min_dist=0.2)
     sc.tl.leiden(mdata.mod['atac'], resolution=0.2)
 
-    # initialize the column first
-    #mdata.obs["modality"] = ["rna"] * data_bundle.source.train.rna.n_obs + ["atac"] * data_bundle.source.train.atac.n_obs
+    # assign clusters to the mudata
     mdata.obs = mdata.obs.assign(
         RNA_clusters = mdata.mod['rna'].obs['RNA_clusters'],
         ATAC_clusters = mdata.mod['atac'].obs['ATAC_clusters'],
     )
+
+    # visualize the clusters
     sc.pl.umap(mdata, color=["RNA_clusters", "ATAC_clusters", "leiden"])
     sc.pl.umap(mdata.mod['rna'], color=["RNA_clusters", "leiden"])
     sc.pl.umap(mdata.mod['atac'], color=["ATAC_clusters", "leiden"])

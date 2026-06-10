@@ -502,7 +502,8 @@ def annotate_msi_peaks(msi_path: Path) -> None:
 
     # Load MSI AnnData in full (not backed) so var can be modified.
     msi = ad.read_h5ad(msi_path)
-    mz_peaks = msi.var["mz_raw"].astype(float).values   # (n_peaks,)
+    mz_col = "mz_raw" if "mz_raw" in msi.var.columns else "mz"
+    mz_peaks = msi.var[mz_col].astype(float).values   # (n_peaks,)
     mz_anno  = results["mz"].astype(float).values        # (n_anno,)
 
     # PPM distance matrix — shape (n_anno, n_peaks).

@@ -654,10 +654,21 @@ def main():
         "rna": data_bundle.source.train.rna,
         "atac": data_bundle.source.train.atac
     })
+    target_mdata = mu.MuData({
+        "rna": data_bundle.target.train.rna,
+        "atac": data_bundle.target.train.atac
+    })
 
     # setup mudata
     scvi.model.MULTIVI.setup_mudata(
         mdata,
+        modalities={
+            "rna_layer": "rna",
+            "atac_layer": "atac",
+        },
+    )
+    scvi.model.MULTIVI.setup_mudata(
+        target_mdata,
         modalities={
             "rna_layer": "rna",
             "atac_layer": "atac",
@@ -670,23 +681,39 @@ def main():
         n_genes=len(mdata.mod["rna"].var),
         n_regions=len(mdata.mod["atac"].var),
     )
+    target_model = scvi.model.MULTIVI(
+        target_mdata,
+        n_genes=len(target_mdata.mod["rna"].var),
+        n_regions=len(target_mdata.mod["atac"].var),
+    )
 
     model.view_anndata_setup()
+    target_model.view_anndata_setup()
 
     # set csr counts data
     mdata.mod["rna"].X = mdata.mod["rna"].layers['counts'].tocsr()
     mdata.mod["atac"].X = mdata.mod["atac"].layers['counts'].tocsr()
+    target_mdata.mod["rna"].X = target_mdata.mod["rna"].layers['counts'].tocsr()
+    target_mdata.mod["atac"].X = target_mdata.mod["atac"].layers['counts'].tocsr()
     mdata.update()
+    target_mdata.update()
 
     # train model
     num_epochs = args.stage1_epochs
     model.train(max_epochs=num_epochs)
+    target_model.train(max_epochs=num_epochs)
 
     # save model
     model_dir = os.path.join(os.getenv("OUTPATH"), "multivi_mouse_brain_spatial_rna_atac")
+    target_model_dir = os.path.join(os.getenv("OUTPATH"), "multivi_mouse_brain_spatial_rna_atac_target")
     model.save(model_dir, overwrite=True)
+    target_model.save(target_model_dir, overwrite=True)
     print(f"Model saved to {model_dir}")
+    print(f"Target model saved to {target_model_dir}")
 
+    #model = scvi.model.MULTIVI.load(model_dir, adata=mdata)
+    #target_model = scvi.model.MULTIVI.load(target_model_dir, adata=target_mdata)
+    
     # extracting and visualizing the latent space
     MULTIVI_LATENT_KEY = "X_multivi"
     MULTIVI_RNA_LATENT_KEY = "X_multivi_rna"
@@ -694,45 +721,69 @@ def main():
 
     # joint embedding (used for UMAP/clustering)
     mdata.obsm[MULTIVI_LATENT_KEY] = model.get_latent_representation(modality="joint")
+    target_mdata.obsm[MULTIVI_LATENT_KEY] = target_model.get_latent_representation(modality="joint")
+    target_mdata.obsm[MULTIVI_LATENT_KEY+'_zero_shot'] = model.get_latent_representation(adata=target_mdata, modality="joint")
 
     # modality-specific embeddings stored per-modality
     mdata.mod["rna"].obsm[MULTIVI_RNA_LATENT_KEY] = model.get_latent_representation(modality="expression")
     mdata.mod["atac"].obsm[MULTIVI_ATAC_LATENT_KEY] = model.get_latent_representation(modality="accessibility")
+    target_mdata.mod["rna"].obsm[MULTIVI_RNA_LATENT_KEY] = target_model.get_latent_representation(modality="expression")
+    target_mdata.mod["atac"].obsm[MULTIVI_ATAC_LATENT_KEY] = target_model.get_latent_representation(modality="accessibility")
+    target_mdata.mod["rna"].obsm[MULTIVI_RNA_LATENT_KEY+'_zero_shot'] = model.get_latent_representation(adata=target_mdata, modality="expression")
+    target_mdata.mod["atac"].obsm[MULTIVI_ATAC_LATENT_KEY+'_zero_shot'] = model.get_latent_representation(adata=target_mdata, modality="accessibility")
 
-    # compute UMAP and Leiden clustering
-    sc.pp.neighbors(mdata, use_rep=MULTIVI_LATENT_KEY)
-    sc.tl.umap(mdata, min_dist=0.2)
-    sc.tl.leiden(mdata, resolution=0.25)
+    def compute_umap_and_leiden(
+        mdata,
+        rna_ct_key="RNA_clusters",
+        atac_ct_key="ATAC_clusters",
+        mudata_fn=None,
+        zero_shot=False
+        ):
 
-    sc.pp.neighbors(mdata.mod['rna'], use_rep=MULTIVI_RNA_LATENT_KEY)
-    sc.tl.umap(mdata.mod['rna'], min_dist=0.2)
-    sc.tl.leiden(mdata.mod['rna'], resolution=0.2)
+        latent_key = MULTIVI_LATENT_KEY+'_zero_shot' if zero_shot else MULTIVI_LATENT_KEY
+        rna_latent_key = MULTIVI_RNA_LATENT_KEY+'_zero_shot' if zero_shot else MULTIVI_RNA_LATENT_KEY
+        atac_latent_key = MULTIVI_ATAC_LATENT_KEY+'_zero_shot' if zero_shot else MULTIVI_ATAC_LATENT_KEY
 
-    sc.pp.neighbors(mdata.mod['atac'], use_rep=MULTIVI_ATAC_LATENT_KEY)
-    sc.tl.umap(mdata.mod['atac'], min_dist=0.2)
-    sc.tl.leiden(mdata.mod['atac'], resolution=0.2)
+        # compute UMAP and Leiden clustering
+        sc.pp.neighbors(mdata, use_rep=latent_key)
+        sc.tl.umap(mdata, min_dist=0.2)
+        sc.tl.leiden(mdata, resolution=0.25)
 
-    # assign clusters to the mudata
-    mdata.obs = mdata.obs.assign(
-        RNA_clusters = mdata.mod['rna'].obs['RNA_clusters'],
-        ATAC_clusters = mdata.mod['atac'].obs['ATAC_clusters'],
-    )
+        sc.pp.neighbors(mdata.mod['rna'], use_rep=rna_latent_key)
+        sc.tl.umap(mdata.mod['rna'], min_dist=0.2)
+        sc.tl.leiden(mdata.mod['rna'], resolution=0.2)
 
-    # visualize the clusters
-    sc.pl.umap(mdata, color=["RNA_clusters", "ATAC_clusters", "leiden"])
-    sc.pl.umap(mdata.mod['rna'], color=["RNA_clusters", "leiden"])
-    sc.pl.umap(mdata.mod['atac'], color=["ATAC_clusters", "leiden"])
+        sc.pp.neighbors(mdata.mod['atac'], use_rep=atac_latent_key)
+        sc.tl.umap(mdata.mod['atac'], min_dist=0.2)
+        sc.tl.leiden(mdata.mod['atac'], resolution=0.2)
 
-    assert np.all(mdata.mod['rna'].obsm['spatial'] == mdata.mod['atac'].obsm['spatial']), "Spatial coordinates must have the same shape"
-    mdata.obsm['spatial'] = mdata.mod['rna'].obsm['spatial']
-    sc.pl.embedding(mdata, color=["RNA_clusters", "ATAC_clusters", "leiden"], basis="spatial", s=60)
-    sc.pl.embedding(mdata.mod['rna'], color=["RNA_clusters", "leiden"], basis="spatial", s=60)
-    sc.pl.embedding(mdata.mod['atac'], color=["ATAC_clusters", "leiden"], basis="spatial", s=60)
+        # assign clusters to the mudata
+        mdata.mod['rna'].obs[rna_ct_key] = 'c_' + mdata.mod['rna'].obs[rna_ct_key].astype(str)
+        mdata.mod['atac'].obs[atac_ct_key] = 'c_' + mdata.mod['atac'].obs[atac_ct_key].astype(str)
+        mdata.obs[rna_ct_key] = mdata.mod['rna'].obs[rna_ct_key]
+        mdata.obs[atac_ct_key] = mdata.mod['atac'].obs[atac_ct_key]
 
-    # save mudata to disk
-    mudata_path = os.path.join(BASE_PATH, 'multivi_mdata.h5mu')
-    mdata.write_h5mu(mudata_path)
-    print(f"Mudata saved to {mudata_path}")
+        # visualize the clusters
+        sc.pl.umap(mdata, color=[rna_ct_key, atac_ct_key, "leiden"])
+        sc.pl.umap(mdata.mod['rna'], color=[rna_ct_key, "leiden"])
+        sc.pl.umap(mdata.mod['atac'], color=[atac_ct_key, "leiden"])
+
+        if ('spatial' in mdata.mod['rna'].obsm) and ('spatial' in mdata.mod['atac'].obsm) or ('spatial' in mdata.obsm):
+            assert np.all(mdata.mod['rna'].obsm['spatial'] == mdata.mod['atac'].obsm['spatial']), "Spatial coordinates must have the same shape"
+            mdata.obsm['spatial'] = mdata.mod['rna'].obsm['spatial']
+            sc.pl.embedding(mdata, color=[rna_ct_key, atac_ct_key, "leiden"], basis="spatial", s=60)
+            sc.pl.embedding(mdata.mod['rna'], color=[rna_ct_key, "leiden"], basis="spatial", s=60)
+            sc.pl.embedding(mdata.mod['atac'], color=[atac_ct_key, "leiden"], basis="spatial", s=60)
+
+        if mudata_fn is not None:
+            # save mudata to disk
+            mudata_path = os.path.join(BASE_PATH, mudata_fn)
+            mdata.write_h5mu(mudata_path)
+            print(f"Mudata saved to {mudata_path}")
+
+    compute_umap_and_leiden(mdata, 'multivi_mdata.h5mu')
+    compute_umap_and_leiden(target_mdata, rna_ct_key="arc_gex_graphclust_Cluster", atac_ct_key="arc_atac_graphclust_Cluster", mudata_fn='multivi_mdata_target.h5mu')
+    compute_umap_and_leiden(target_mdata, rna_ct_key="arc_gex_graphclust_Cluster", atac_ct_key="arc_atac_graphclust_Cluster", mudata_fn='multivi_mdata_zero_shot.h5mu', zero_shot=True)
 
 if __name__ == "__main__":
     main()

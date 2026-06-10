@@ -1392,31 +1392,21 @@ def summarize_stage1_setup(num_epochs, data_bundle, cache_config, trainer_bundle
 
 #%%
 def main():
-    bootstrap_runtime()
 
+    # setup runtime
+    bootstrap_runtime()
     notebook_mode = is_notebook()
     args = parse_args(notebook=notebook_mode)
     validate_args(args)
 
-    num_epochs = args.stage1_epochs
-
+    # load and prepare data
     data_bundle = load_and_prepare_data_bundle(args)
-    '''
-    train_graph_bundle = build_graph_bundle(data_bundle)
-    eval_graph_bundle = build_graph_bundle_from_domains(
-        source_domain=data_bundle.source.eval,
-        target_domain=data_bundle.target.eval,
-        bp_width=train_graph_bundle.bp_width,
-        graph_type=train_graph_bundle.graph_type,
-        protein_value=train_graph_bundle.protein_value,
-    )
-    '''
-
     mdata = mu.MuData({
         "rna": data_bundle.source.train.rna,
         "atac": data_bundle.source.train.atac
     })
 
+    # setup mudata
     scvi.model.MULTIVI.setup_mudata(
         mdata,
         modalities={
@@ -1425,6 +1415,7 @@ def main():
         },
     )
 
+    # setup model
     model = scvi.model.MULTIVI(
         mdata,
         n_genes=len(mdata.mod["rna"].var),
@@ -1433,18 +1424,32 @@ def main():
 
     model.view_anndata_setup()
 
-    # For our sparse matrices, we want CSR rather than CSC as training will be faster
-    # We convert here since our downloaded dataset uses CSC (might not be the case for other datasets)
+    # set csr counts data
     mdata.mod["rna"].X = mdata.mod["rna"].layers['counts'].tocsr()
     mdata.mod["atac"].X = mdata.mod["atac"].layers['counts'].tocsr()
     mdata.update()
 
+    # train model
+    num_epochs = args.stage1_epochs
     model.train(max_epochs=num_epochs)
 
+    # save model
     model_dir = os.path.join(os.getenv("OUTPATH"), "multivi_mouse_brain_spatial_rna_atac")
     model.save(model_dir, overwrite=True)
-
     print(f"Model saved to {model_dir}")
+
+    # extracting and visualizing the latent space
+    MULTIVI_LATENT_KEY = "X_multivi"
+
+    mdata.obsm[MULTIVI_LATENT_KEY] = model.get_latent_representation()
+    sc.pp.neighbors(mdata, use_rep=MULTIVI_LATENT_KEY)
+    sc.tl.umap(mdata, min_dist=0.2)
+    sc.tl.leiden(mdata, resolution=0.5)
+
+    # initialize the column first
+    #mdata.obs["modality"] = ["rna"] * data_bundle.source.train.rna.n_obs + ["atac"] * data_bundle.source.train.atac.n_obs
+    sc.pl.umap(mdata, color="leiden")
+
 
 if __name__ == "__main__":
     main()

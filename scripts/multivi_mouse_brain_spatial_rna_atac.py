@@ -1444,11 +1444,19 @@ def main():
     mdata.obsm[MULTIVI_LATENT_KEY] = model.get_latent_representation()
     sc.pp.neighbors(mdata, use_rep=MULTIVI_LATENT_KEY)
     sc.tl.umap(mdata, min_dist=0.2)
-    sc.tl.leiden(mdata, resolution=0.5)
+    sc.tl.leiden(mdata, resolution=0.25)
 
     # initialize the column first
     #mdata.obs["modality"] = ["rna"] * data_bundle.source.train.rna.n_obs + ["atac"] * data_bundle.source.train.atac.n_obs
-    sc.pl.umap(mdata, color="leiden")
+    mdata.obs = mdata.obs.assign(
+        RNA_clusters = mdata.mod['rna'].obs['RNA_clusters'],
+        ATAC_clusters = mdata.mod['atac'].obs['ATAC_clusters'],
+    )
+    sc.pl.umap(mdata, color=["RNA_clusters", "ATAC_clusters", "leiden"])
+
+    assert np.all(mdata.mod['rna'].obsm['spatial'] == mdata.mod['atac'].obsm['spatial']), "Spatial coordinates must have the same shape"
+    mdata.obsm['spatial'] = mdata.mod['rna'].obsm['spatial']
+    sc.pl.embedding(mdata, color=["RNA_clusters", "ATAC_clusters", "leiden"], basis="spatial", s=60)
 
 
 if __name__ == "__main__":

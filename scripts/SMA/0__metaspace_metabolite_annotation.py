@@ -44,8 +44,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import os
 import re
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -414,6 +416,128 @@ def add_sample_metadata_to_modalities(mdata, sample_id: str, metadata: pd.DataFr
     return sorted(metadata_values)
 
 
+def _default_sma_root(sma_root: Path | None, metadata_csv: Path | None) -> Path | None:
+    """Locate the Mendeley SMA root containing `sma/` or `sma.zip`."""
+    if sma_root is not None:
+        return sma_root
+    if metadata_csv is not None:
+        return metadata_csv.parent
+    return None
+
+
+def _spaceranger_sidecar_relpath(sample_id: str, filename: str) -> str:
+    array_id = sample_id.rsplit("_", 1)[0]
+    return (
+        f"sma/{array_id}/{sample_id}/output_data/"
+        f"{sample_id}_RNA/outs/{filename}"
+    )
+
+
+def _read_spaceranger_sidecar(
+    sma_root: Path | None,
+    sample_id: str,
+    filename: str,
+) -> pd.DataFrame | None:
+    """Read a Space Ranger sidecar CSV from extracted files or sma.zip."""
+    if sma_root is None:
+        return None
+
+    relpath = _spaceranger_sidecar_relpath(sample_id, filename)
+    local = sma_root / relpath
+    if local.exists():
+        return pd.read_csv(local, index_col=0)
+
+    zip_path = sma_root / "sma.zip"
+    if not zip_path.exists():
+        return None
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            return pd.read_csv(io.BytesIO(zf.read(relpath)), index_col=0)
+    except KeyError:
+        return None
+
+
+def _obs_barcodes(adata) -> pd.Index:
+    """Return raw Visium barcodes for modality obs rows."""
+    if "barcode" in adata.obs.columns:
+        return pd.Index(adata.obs["barcode"].astype(str), name="barcode")
+    return pd.Index([str(obs_name).split(":", 1)[-1] for obs_name in adata.obs_names], name="barcode")
+
+
+def _normalize_visium_barcode(barcode: str) -> str:
+    """Strip Seurat duplicate suffixes while preserving the 10x GEM suffix."""
+    return re.sub(r"(-\d+)[_.]\d+$", r"\1", str(barcode))
+
+
+def _sidecar_values_for_obs(sidecar: pd.DataFrame, barcodes: pd.Index) -> pd.Series:
+    """Align a Space Ranger sidecar to modality obs barcodes."""
+    sidecar_values = sidecar.iloc[:, 0]
+    aligned = sidecar_values.reindex(barcodes)
+    missing = aligned.isna()
+    if not missing.any():
+        return aligned
+
+    normalized_sidecar = sidecar_values.copy()
+    normalized_sidecar.index = pd.Index(
+        [_normalize_visium_barcode(barcode) for barcode in sidecar_values.index],
+        name=sidecar_values.index.name,
+    )
+    normalized_sidecar = normalized_sidecar.loc[~normalized_sidecar.index.duplicated(keep="first")]
+    normalized_barcodes = pd.Index(
+        [_normalize_visium_barcode(barcode) for barcode in barcodes],
+        name=barcodes.name,
+    )
+    normalized_aligned = normalized_sidecar.reindex(normalized_barcodes)
+    normalized_aligned.index = aligned.index
+    return aligned.fillna(normalized_aligned)
+
+
+def _same_obs_values(existing: pd.Series, new: pd.Series) -> bool:
+    return existing.astype("string").fillna("<NA>").equals(new.astype("string").fillna("<NA>"))
+
+
+def _assign_obs_if_not_redundant(adata, column: str, values: pd.Series) -> str | None:
+    values = pd.Series(pd.Categorical(values), index=adata.obs.index, name=column)
+    if column not in adata.obs.columns:
+        adata.obs[column] = values
+        return column
+
+    if adata.obs[column].isna().all():
+        adata.obs[column] = values
+        return column
+
+    if _same_obs_values(adata.obs[column], values):
+        return None
+
+    source_column = f"{column}_spaceranger"
+    if source_column in adata.obs.columns and _same_obs_values(adata.obs[source_column], values):
+        return None
+
+    adata.obs[source_column] = values
+    return source_column
+
+
+def add_spaceranger_metadata_to_modalities(mdata, sample_id: str, sma_root: Path | None) -> list[str]:
+    """Append lesion/region Space Ranger sidecars to RNA/MSI obs when available."""
+    modalities = [modality for modality in ("rna", "msi") if modality in mdata.mod]
+    added: list[str] = []
+    for column, filename in [("lesion", "lesion.csv"), ("region", "region.csv")]:
+        sidecar = _read_spaceranger_sidecar(sma_root, sample_id, filename)
+        if sidecar is None or sidecar.empty:
+            continue
+
+        for modality in modalities:
+            adata = mdata.mod[modality]
+            values = _sidecar_values_for_obs(sidecar, _obs_barcodes(adata))
+            values.index = adata.obs.index
+            added_column = _assign_obs_if_not_redundant(adata, column, values)
+            if added_column is not None:
+                added.append(f"{modality}:{added_column}")
+
+    return added
+
+
 # --------------------------------------------------------------------------- #
 # 8. CLI: annotate the 'msi' modality of each aligned .h5mu in place
 # --------------------------------------------------------------------------- #
@@ -423,6 +547,7 @@ def main() -> None:
     p.add_argument("--h5mu-dir", type=Path, required=True, help="Directory of aligned <sample>.h5mu files")
     p.add_argument("--metaspace-dir", type=Path, required=True, help="Directory of cached METASPACE CSVs")
     p.add_argument("--metadata-csv", type=Path, default=None, help="SMA metadata.csv (Sample.ID, Matrix)")
+    p.add_argument("--sma-root", type=Path, default=None, help="SMA Mendeley root containing sma/ or sma.zip")
     p.add_argument("--fmp-reference-h5ad", type=Path, default=None, help="Annotated FMP h5ad to source the panel")
     p.add_argument("--samples", nargs="*", default=None, help="Sample IDs (default: all .h5mu in --h5mu-dir)")
     p.add_argument("--fdr", type=float, default=0.20)
@@ -433,6 +558,7 @@ def main() -> None:
     import mudata as mu  # imported here so the core stays dependency-light
 
     metadata = _load_metadata(args.metadata_csv)
+    sma_root = _default_sma_root(args.sma_root, args.metadata_csv)
     panel = load_fmp_panel(args.fmp_reference_h5ad)
 
     sample_ids = args.samples or [f.stem for f in sorted(args.h5mu_dir.glob("*.h5mu"))]
@@ -445,6 +571,7 @@ def main() -> None:
         h5mu_path = args.h5mu_dir / f"{sid}.h5mu"
         mdata = mu.read_h5mu(h5mu_path)
         metadata_cols = add_sample_metadata_to_modalities(mdata, sid, metadata)
+        sidecar_cols = add_spaceranger_metadata_to_modalities(mdata, sid, sma_root)
         if "msi" not in mdata.mod:
             print(f"[skip] {sid}: no 'msi' modality")
             continue
@@ -462,7 +589,8 @@ def main() -> None:
         n_panel = int((cols["annotation_source"] == "fmp_panel").sum())
         print(f"[ok] {sid} (matrix={matrix}): {n}/{msi.n_vars} features annotated "
               f"({n_panel} from FMP panel); "
-              f"{len(metadata_cols)} metadata obs columns added")
+              f"{len(metadata_cols)} metadata obs columns added; "
+              f"sidecars: {', '.join(sidecar_cols) if sidecar_cols else 'none'}")
         mdata.update()
         mdata.write(h5mu_path)
         summary.append({"sample_id": sid, "matrix": matrix, "n_annotated": n, "n_panel": n_panel})

@@ -18,6 +18,7 @@ import re
 import zipfile
 from pathlib import Path
 
+import anndata as ad
 import liana as li
 import mudata as mu
 import numpy as np
@@ -25,6 +26,8 @@ import pandas as pd
 import scanpy as sc
 from adjustText import adjust_text
 from matplotlib import pyplot as plt
+
+from load_aligned_mudata import load_sample
 
 # %%
 kwargs = {"frameon": False, "size": 1.5, "img_key": "lowres"}
@@ -44,6 +47,7 @@ DATAPATH = Path(os.environ["DATAPATH"])
 SMA_ROOT = DATAPATH / "vicari_2023" / "mendeley_sma"
 SMA_ZIP = SMA_ROOT / "sma.zip"
 MSI_H5AD = DATAPATH / "vicari_2023" / "msi_h5ad"
+H5MU_EXPORT = DATAPATH / "vicari_2023" / "h5mu_export"
 ORTHOLOGS = DATAPATH / "gene_annotations" / "human_mouse_gene_orthologs.csv"
 
 BANDWIDTH = 500
@@ -62,6 +66,175 @@ SAMPLES = {
         "msi_h5ad": MSI_H5AD / "V11L12-038_D1_9AA_metabolites.metaspace_annotated.h5ad",
     },
 }
+
+
+def raw_barcode(obs_name: str) -> str:
+    barcode = str(obs_name).split(":", 1)[-1]
+    return re.sub(r"(-\d+)[_.]\d+$", r"\1", barcode)
+
+
+def prep_fusion_modality(adata: ad.AnnData, source: str, sample_id: str) -> ad.AnnData:
+    out = adata.copy()
+    out.obs["source"] = source
+    out.obs["source_sample_id"] = sample_id
+    out.obs["raw_barcode"] = [raw_barcode(obs_name) for obs_name in out.obs_names]
+
+    # Keep FMP-10 and DHB rows distinct after concatenation.
+    out.obs_names = [f"{source}:{barcode}" for barcode in out.obs["raw_barcode"]]
+    return out
+
+
+def _combine_var_tables(inputs: dict[str, ad.AnnData], var_names: pd.Index) -> pd.DataFrame:
+    """Restore var annotations after AnnData concatenation.
+
+    anndata.concat drops var columns unless told how to merge them. Here we keep
+    all columns and add the source(s) each feature was observed in.
+    """
+    frames = []
+    for source, adata in inputs.items():
+        var = adata.var.copy()
+        var["feature_sources"] = source
+        frames.append(var)
+
+    var = pd.concat(frames, axis=0, sort=False)
+    if var.index.has_duplicates:
+        feature_sources = var.groupby(level=0)["feature_sources"].agg(
+            lambda values: ";".join(sorted(pd.unique(values.astype(str))))
+        )
+        var = var.drop(columns="feature_sources").groupby(level=0).first()
+        var["feature_sources"] = feature_sources
+
+    return var.reindex(var_names)
+
+
+def concat_modalities_keep_obs_var(inputs: dict[str, ad.AnnData]) -> ad.AnnData:
+    out = ad.concat(
+        inputs,
+        label="source_batch",
+        index_unique=None,
+        join="outer",
+        merge="same",
+        uns_merge="same",
+    )
+    out.var = _combine_var_tables(inputs, out.var_names)
+    return out
+
+
+def load_fmp10_partner_fused_mudata(
+    fmp10_sample_id: str = "V11L12-109_B1",
+    partner_sample_id: str = "V11L12-038_B1",
+    partner_source: str = "dhb",
+    export_dir: Path = H5MU_EXPORT,
+    write: bool = False,
+) -> mu.MuData:
+    fmp10 = load_sample(fmp10_sample_id, export_dir=export_dir)
+    partner = load_sample(partner_sample_id, export_dir=export_dir)
+
+    rna_inputs = {
+        "fmp10": prep_fusion_modality(fmp10.mod["rna"], "fmp10", fmp10_sample_id),
+        partner_source: prep_fusion_modality(
+            partner.mod["rna"], partner_source, partner_sample_id
+        ),
+    }
+    msi_inputs = {
+        "fmp10": prep_fusion_modality(fmp10.mod["msi"], "fmp10", fmp10_sample_id),
+        partner_source: prep_fusion_modality(
+            partner.mod["msi"], partner_source, partner_sample_id
+        ),
+    }
+
+    mdata = mu.MuData(
+        {
+            "rna": concat_modalities_keep_obs_var(rna_inputs),
+            "msi": concat_modalities_keep_obs_var(msi_inputs),
+        }
+    )
+    mdata.update()
+
+    if write:
+        out_path = export_dir / (
+            f"{fmp10_sample_id}__{partner_sample_id}.fmp10_{partner_source}_concat.h5mu"
+        )
+        mdata.write(out_path)
+
+    return mdata
+
+
+def load_fmp10_dhb_fused_mudata(
+    fmp10_sample_id: str = "V11L12-109_B1",
+    dhb_sample_id: str = "V11L12-038_B1",
+    export_dir: Path = H5MU_EXPORT,
+    write: bool = False,
+) -> mu.MuData:
+    return load_fmp10_partner_fused_mudata(
+        fmp10_sample_id=fmp10_sample_id,
+        partner_sample_id=dhb_sample_id,
+        partner_source="dhb",
+        export_dir=export_dir,
+        write=write,
+    )
+
+
+def load_fmp10_nineaa_fused_mudata(
+    fmp10_sample_id: str = "V11L12-109_B1",
+    nineaa_sample_id: str = "V11L12-038_D1",
+    export_dir: Path = H5MU_EXPORT,
+    write: bool = False,
+) -> mu.MuData:
+    return load_fmp10_partner_fused_mudata(
+        fmp10_sample_id=fmp10_sample_id,
+        partner_sample_id=nineaa_sample_id,
+        partner_source="nineaa",
+        export_dir=export_dir,
+        write=write,
+    )
+
+
+def _dense_X(adata: ad.AnnData) -> np.ndarray:
+    return adata.X.toarray() if hasattr(adata.X, "toarray") else np.asarray(adata.X)
+
+
+def dopamine_correlations_in_intact_striatum(mdata: mu.MuData) -> pd.Series:
+    from scipy.stats import spearmanr
+
+    msi = mdata["msi"]
+    annotations = msi.var["annotation"].astype(str)
+    annotated_metabolites = msi.var[~annotations.eq("")].index
+    intact_striatum = msi.obs["lesion"].eq("intact") & msi.obs["region"].eq("striatum")
+    dopamine_idx = msi.var[annotations.eq("Dopamine")].index
+
+    x = _dense_X(msi[intact_striatum, dopamine_idx])
+    y = _dense_X(msi[intact_striatum, annotated_metabolites])
+
+    spear = spearmanr(x, y).statistic
+    spear_dopamine = spear[0][1:]
+    spear_dopamine_series = pd.Series(
+        spear_dopamine,
+        index=msi.var.loc[annotated_metabolites, "annotation"].values,
+    )
+    return spear_dopamine_series.sort_values(ascending=False)
+
+
+# %%
+fused_mdata = load_fmp10_dhb_fused_mudata()
+fused_mdata
+
+# %%
+fused_nineaa_mdata = load_fmp10_nineaa_fused_mudata()
+fused_nineaa_mdata
+
+# %%
+spear_dopamine_series = dopamine_correlations_in_intact_striatum(fused_mdata)
+spear_dopamine_series.plot(rot=90)
+
+#spear_nineaa_dopamine_series = dopamine_correlations_in_intact_striatum(fused_nineaa_mdata)
+#spear_nineaa_dopamine_series.plot(rot=90)
+
+# top 12 metabolites have same rank (+ve correlation), i.e.: 
+    # dhb_rank = spear_dopamine_series.rank(ascending=False).rename("dhb_rank")
+    # nineaa_rank = spear_nineaa_dopamine_series.rank(ascending=False).rename("nineaa_rank")
+    # ranks_df = pd.merge(dhb_rank, nineaa_rank, how='outer', left_index=True, right_index=True)
+    # print(ranks_df.sort_values('dhb_rank').dropna())
 
 
 def visium_outs(section: str) -> Path:

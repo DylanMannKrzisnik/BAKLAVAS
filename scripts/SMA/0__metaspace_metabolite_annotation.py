@@ -14,7 +14,7 @@ This script works from the locally exported ``.h5mu`` files produced from
 
 No Figshare imzML/IBD download or METASPACE upload is performed here.
 """
-
+#%%
 from __future__ import annotations
 
 import argparse
@@ -29,9 +29,9 @@ from dotenv import load_dotenv
 from metaspace import SMInstance
 
 
+load_dotenv(dotenv_path="/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA/.env")
 SCRIPT_DIR = Path(os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
 BAKLAVA_ROOT = SCRIPT_DIR.parents[1]
-load_dotenv(dotenv_path=BAKLAVA_ROOT / ".env")
 
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -395,6 +395,7 @@ def main() -> None:
         print(f"\n=== {sample_id} ({sample_stem}) ===")
 
         results = load_annotation_results(prefix, out_dir, args.fdr)
+        
         if results is None and not args.cached_only:
             ds = find_processed_dataset(sm, sample_stem)
             if ds is not None:
@@ -426,3 +427,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# %%

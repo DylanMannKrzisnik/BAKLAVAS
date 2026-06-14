@@ -6,6 +6,7 @@
 *mlflow*
 *sqlite
 *.db
+*.Rhistory
 
 launch.json
 TODO.md

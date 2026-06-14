@@ -124,39 +124,32 @@ def load_annotation_results(prefix: str, out_dir: Path, fdr: float) -> pd.DataFr
     )
     return results
 
+# FMP-10 (neurotransmitter) plates: dopamine etc. live in the derivatization-aware
+# ".Visium.FMP." dataset, NOT the underivatized "from_smamsi" generic re-run.
+FMP10_PLATES = {"v11l12-109", "v11t16-085", "v11t17-102"}
 
-def find_processed_dataset(sm: SMInstance, sample_stem: str):
-    """
-    Return a processed METASPACE dataset matching *sample_stem*, or None.
+def _is_fmp10(sample_stem: str) -> bool:
+    return sample_stem.lower().rsplit("-", 1)[0] in FMP10_PLATES
 
-    Figshare/SMA stems like "v11l12-109-a1" appear on METASPACE with both
-    dash and underscore separators. Search by the plate prefix, then filter
-    candidates by the section identifier.
-    """
+def find_processed_dataset(sm, sample_stem):
     parts = sample_stem.lower().rsplit("-", 1)
-    plate_prefix, section = (
-        (parts[0], parts[1]) if len(parts) == 2 else (sample_stem.lower(), "")
-    )
+    plate_prefix, section = (parts[0], parts[1]) if len(parts) == 2 else (sample_stem.lower(), "")
 
-    candidates = sm.datasets(nameMask=plate_prefix)
-    finished = [d for d in candidates if getattr(d, "status", None) == "FINISHED"]
+    finished = [d for d in sm.datasets(nameMask=plate_prefix)
+                if getattr(d, "status", None) == "FINISHED"]
     if section:
-        finished = [
-            d
-            for d in finished
-            if f"-{section}" in d.name.lower() or f"_{section}" in d.name.lower()
-        ]
-
+        finished = [d for d in finished
+                    if f"-{section}" in d.name.lower() or f"_{section}" in d.name.lower()]
     if not finished:
         return None
 
-    preferred = [d for d in finished if "from_smamsi" in d.name.lower()]
+    if _is_fmp10(sample_stem):
+        preferred = [d for d in finished if "fmp" in d.name.lower()]      # derivatization-aware
+    else:
+        preferred = [d for d in finished if "from_smamsi" in d.name.lower()]
     chosen = (preferred or finished)[0]
-
-    print(f"Found {len(finished)} processed METASPACE match(es) for {sample_stem!r}:")
-    for dataset in finished:
-        marker = " <-- using" if dataset is chosen else ""
-        print(f"    {dataset.id} | {dataset.name}{marker}")
+    for d in finished:
+        print(f"    {d.id} | {d.name}{' <-- using' if d is chosen else ''}")
     return chosen
 
 

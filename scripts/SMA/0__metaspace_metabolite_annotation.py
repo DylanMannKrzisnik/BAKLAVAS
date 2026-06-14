@@ -1,431 +1,433 @@
 """
-Annotate the SMA MSI modality in aligned RNA+MSI MuData files via METASPACE.
+Unified, matrix-aware annotation for SMA MALDI-MSI features.
 
-This script works from the locally exported ``.h5mu`` files produced from
-``se.multi.list``. For each sample it:
+Why this exists
+---------------
+Across the SMA sections, the *right* primary annotation source depends on the
+MALDI matrix (verified against metadata.csv and the METASPACE datasets):
 
-1. loads ``mdata.mod["msi"]`` with ``load_aligned_mudata.load_sample``;
-2. reuses cached METASPACE result CSVs when available, or exports annotations
-   from an already processed public METASPACE dataset with the matching sample
-   name;
-3. matches METASPACE annotation m/z values back to MSI features by PPM
-   tolerance; and
-4. overwrites the original ``.h5mu`` with the annotated MSI ``var`` table.
+  * FMP-10 sections (V11L12-109, V11T16-085, V11T17-102) -- "neurotransmitters".
+    The analytes are FMP-10 *derivatized*, so native-mass METASPACE databases
+    cannot find them (e.g. dopamine sits at m/z 421.19 / 674.28, not ~154).
+    The authoritative annotations are the authors' MS/MS-validated FMP-10
+    panel (Vicari et al., Extended Data Fig. 9). METASPACE is only a
+    complement here, for incidental *underivatized* species.
 
-No Figshare imzML/IBD download or METASPACE upload is performed here.
+  * DHB sections (V11L12-038 A1/B1) -- "lipids", positive mode. No curated
+    panel exists; METASPACE lipid databases (LipidMaps/SwissLipids) are primary.
+
+  * 9-AA sections (V11L12-038 D1) -- "metabolites", negative mode. METASPACE
+    metabolite databases (HMDB/CoreMetabolome/ChEBI/KEGG) are primary, with the
+    lipid databases as a secondary complement (anionic lipids ionize in neg mode).
+
+This module assigns, per MSI feature, a single primary annotation following that
+matrix-keyed hierarchy, while keeping full provenance so the tiers never
+silently overwrite each other:
+
+  var["annotation"]             # primary label
+  var["annotation_source"]      # "fmp_panel" or "metaspace:<db>"
+  var["annotation_confidence"]  # "validated" | "high" | "medium" | "low" | "unranked"
+  var["annotation_fdr"]         # METASPACE FDR (NaN for panel / unranked DBs)
+  var["annotation_ppm"]         # mass match error of the chosen annotation
+  var["annotation_all"]         # every candidate (all sources) for transparency
+
+Confidence tiers: MS/MS-validated panel > METASPACE FDR<=0.05 (high) >
+<=0.10 (medium) > <=0.20 (low). A low-FDR METASPACE hit never displaces a
+panel call on the same peak.
+
+The core (`annotate_var_table`) is pure pandas/numpy and operates on a `var`
+DataFrame + a METASPACE results DataFrame, so it can be unit-tested and reused
+for either a standalone MSI .h5ad or the "msi" modality of an aligned .h5mu.
 """
-#%%
+
 from __future__ import annotations
 
 import argparse
 import ast
 import os
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from dotenv import load_dotenv
-from metaspace import SMInstance
 
 
-load_dotenv(dotenv_path="/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA/.env")
-SCRIPT_DIR = Path(os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
-BAKLAVA_ROOT = SCRIPT_DIR.parents[1]
+# --------------------------------------------------------------------------- #
+# 1. Matrix routing
+# --------------------------------------------------------------------------- #
 
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
-
-from load_aligned_mudata import load_sample, list_samples  # noqa: E402
-
-
-BAKLAVA_ROOT = Path(os.environ.get("BAKLAVA_ROOT", BAKLAVA_ROOT)).expanduser()
-BAKLAVA_BASE = BAKLAVA_ROOT.parent
-DATAPATH = Path(os.environ.get("DATAPATH", BAKLAVA_BASE / "data")).expanduser()
-
-H5MU_EXPORT_DIR = DATAPATH / "vicari_2023" / "h5mu_export"
-OUT_DIR = BAKLAVA_BASE / "outputs" / "metaspace_output"
-
-FDR = 0.20
-# Slightly wider than the METASPACE search PPM to account for rounded m/z
-# values stored in the exported h5mu MSI var table.
-PPM_MATCH_TOL = 5.0
+# Fallback when metadata.csv is unavailable. Plate prefixes that used FMP-10.
+FMP10_PLATES = {"v11l12-109", "v11t16-085", "v11t17-102"}
+DHB_STEMS = {"v11l12-038-a1", "v11l12-038-b1"}
+NINEAA_STEMS = {"v11l12-038-d1"}
 
 
-# METASPACE availability notes from the SMA samples.
-#
-# Stem             METASPACE dataset name                         Databases
-# ---------------  ---------------------------------------------  --------------------------------
-# v11l12-038-b1  * V11L12-038-B1.from_smamsi                     HMDB/v4, CoreMetabolome, ChEBI, KEGG
-# v11l12-038-d1  * V11L12-038-D1.from_smamsi                     HMDB/v4, CoreMetabolome, ChEBI, KEGG
-#                * v11l12-038-d1.from_smamsi.lipid_anno           HMDB/v4, LipidMaps, SwissLipids
-# v11l12-109-a1  * V11L12-109_A1.Visium.FMP.220826_smamsi        HMDB/v4
-# v11l12-109-b1  * V11L12-109-B1.from_smamsi                     HMDB/v4, CoreMetabolome, ChEBI, KEGG
-#                * V11L12-109_B1.Visium.FMP.220826_smamsi         HMDB/v4
-# v11l12-109-c1  * V11L12-109_C1.Visium.FMP.220826_smamsi        HMDB/v4
-
-
-def fdr_label(fdr: float) -> str:
-    """Return the filename representation used by METASPACE result exports."""
-    return f"{fdr:g}"
-
-
-def sample_id_to_metaspace_stem(sample_id: str) -> str:
-    """Convert an h5mu sample id such as V11L12-038_D1 to v11l12-038-d1."""
+def sample_stem(sample_id: str) -> str:
+    """V11L12-109_B1 -> v11l12-109-b1."""
     return sample_id.lower().replace("_", "-")
 
 
-def dataset_prefix(sample_id: str) -> str:
-    """Return the local CSV prefix used for one SMA sample."""
-    return f"SMA_{sample_id_to_metaspace_stem(sample_id)}"
+def matrix_for_sample(sample_id: str, metadata: pd.DataFrame | None = None) -> str:
+    """Return the MALDI matrix ('FMP-10' | 'DHB' | '9-AA') for a sample.
+
+    Prefers the authoritative `metadata.csv` (columns Sample.ID, Matrix);
+    falls back to the plate/section mapping above.
+    """
+    if metadata is not None and {"Sample.ID", "Matrix"}.issubset(metadata.columns):
+        row = metadata.loc[metadata["Sample.ID"] == sample_id]
+        if len(row):
+            return str(row["Matrix"].iloc[0]).strip()
+
+    stem = sample_stem(sample_id)
+    plate = stem.rsplit("-", 1)[0]
+    if plate in FMP10_PLATES:
+        return "FMP-10"
+    if stem in NINEAA_STEMS:
+        return "9-AA"
+    if stem in DHB_STEMS:
+        return "DHB"
+    return "unknown"
 
 
-def annotation_csvs(prefix: str, out_dir: Path, fdr: float) -> list[Path]:
-    """Return non-summary, non-aggregated METASPACE CSVs for one sample."""
-    label = fdr_label(fdr)
-    return sorted(
-        path
-        for path in out_dir.glob(f"{prefix}.*.fdr{label}.csv")
-        if "summary" not in path.name.lower()
-        and ".aggregated." not in path.name.lower()
-    )
+# --------------------------------------------------------------------------- #
+# 2. FMP-10 MS/MS-validated neurotransmitter panel
+# --------------------------------------------------------------------------- #
+
+# Derivatized m/z are sample-independent (analyte + n x FMP-10 tag), so one
+# panel applies to ALL FMP-10 sections. These nine come from the authors'
+# V11L12-109_B1 annotated object; supply a fuller reference h5ad via
+# load_fmp_panel(reference_h5ad=...) if you have one.
+FMP10_PANEL = pd.DataFrame(
+    {
+        "name": [
+            "GABA", "Taurine", "Dopamine (single)", "Histidine", "3-MT",
+            "Serotonin", "Dopamine", "Norepinephrine", "Tocopherol",
+        ],
+        "mz": [
+            371.17565, 393.12703, 421.19136, 423.18201, 435.20692,
+            444.20715, 674.28050, 690.27454, 698.49196,
+        ],
+    }
+)
 
 
-def load_annotation_results(prefix: str, out_dir: Path, fdr: float) -> pd.DataFrame | None:
-    """Load cached METASPACE result CSVs for one sample, if present."""
-    paths = annotation_csvs(prefix, out_dir, fdr)
-    if not paths:
-        return None
+def load_fmp_panel(reference_h5ad: str | Path | None = None) -> pd.DataFrame:
+    """Build the FMP-10 panel from a reference annotated MSI .h5ad, or fall back
+    to the built-in table. Expects var to carry `mz_raw`/`mz` and `annotated`.
+    """
+    if reference_h5ad and Path(reference_h5ad).exists():
+        import anndata as ad
 
-    frames = []
-    for path in paths:
-        df = pd.read_csv(path)
-        db_label = path.name[len(prefix) + 1 :].rsplit(".fdr", 1)[0]
-        if "database" not in df.columns:
-            df["database"] = db_label
-        df["source_csv"] = str(path)
-        frames.append(df)
-
-    results = pd.concat(frames, ignore_index=True)
-    if "mz" not in results.columns:
-        raise ValueError(f"METASPACE CSVs for {prefix} do not contain an 'mz' column")
-
-    dedup_cols = [
-        col
-        for col in ("database", "mz", "adduct", "ion", "formula", "moleculeNames")
-        if col in results.columns
-    ]
-    if dedup_cols:
-        results = results.drop_duplicates(subset=dedup_cols)
-
-    print(
-        f"Loaded {len(results):,} unique annotations for {prefix} "
-        f"from {len(paths)} cached CSV(s)."
-    )
-    return results
-
-# FMP-10 (neurotransmitter) plates: dopamine etc. live in the derivatization-aware
-# ".Visium.FMP." dataset, NOT the underivatized "from_smamsi" generic re-run.
-FMP10_PLATES = {"v11l12-109", "v11t16-085", "v11t17-102"}
-
-def _is_fmp10(sample_stem: str) -> bool:
-    return sample_stem.lower().rsplit("-", 1)[0] in FMP10_PLATES
-
-def find_processed_dataset(sm, sample_stem):
-    parts = sample_stem.lower().rsplit("-", 1)
-    plate_prefix, section = (parts[0], parts[1]) if len(parts) == 2 else (sample_stem.lower(), "")
-
-    finished = [d for d in sm.datasets(nameMask=plate_prefix)
-                if getattr(d, "status", None) == "FINISHED"]
-    if section:
-        finished = [d for d in finished
-                    if f"-{section}" in d.name.lower() or f"_{section}" in d.name.lower()]
-    if not finished:
-        return None
-
-    if _is_fmp10(sample_stem):
-        preferred = [d for d in finished if "fmp" in d.name.lower()]      # derivatization-aware
-    else:
-        preferred = [d for d in finished if "from_smamsi" in d.name.lower()]
-    chosen = (preferred or finished)[0]
-    for d in finished:
-        print(f"    {d.id} | {d.name}{' <-- using' if d is chosen else ''}")
-    return chosen
+        var = ad.read_h5ad(reference_h5ad, backed="r").var
+        mz_col = "mz_raw" if "mz_raw" in var.columns else "mz"
+        names = var["annotated"] if "annotated" in var.columns else var.index
+        panel = pd.DataFrame(
+            {"name": list(map(str, names)), "mz": pd.to_numeric(var[mz_col], errors="coerce")}
+        ).dropna(subset=["mz"])
+        panel = panel[panel["name"].astype(str).str.strip() != ""].reset_index(drop=True)
+        if len(panel):
+            return panel
+    return FMP10_PANEL.copy()
 
 
-def export_results(ds, prefix: str, out_dir: Path, fdr: float) -> None:
-    """Export METASPACE annotations for all databases on one processed dataset."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    dataset_id = ds.id
-    print(f"Exporting annotations from {ds.name} ({dataset_id})...")
+# --------------------------------------------------------------------------- #
+# 3. METASPACE database priority per matrix
+# --------------------------------------------------------------------------- #
 
-    available = [(d.name, d.version) for d in getattr(ds, "database_details", [])]
-    if not available:
-        raise ValueError(f"{ds.name} has no database_details; cannot export results")
+DB_PRIORITY = {
+    "DHB": ["lipidmaps", "swisslipids", "hmdb", "coremetabolome", "chebi", "kegg"],
+    "9-AA": ["hmdb", "coremetabolome", "chebi", "kegg", "lipidmaps", "swisslipids"],
+    # FMP-10: METASPACE is only the complement (native species). The panel
+    # handles the derivatized neurotransmitters.
+    "FMP-10": ["hmdb", "coremetabolome", "chebi", "kegg"],
+}
 
-    exported = []
-    for db in available:
-        try:
-            results = ds.results(database=db, fdr=fdr).reset_index()
-        except Exception as exc:
-            print(f"  skip {db}: {type(exc).__name__}: {exc}")
-            continue
-
-        db_label = "_".join(map(str, db)).replace(" ", "_").replace("/", "_")
-        out_csv = out_dir / f"{prefix}.{db_label}.fdr{fdr_label(fdr)}.csv"
-        results.to_csv(out_csv, index=False)
-
-        print(f"  {db}: {len(results):,} annotations at FDR <= {fdr} -> {out_csv}")
-        exported.append(
-            {
-                "dataset_id": dataset_id,
-                "dataset_name": ds.name,
-                "database": str(db),
-                "fdr": fdr,
-                "n_annotations": len(results),
-                "csv": str(out_csv),
-            }
-        )
-
-    if exported:
-        summary_csv = out_dir / f"{prefix}.summary.csv"
-        pd.DataFrame(exported).to_csv(summary_csv, index=False)
-        print(f"Wrote summary: {summary_csv}")
+# danielReceptorDB stores *native* neurotransmitter masses, which do NOT match
+# the FMP-derivatized peaks -- exclude it from the FMP complement so it can't
+# produce spurious native-mass hits.
+EXCLUDE_DB = {"FMP-10": ["danielreceptordb"]}
 
 
-def parse_molecule_names(value) -> str:
-    """Parse METASPACE moleculeNames values into a display string."""
+def _db_rank(db_label: str, matrix: str) -> int:
+    s = str(db_label).lower()
+    order = DB_PRIORITY.get(matrix, DB_PRIORITY["9-AA"])
+    for k, key in enumerate(order):
+        if key in s:
+            return k
+    return len(order) + 1  # unknown DBs ranked last
+
+
+# --------------------------------------------------------------------------- #
+# 4. Matching helpers
+# --------------------------------------------------------------------------- #
+
+def _var_mz(var: pd.DataFrame) -> np.ndarray:
+    col = "mz_raw" if "mz_raw" in var.columns else "mz"
+    if col not in var.columns:
+        raise KeyError("MSI var must contain 'mz_raw' or 'mz'.")
+    return pd.to_numeric(var[col], errors="coerce").to_numpy()
+
+
+def _parse_names(value) -> str:
     if isinstance(value, list):
         return ", ".join(map(str, value))
     if pd.isna(value):
         return ""
     try:
         parsed = ast.literal_eval(str(value))
+        return ", ".join(map(str, parsed)) if isinstance(parsed, list) else str(parsed)
     except (ValueError, SyntaxError):
         return str(value)
-    if isinstance(parsed, list):
-        return ", ".join(map(str, parsed))
-    return str(parsed)
 
 
-def build_peak_annotations(
-    msi_var: pd.DataFrame,
-    results: pd.DataFrame,
-    ppm_match_tol: float,
-) -> pd.Series:
-    """Return an annotation string per MSI feature index."""
-    mz_col = "mz_raw" if "mz_raw" in msi_var.columns else "mz"
-    if mz_col not in msi_var.columns:
-        raise KeyError("MSI var must contain either 'mz_raw' or 'mz'")
-
-    mz_peaks = pd.to_numeric(msi_var[mz_col], errors="coerce").to_numpy()
-    mz_anno = pd.to_numeric(results["mz"], errors="coerce").to_numpy()
-
-    valid_peaks = np.isfinite(mz_peaks)
-    valid_anno = np.isfinite(mz_anno)
-    if not valid_peaks.any() or not valid_anno.any():
-        return pd.Series("", index=msi_var.index, dtype="object", name="annotated")
-
-    peak_indices = np.flatnonzero(valid_peaks)
-    anno_indices = np.flatnonzero(valid_anno)
-    mz_peaks_valid = mz_peaks[valid_peaks]
-    mz_anno_valid = mz_anno[valid_anno]
-
-    ppm_dist = (
-        np.abs(mz_anno_valid[:, None] - mz_peaks_valid[None, :])
-        / mz_peaks_valid[None, :]
-        * 1e6
-    )
-    anno_match_idx, peak_match_idx = np.where(ppm_dist <= ppm_match_tol)
-
-    annotations = pd.Series("", index=msi_var.index, dtype="object", name="annotated")
-    if len(anno_match_idx) == 0:
-        return annotations
-
-    matched_results = results.iloc[anno_indices[anno_match_idx]]
-    matched = pd.DataFrame(
-        {
-            "peak_var_name": msi_var.index[peak_indices[peak_match_idx]],
-            "ion": matched_results.get(
-                "ion", pd.Series("", index=matched_results.index)
-            )
-            .astype(str)
-            .values,
-            "moleculeNames": [
-                parse_molecule_names(value)
-                for value in matched_results.get(
-                    "moleculeNames", pd.Series("", index=matched_results.index)
-                ).values
-            ],
-            "database": matched_results.get(
-                "database", pd.Series("", index=matched_results.index)
-            ).astype(str).values,
-            "fdr": pd.to_numeric(
-                matched_results.get(
-                    "fdr", pd.Series(np.nan, index=matched_results.index)
-                ),
-                errors="coerce",
-            ).values,
-        }
-    )
-
-    def format_group(group: pd.DataFrame) -> str:
-        parts = []
-        for row in group.drop_duplicates().itertuples(index=False):
-            fdr = "" if pd.isna(row.fdr) else f" FDR={row.fdr:.2f}"
-            database = "" if not row.database else f" [{row.database}]"
-            name = f" ({row.moleculeNames})" if row.moleculeNames else ""
-            parts.append(f"{row.ion}{name}{fdr}{database}".strip())
-        return " | ".join(parts)
-
-    grouped = matched.groupby("peak_var_name", sort=False)[
-        ["ion", "moleculeNames", "database", "fdr"]
-    ].apply(format_group)
-    annotations.update(grouped)
-    return annotations
+def _fmt_fdr(fdr) -> str:
+    return "NA" if pd.isna(fdr) else f"{fdr:.2f}"
 
 
-def annotate_h5mu(
-    sample_id: str,
-    export_dir: Path,
-    results: pd.DataFrame,
-    ppm_match_tol: float,
-) -> dict[str, int | str]:
-    """Annotate mdata.mod['msi'].var and overwrite the sample h5mu file."""
-    h5mu_path = export_dir / f"{sample_id}.h5mu"
-    mdata = load_sample(sample_id, export_dir=export_dir)
-    if "msi" not in mdata.mod:
-        raise KeyError(f"{h5mu_path} has no 'msi' modality")
-
-    msi = mdata.mod["msi"]
-    annotations = build_peak_annotations(msi.var, results, ppm_match_tol)
-    msi.var["annotated"] = annotations.reindex(msi.var.index).fillna("")
-
-    n_annotated = int(msi.var["annotated"].astype(bool).sum())
-    print(
-        f"Annotated {n_annotated}/{msi.n_vars} MSI features in {sample_id} "
-        f"(PPM_MATCH_TOL={ppm_match_tol})."
-    )
-
-    # Keep MuData-level axis metadata consistent with the updated modality var.
-    mdata.update()
-    mdata.write(h5mu_path)
-    print(f"Overwrote {h5mu_path}")
-
-    return {
-        "sample_id": sample_id,
-        "h5mu": str(h5mu_path),
-        "n_msi_features": int(msi.n_vars),
-        "n_annotated": n_annotated,
-    }
+def _confidence_from_fdr(fdr) -> str:
+    if pd.isna(fdr):
+        return "unranked"
+    if fdr <= 0.05:
+        return "high"
+    if fdr <= 0.10:
+        return "medium"
+    return "low"
 
 
-def is_notebook() -> bool:
-    try:
-        from IPython import get_ipython
-        shell = get_ipython().__class__.__name__
-        if shell == "ZMQInteractiveShell":
-            return True
-        elif shell == "TerminalInteractiveShell":
-            return False
-        else:
-            return False
-    except Exception:
-        return False
+def match_panel(var: pd.DataFrame, panel: pd.DataFrame, ppm_tol: float) -> tuple[pd.Series, pd.Series]:
+    """Assign each panel entry to its nearest var peak within ppm_tol.
 
+    Panel-driven (not peak-driven) so each targeted analyte maps to its single
+    best peak; on conflict the closer (smaller |ppm|) panel entry wins.
+    """
+    mz = _var_mz(var)
+    name = pd.Series("", index=var.index, dtype=object)
+    ppm = pd.Series(np.nan, index=var.index, dtype=float)
 
-def parse_args(notebook: bool = False) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--export-dir",
-        type=Path,
-        default=H5MU_EXPORT_DIR,
-        help="Directory containing aligned SMA .h5mu files.",
-    )
-    parser.add_argument(
-        "--out-dir",
-        type=Path,
-        default=OUT_DIR,
-        help="Directory for cached/exported METASPACE CSVs.",
-    )
-    parser.add_argument(
-        "--samples",
-        nargs="*",
-        default=None,
-        help="Optional h5mu sample IDs to annotate. Defaults to all .h5mu files.",
-    )
-    parser.add_argument("--fdr", type=float, default=FDR)
-    parser.add_argument("--ppm-match-tol", type=float, default=PPM_MATCH_TOL)
-    parser.add_argument(
-        "--cached-only",
-        action="store_true",
-        help="Only use existing METASPACE CSVs; do not query METASPACE.",
-    )
-    parser.add_argument(
-        "--login",
-        action="store_true",
-        help="Call SMInstance.save_login() before querying METASPACE.",
-    )
-    if notebook:
-        return parser.parse_args([])
-    return parser.parse_args()
-
-#%%
-def main() -> None:
-    NOTEBOOK = is_notebook()
-    args = parse_args(notebook=NOTEBOOK)
-
-    export_dir = args.export_dir.expanduser()
-    out_dir = args.out_dir.expanduser()
-
-    sample_ids = args.samples or list_samples(export_dir)
-    if not sample_ids:
-        raise FileNotFoundError(f"No .h5mu files found in {export_dir}")
-
-    sm = None
-    if not args.cached_only:
-        sm = SMInstance()
-        if args.login:
-            sm.save_login()
-
-    summaries = []
-    for sample_id in sample_ids:
-        prefix = dataset_prefix(sample_id)
-        sample_stem = sample_id_to_metaspace_stem(sample_id)
-        print(f"\n=== {sample_id} ({sample_stem}) ===")
-
-        results = load_annotation_results(prefix, out_dir, args.fdr)
-        
-        if results is None and not args.cached_only:
-            ds = find_processed_dataset(sm, sample_stem)
-            if ds is not None:
-                export_results(ds, prefix, out_dir, args.fdr)
-                results = load_annotation_results(prefix, out_dir, args.fdr)
-            else:
-                print(f"No processed METASPACE dataset found for {sample_stem!r}.")
-
-        if results is None:
-            print(f"No annotations available for {sample_id}; h5mu left unchanged.")
-            summaries.append(
-                {
-                    "sample_id": sample_id,
-                    "h5mu": str(export_dir / f"{sample_id}.h5mu"),
-                    "n_msi_features": 0,
-                    "n_annotated": 0,
-                    "status": "skipped",
-                }
-            )
+    for nm, pm in zip(panel["name"].astype(str), panel["mz"].astype(float)):
+        d = np.abs(mz - pm)
+        if not np.isfinite(d).any():
             continue
+        j = int(np.nanargmin(d))
+        e = (mz[j] - pm) / pm * 1e6
+        if abs(e) <= ppm_tol and (name.iat[j] == "" or abs(e) < abs(ppm.iat[j])):
+            name.iat[j] = nm
+            ppm.iat[j] = e
+    return name, ppm
 
-        summary = annotate_h5mu(sample_id, export_dir, results, args.ppm_match_tol)
-        summary["status"] = "annotated"
-        summaries.append(summary)
 
-    print("\nAnnotation summary:")
-    print(pd.DataFrame(summaries))
+def metaspace_best_per_peak(
+    var: pd.DataFrame, results: pd.DataFrame, matrix: str, ppm_tol: float
+) -> dict[int, dict]:
+    """For each var peak, pick the best METASPACE annotation.
+
+    Best = lowest FDR, then matrix DB priority, then smallest |ppm|.
+    Returns {peak_index: {name, db, fdr, ppm, ion}}.
+    """
+    if results is None or len(results) == 0 or "mz" not in results.columns:
+        return {}
+
+    res = results.copy()
+    for excl in EXCLUDE_DB.get(matrix, []):
+        res = res[~res["database"].astype(str).str.lower().str.contains(excl, na=False)]
+    if res.empty:
+        return {}
+
+    mz = _var_mz(var)
+    amz = pd.to_numeric(res["mz"], errors="coerce").to_numpy()
+    afdr = pd.to_numeric(res.get("fdr", pd.Series(np.nan, index=res.index)), errors="coerce").to_numpy()
+    adb = res["database"].astype(str).to_numpy()
+    anames = res.get("moleculeNames", pd.Series("", index=res.index)).to_numpy()
+    aion = res.get("ion", pd.Series("", index=res.index)).astype(str).to_numpy()
+
+    best: dict[int, dict] = {}
+    for r in range(len(res)):
+        m = amz[r]
+        if not np.isfinite(m):
+            continue
+        d = np.abs(mz - m)
+        if not np.isfinite(d).any():
+            continue
+        j = int(np.nanargmin(d))
+        e = (mz[j] - m) / m * 1e6
+        if abs(e) > ppm_tol:
+            continue
+        fdr = afdr[r]
+        key = (1.0 if np.isnan(fdr) else float(fdr), _db_rank(adb[r], matrix), abs(e))
+        cur = best.get(j)
+        if cur is None or key < cur["key"]:
+            best[j] = {
+                "key": key,
+                "name": _parse_names(anames[r]),
+                "db": adb[r],
+                "fdr": fdr,
+                "ppm": e,
+                "ion": aion[r],
+            }
+    return best
+
+
+# --------------------------------------------------------------------------- #
+# 5. Core: build the hierarchical annotation columns
+# --------------------------------------------------------------------------- #
+
+def annotate_var_table(
+    var: pd.DataFrame,
+    matrix: str,
+    metaspace_results: pd.DataFrame | None = None,
+    panel: pd.DataFrame | None = None,
+    panel_ppm_tol: float = 20.0,
+    metaspace_ppm_tol: float = 10.0,
+) -> pd.DataFrame:
+    """Return a DataFrame (indexed like var) of annotation columns.
+
+    Hierarchy:
+      - FMP-10 sections: MS/MS panel is primary (confidence 'validated').
+        METASPACE (native DBs, danielReceptorDB excluded) fills only peaks the
+        panel did not claim.
+      - DHB / 9-AA sections: METASPACE is primary (DB priority is matrix-aware).
+      - Every candidate from every source is recorded in 'annotation_all'.
+    """
+    idx = var.index
+    ann = pd.Series("", index=idx, dtype=object)
+    src = pd.Series("", index=idx, dtype=object)
+    conf = pd.Series("", index=idx, dtype=object)
+    fdr = pd.Series(np.nan, index=idx, dtype=float)
+    ppm = pd.Series(np.nan, index=idx, dtype=float)
+    allc = pd.Series("", index=idx, dtype=object)
+
+    def _append_all(i, text):
+        allc.iat[i] = f"{allc.iat[i]} | {text}" if allc.iat[i] else text
+
+    # ---- Tier 1: MS/MS-validated FMP panel (FMP-10 sections only) ----
+    if matrix == "FMP-10" and panel is not None and len(panel):
+        pname, pppm = match_panel(var, panel, panel_ppm_tol)
+        for i in range(len(idx)):
+            if pname.iat[i]:
+                ann.iat[i] = pname.iat[i]
+                src.iat[i] = "fmp_panel"
+                conf.iat[i] = "validated"
+                ppm.iat[i] = pppm.iat[i]
+                _append_all(i, f"{pname.iat[i]} [fmp_panel/MS2]")
+
+    # ---- Tier 2: METASPACE (primary for DHB/9-AA, complement for FMP) ----
+    if metaspace_results is not None and len(metaspace_results):
+        best = metaspace_best_per_peak(var, metaspace_results, matrix, metaspace_ppm_tol)
+        pos = {name: i for i, name in enumerate(idx)}
+        for j, info in best.items():
+            _append_all(j, f"{info['ion']} ({info['name']}) [{info['db']} FDR={_fmt_fdr(info['fdr'])}]".strip())
+            if ann.iat[j] == "":  # don't displace a panel call
+                ann.iat[j] = info["name"]
+                src.iat[j] = f"metaspace:{info['db']}"
+                conf.iat[j] = _confidence_from_fdr(info["fdr"])
+                fdr.iat[j] = info["fdr"]
+                ppm.iat[j] = info["ppm"]
+
+    return pd.DataFrame(
+        {
+            "annotation": ann,
+            "annotation_source": src,
+            "annotation_confidence": conf,
+            "annotation_fdr": fdr,
+            "annotation_ppm": ppm,
+            "annotation_all": allc,
+        },
+        index=idx,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 6. METASPACE results loading (reuses your cached CSV convention)
+# --------------------------------------------------------------------------- #
+
+def load_metaspace_results(out_dir: Path, sample_id: str, fdr: float) -> pd.DataFrame | None:
+    """Load cached METASPACE CSVs written by your annotation script.
+
+    Filename convention: SMA_<stem>[.<dataset_id>].<db>.fdr<fdr>.csv
+    """
+    stem = sample_stem(sample_id)
+    label = f"{fdr:g}"
+    paths = sorted(
+        p
+        for p in out_dir.glob(f"SMA_{stem}*.fdr{label}.csv")
+        if "summary" not in p.name.lower() and ".aggregated." not in p.name.lower()
+    )
+    if not paths:
+        return None
+
+    frames = []
+    for p in paths:
+        df = pd.read_csv(p)
+        if "database" not in df.columns:
+            # derive db label from filename: SMA_<stem>[.<id>].<db>.fdr<fdr>.csv
+            mid = p.name.split(".fdr")[0]
+            df["database"] = mid.split(".")[-1]
+        frames.append(df)
+    out = pd.concat(frames, ignore_index=True)
+    if "mz" not in out.columns:
+        raise ValueError(f"METASPACE CSVs for {stem} lack an 'mz' column.")
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 7. CLI: annotate the 'msi' modality of each aligned .h5mu in place
+# --------------------------------------------------------------------------- #
+
+def _load_metadata(path: Path | None) -> pd.DataFrame | None:
+    if path and Path(path).exists():
+        return pd.read_csv(path)
+    return None
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--h5mu-dir", type=Path, required=True, help="Directory of aligned <sample>.h5mu files")
+    p.add_argument("--metaspace-dir", type=Path, required=True, help="Directory of cached METASPACE CSVs")
+    p.add_argument("--metadata-csv", type=Path, default=None, help="SMA metadata.csv (Sample.ID, Matrix)")
+    p.add_argument("--fmp-reference-h5ad", type=Path, default=None, help="Annotated FMP h5ad to source the panel")
+    p.add_argument("--samples", nargs="*", default=None, help="Sample IDs (default: all .h5mu in --h5mu-dir)")
+    p.add_argument("--fdr", type=float, default=0.20)
+    p.add_argument("--panel-ppm", type=float, default=20.0)
+    p.add_argument("--metaspace-ppm", type=float, default=10.0)
+    args = p.parse_args()
+
+    import mudata as mu  # imported here so the core stays dependency-light
+
+    metadata = _load_metadata(args.metadata_csv)
+    panel = load_fmp_panel(args.fmp_reference_h5ad)
+
+    sample_ids = args.samples or [f.stem for f in sorted(args.h5mu_dir.glob("*.h5mu"))]
+    if not sample_ids:
+        raise FileNotFoundError(f"No .h5mu files in {args.h5mu_dir}")
+
+    summary = []
+    for sid in sample_ids:
+        matrix = matrix_for_sample(sid, metadata)
+        h5mu_path = args.h5mu_dir / f"{sid}.h5mu"
+        mdata = mu.read_h5mu(h5mu_path)
+        if "msi" not in mdata.mod:
+            print(f"[skip] {sid}: no 'msi' modality")
+            continue
+        msi = mdata.mod["msi"]
+
+        results = load_metaspace_results(args.metaspace_dir, sid, args.fdr)
+        cols = annotate_var_table(
+            msi.var, matrix, results, panel,
+            panel_ppm_tol=args.panel_ppm, metaspace_ppm_tol=args.metaspace_ppm,
+        )
+        for c in cols.columns:
+            msi.var[c] = cols[c].reindex(msi.var.index)
+
+        n = int((cols["annotation"] != "").sum())
+        n_panel = int((cols["annotation_source"] == "fmp_panel").sum())
+        print(f"[ok] {sid} (matrix={matrix}): {n}/{msi.n_vars} features annotated "
+              f"({n_panel} from FMP panel)")
+        mdata.update()
+        mdata.write(h5mu_path)
+        summary.append({"sample_id": sid, "matrix": matrix, "n_annotated": n, "n_panel": n_panel})
+
+    print("\nSummary:")
+    print(pd.DataFrame(summary).to_string(index=False))
 
 
 if __name__ == "__main__":
     main()
-
-# %%

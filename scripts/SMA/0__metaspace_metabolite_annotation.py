@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import ast
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -72,10 +73,9 @@ def matrix_for_sample(sample_id: str, metadata: pd.DataFrame | None = None) -> s
     Prefers the authoritative `metadata.csv` (columns Sample.ID, Matrix);
     falls back to the plate/section mapping above.
     """
-    if metadata is not None and {"Sample.ID", "Matrix"}.issubset(metadata.columns):
-        row = metadata.loc[metadata["Sample.ID"] == sample_id]
-        if len(row):
-            return str(row["Matrix"].iloc[0]).strip()
+    row = metadata_for_sample(sample_id, metadata)
+    if row is not None and "Matrix" in row.index:
+        return str(row["Matrix"]).strip()
 
     stem = sample_stem(sample_id)
     plate = stem.rsplit("-", 1)[0]
@@ -369,7 +369,7 @@ def load_metaspace_results(out_dir: Path, sample_id: str, fdr: float) -> pd.Data
 
 
 # --------------------------------------------------------------------------- #
-# 7. CLI: annotate the 'msi' modality of each aligned .h5mu in place
+# 7. metadata.csv helpers
 # --------------------------------------------------------------------------- #
 
 def _load_metadata(path: Path | None) -> pd.DataFrame | None:
@@ -377,6 +377,46 @@ def _load_metadata(path: Path | None) -> pd.DataFrame | None:
         return pd.read_csv(path)
     return None
 
+
+def metadata_for_sample(sample_id: str, metadata: pd.DataFrame | None) -> pd.Series | None:
+    """Return the single metadata.csv row for a sample, if available."""
+    if metadata is None or "Sample.ID" not in metadata.columns:
+        return None
+
+    sample_ids = metadata["Sample.ID"].astype(str)
+    rows = metadata.loc[sample_ids == sample_id]
+    if rows.empty:
+        return None
+    return rows.iloc[0]
+
+
+def _metadata_obs_column(column: str) -> str:
+    """Convert metadata.csv headers into stable obs column names."""
+    name = re.sub(r"[^0-9A-Za-z]+", "_", str(column)).strip("_").lower()
+    return f"metadata_{name or 'field'}"
+
+
+def add_sample_metadata_to_modalities(mdata, sample_id: str, metadata: pd.DataFrame | None) -> list[str]:
+    """Append sample-level metadata.csv values to every modality's obs."""
+    row = metadata_for_sample(sample_id, metadata)
+    if row is None:
+        return []
+
+    metadata_values = {
+        _metadata_obs_column(col): value
+        for col, value in row.items()
+    }
+
+    for adata in mdata.mod.values():
+        for col, value in metadata_values.items():
+            adata.obs[col] = value
+
+    return sorted(metadata_values)
+
+
+# --------------------------------------------------------------------------- #
+# 8. CLI: annotate the 'msi' modality of each aligned .h5mu in place
+# --------------------------------------------------------------------------- #
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -404,6 +444,7 @@ def main() -> None:
         matrix = matrix_for_sample(sid, metadata)
         h5mu_path = args.h5mu_dir / f"{sid}.h5mu"
         mdata = mu.read_h5mu(h5mu_path)
+        metadata_cols = add_sample_metadata_to_modalities(mdata, sid, metadata)
         if "msi" not in mdata.mod:
             print(f"[skip] {sid}: no 'msi' modality")
             continue
@@ -420,7 +461,8 @@ def main() -> None:
         n = int((cols["annotation"] != "").sum())
         n_panel = int((cols["annotation_source"] == "fmp_panel").sum())
         print(f"[ok] {sid} (matrix={matrix}): {n}/{msi.n_vars} features annotated "
-              f"({n_panel} from FMP panel)")
+              f"({n_panel} from FMP panel); "
+              f"{len(metadata_cols)} metadata obs columns added")
         mdata.update()
         mdata.write(h5mu_path)
         summary.append({"sample_id": sid, "matrix": matrix, "n_annotated": n, "n_panel": n_panel})

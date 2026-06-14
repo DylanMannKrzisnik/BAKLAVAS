@@ -1,578 +1,434 @@
 """
-Annotate SMA MALDI-MSI metabolites via METASPACE.
+Annotate the SMA MSI modality in aligned RNA+MSI MuData files via METASPACE.
 
-Primary path (no download, no upload): many of the SMA samples have already
-been processed by the dataset authors and are public on METASPACE (named e.g.
-"V11L12-038-D1.from_smamsi").  We look the sample up by name and pull its
-annotation table directly — the 35-70 GB IBD is never touched.
+This script works from the locally exported ``.h5mu`` files produced from
+``se.multi.list``. For each sample it:
 
-Fallback path (only if the sample isn't already on METASPACE): stream the
-imzML/IBD from Figshare into a TemporaryDirectory and submit a fresh job.  The
-metaspace uploader requires a real seekable file (open()+seek()) sized via
-stat(), so the IBD must briefly land on disk; the temp dir is deleted as soon
-as the upload completes.
+1. loads ``mdata.mod["msi"]`` with ``load_aligned_mudata.load_sample``;
+2. reuses cached METASPACE result CSVs when available, or exports annotations
+   from an already processed public METASPACE dataset with the matching sample
+   name;
+3. matches METASPACE annotation m/z values back to MSI features by PPM
+   tolerance; and
+4. overwrites the original ``.h5mu`` with the annotated MSI ``var`` table.
+
+No Figshare imzML/IBD download or METASPACE upload is performed here.
 """
 
-from pathlib import Path
+from __future__ import annotations
+
+import argparse
 import ast
-import tempfile
-import time
-import json
-import requests
+import os
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 from metaspace import SMInstance
-from anndata import read_h5ad
 
 
-# ----------------------------
-# USER SETTINGS
-# ----------------------------
+SCRIPT_DIR = Path(os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
+BAKLAVA_ROOT = SCRIPT_DIR.parents[1]
+load_dotenv(dotenv_path=BAKLAVA_ROOT / ".env")
 
-# Figshare article API endpoint for this dataset.
-FIGSHARE_FILES_API = (
-    "https://api.figshare.com/v2/articles/22770161/files"
-)
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
-# File stem shared by the .imzML and .ibd pair you want to annotate.
-#
-# METASPACE availability (as of 2026-06-09)
-# ==========================================
-# When PREFER_EXISTING_METASPACE=True the script searches METASPACE by name
-# and skips the Figshare download entirely.  The table below shows which stems
-# already have a FINISHED public result and which databases were used.
+from load_aligned_mudata import load_sample, list_samples  # noqa: E402
+
+
+BAKLAVA_ROOT = Path(os.environ.get("BAKLAVA_ROOT", BAKLAVA_ROOT)).expanduser()
+BAKLAVA_BASE = BAKLAVA_ROOT.parent
+DATAPATH = Path(os.environ.get("DATAPATH", BAKLAVA_BASE / "data")).expanduser()
+
+H5MU_EXPORT_DIR = DATAPATH / "vicari_2023" / "h5mu_export"
+OUT_DIR = BAKLAVA_BASE / "outputs" / "metaspace_output"
+
+FDR = 0.20
+# Slightly wider than the METASPACE search PPM to account for rounded m/z
+# values stored in the exported h5mu MSI var table.
+PPM_MATCH_TOL = 5.0
+
+
+# METASPACE availability notes from the SMA samples.
 #
 # Stem             METASPACE dataset name                         Databases
 # ---------------  ---------------------------------------------  --------------------------------
 # v11l12-038-b1  * V11L12-038-B1.from_smamsi                     HMDB/v4, CoreMetabolome, ChEBI, KEGG
 # v11l12-038-d1  * V11L12-038-D1.from_smamsi                     HMDB/v4, CoreMetabolome, ChEBI, KEGG
 #                * v11l12-038-d1.from_smamsi.lipid_anno           HMDB/v4, LipidMaps, SwissLipids
-# v11l12-109-a1  * V11L12-109_A1.Visium.FMP.220826_smamsi        HMDB/v4 (FMP-10 matrix, 2023)
+# v11l12-109-a1  * V11L12-109_A1.Visium.FMP.220826_smamsi        HMDB/v4
 # v11l12-109-b1  * V11L12-109-B1.from_smamsi                     HMDB/v4, CoreMetabolome, ChEBI, KEGG
-#                * V11L12-109_B1.Visium.FMP.220826_smamsi         HMDB/v4 (FMP-10 matrix, 2023)
-# v11l12-109-c1  * V11L12-109_C1.Visium.FMP.220826_smamsi        HMDB/v4 (FMP-10 matrix, 2023)
-#
-# v11l12-038-a1    (not yet on METASPACE — fallback will download ~45 GB IBD)
-# v11t17-085_a1    (not yet on METASPACE — fallback will download ~47 GB IBD)
-# v11t17-085_b1    (not yet on METASPACE — fallback will download ~59 GB IBD)
-# v11t17-085_c1    (not yet on METASPACE — fallback will download ~70 GB IBD)
-#
-# Note: V11T17-102_*.smamsi entries on METASPACE are a different sample ID
-# (102, not 085) and do not correspond to any file in this Figshare article.
-#
-# Available Figshare stems:
-#   Mouse striatum (DHB, positive): v11l12-038-a1  v11l12-038-b1  v11l12-038-d1
-#                                   v11l12-109-a1  v11l12-109-b1  v11l12-109-c1
-#   Human striatum:                 v11t17-085_a1  v11t17-085_b1  v11t17-085_c1
-
-sample_name = "V11L12-038_D1_9AA_metabolites"
-msi = read_h5ad(f"/home/mcb/users/dmannk/BAKLAVA_base/data/vicari_2023/msi_h5ad/{sample_name}.h5ad", backed='r')
-msi_sample_name = list(msi.uns['spatial'].keys())[0]
-sample_name_to_figshare_stem = {
-    "V11L12-038_A1": "v11l12-038-a1",
-    "V11L12-038_B1": "v11l12-038-b1",
-    "V11L12-038_D1": "v11l12-038-d1",
-    "V11L12-109_B1": "v11l12-109-b1",
-    "V11L12-109_C1": "v11l12-109-c1",
-}
-SAMPLE_NAME = sample_name_to_figshare_stem.get(msi_sample_name)
-print(f"Detected sample name from MSI: {msi_sample_name}. Using Figshare stem: {SAMPLE_NAME}")
-
-DATASET_NAME = f"SMA_{SAMPLE_NAME}"
-
-# If True (default), first look for an already-processed public METASPACE
-# dataset matching SAMPLE_NAME and just pull its annotations — no Figshare
-# download and no upload at all.  The SMA authors have already submitted
-# several of these samples (named e.g. "V11L12-038-D1.from_smamsi").
-# Only if no match is found do we fall back to downloading the imzML/IBD
-# from Figshare and submitting a fresh job.
-PREFER_EXISTING_METASPACE = True
-
-# One of: "mouse_striatum" | "mouse_substantia_nigra" | "human_striatum"
-SAMPLE_TYPE = "mouse_striatum"
-
-# One of: "DHB" | "9-AA" | "norharmane_pos" | "norharmane_neg" | "FMP-10"
-MATRIX_MODE = "DHB"
-
-# Resolving power at m/z 400.  130 000 is a reasonable starting point for
-# 7T Bruker FTICR data; confirm against the imzML header before publication.
-DETECTOR_RESOLVING_POWER = 130000
-
-IS_PUBLIC = False
-
-DATABASES = [
-    ("HMDB", "v4"),
-    ("LipidMaps", "2017-12-12"),
-    ('SwissLipids', '2018-02-02')
-]
-
-FDR = 0.20
-PPM = 3.0
-# Slightly wider than METASPACE's search PPM to account for rounding in the
-# peak m/z values stored in the h5ad (var['mz_raw']).
-PPM_MATCH_TOL = 5.0
-NUM_ISOTOPIC_PEAKS = 4
-POLL_SECONDS = 60
-
-MSI_PATH = Path(f"/home/mcb/users/dmannk/BAKLAVA_base/data/vicari_2023/msi_h5ad/{sample_name}.h5ad")
-
-OUT_DIR = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/metaspace_output")
-OUT_DIR.mkdir(exist_ok=True)
+#                * V11L12-109_B1.Visium.FMP.220826_smamsi         HMDB/v4
+# v11l12-109-c1  * V11L12-109_C1.Visium.FMP.220826_smamsi        HMDB/v4
 
 
-# ----------------------------
-# FIGSHARE DOWNLOAD HELPERS
-# ----------------------------
-
-def figshare_download_urls(api_url: str) -> dict[str, str]:
-    """Return {filename: download_url} for every file in the article."""
-    resp = requests.get(api_url, timeout=30)
-    resp.raise_for_status()
-    return {entry["name"]: entry["download_url"] for entry in resp.json()}
+def fdr_label(fdr: float) -> str:
+    """Return the filename representation used by METASPACE result exports."""
+    return f"{fdr:g}"
 
 
-def stream_download(url: str, dest: Path, chunk_mb: int = 64) -> None:
-    """Stream-download *url* to *dest*, printing progress."""
-    chunk = chunk_mb * 1024 * 1024
-    with requests.get(url, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        downloaded = 0
-        with open(dest, "wb") as fh:
-            for block in r.iter_content(chunk_size=chunk):
-                fh.write(block)
-                downloaded += len(block)
-                if total:
-                    pct = downloaded / total * 100
-                    print(f"\r  {dest.name}: {downloaded/1e9:.2f}/{total/1e9:.2f} GB  ({pct:.1f}%)", end="", flush=True)
-        print()  # newline after progress
+def sample_id_to_metaspace_stem(sample_id: str) -> str:
+    """Convert an h5mu sample id such as V11L12-038_D1 to v11l12-038-d1."""
+    return sample_id.lower().replace("_", "-")
 
 
-def fetch_pair(sample_name: str, tmpdir: Path) -> tuple[Path, Path]:
+def dataset_prefix(sample_id: str) -> str:
+    """Return the local CSV prefix used for one SMA sample."""
+    return f"SMA_{sample_id_to_metaspace_stem(sample_id)}"
+
+
+def annotation_csvs(prefix: str, out_dir: Path, fdr: float) -> list[Path]:
+    """Return non-summary, non-aggregated METASPACE CSVs for one sample."""
+    label = fdr_label(fdr)
+    return sorted(
+        path
+        for path in out_dir.glob(f"{prefix}.*.fdr{label}.csv")
+        if "summary" not in path.name.lower()
+        and ".aggregated." not in path.name.lower()
+    )
+
+
+def load_annotation_results(prefix: str, out_dir: Path, fdr: float) -> pd.DataFrame | None:
+    """Load cached METASPACE result CSVs for one sample, if present."""
+    paths = annotation_csvs(prefix, out_dir, fdr)
+    if not paths:
+        return None
+
+    frames = []
+    for path in paths:
+        df = pd.read_csv(path)
+        db_label = path.name[len(prefix) + 1 :].rsplit(".fdr", 1)[0]
+        if "database" not in df.columns:
+            df["database"] = db_label
+        df["source_csv"] = str(path)
+        frames.append(df)
+
+    results = pd.concat(frames, ignore_index=True)
+    if "mz" not in results.columns:
+        raise ValueError(f"METASPACE CSVs for {prefix} do not contain an 'mz' column")
+
+    dedup_cols = [
+        col
+        for col in ("database", "mz", "adduct", "ion", "formula", "moleculeNames")
+        if col in results.columns
+    ]
+    if dedup_cols:
+        results = results.drop_duplicates(subset=dedup_cols)
+
+    print(
+        f"Loaded {len(results):,} unique annotations for {prefix} "
+        f"from {len(paths)} cached CSV(s)."
+    )
+    return results
+
+
+def find_processed_dataset(sm: SMInstance, sample_stem: str):
     """
-    Look up the .imzML and .ibd download URLs for *sample_name* and stream
-    both files into *tmpdir*.  Returns (imzml_path, ibd_path).
+    Return a processed METASPACE dataset matching *sample_stem*, or None.
+
+    Figshare/SMA stems like "v11l12-109-a1" appear on METASPACE with both
+    dash and underscore separators. Search by the plate prefix, then filter
+    candidates by the section identifier.
     """
-    print("Fetching Figshare file list...")
-    url_map = figshare_download_urls(FIGSHARE_FILES_API)
-
-    imzml_name = f"{sample_name}.imzML"
-    ibd_name   = f"{sample_name}.ibd"
-
-    for fname in (imzml_name, ibd_name):
-        if fname not in url_map:
-            raise KeyError(
-                f"'{fname}' not found in Figshare article. "
-                f"Available files: {sorted(url_map)}"
-            )
-
-    imzml_path = tmpdir / imzml_name
-    ibd_path   = tmpdir / ibd_name
-
-    print(f"Downloading {imzml_name} (~{url_map[imzml_name][:60]})")
-    stream_download(url_map[imzml_name], imzml_path)
-
-    print(f"Downloading {ibd_name}  (this may take a while — file is 35-70 GB)")
-    stream_download(url_map[ibd_name], ibd_path)
-
-    return imzml_path, ibd_path
-
-
-# ----------------------------
-# METADATA
-# ----------------------------
-
-def sma_metadata(sample_type: str, matrix_mode: str, resolving_power: float) -> dict:
-    """
-    Metadata for Figshare/SMA MALDI-MSI data:
-    Spatial Multimodal analysis (SMA) - MSI.
-    Adjust fields if your specific file name indicates a different sample.
-    """
-
-    matrix_mode = matrix_mode.lower()
-
-    if matrix_mode == "dhb":
-        maldi_matrix = "2,5-dihydroxybenzoic acid (DHB)"
-        polarity = "Positive"
-        solvent = "50% acetonitrile + 0.2% trifluoroacetic acid"
-        tissue_modification = "none"
-        adduct_note = "Recommended positive-mode adducts: +H, +Na, +K"
-
-    elif matrix_mode in {"9-aa", "9aa"}:
-        maldi_matrix = "9-aminoacridine (9-AA)"
-        polarity = "Negative"
-        solvent = "80% methanol"
-        tissue_modification = "none"
-        adduct_note = "Recommended negative-mode adducts: -H, +Cl"
-
-    elif matrix_mode == "norharmane_pos":
-        maldi_matrix = "norharmane"
-        polarity = "Positive"
-        solvent = "80% methanol"
-        tissue_modification = "none"
-        adduct_note = "Recommended positive-mode adducts: +H, +Na, +K"
-
-    elif matrix_mode == "norharmane_neg":
-        maldi_matrix = "norharmane"
-        polarity = "Negative"
-        solvent = "80% methanol"
-        tissue_modification = "none"
-        adduct_note = "Recommended negative-mode adducts: -H, +Cl"
-
-    elif matrix_mode in {"fmp-10", "fmp10"}:
-        maldi_matrix = "FMP-10"
-        polarity = "Positive"
-        solvent = "70% acetonitrile"
-        tissue_modification = (
-            "On-tissue chemical derivatization with FMP-10 reactive matrix"
-        )
-        adduct_note = (
-            "FMP-10 derivatization shifts observed masses; native HMDB/LipidMaps "
-            "annotation may not be directly valid unless using appropriate "
-            "chemical modifications or a custom derivatized database."
-        )
-
-    else:
-        raise ValueError(f"Unsupported MATRIX_MODE: {matrix_mode}")
-
-    if sample_type == "mouse_striatum":
-        organism = "Mus musculus"
-        organism_part = "Brain; striatum / caudoputamen"
-        condition = (
-            "Mouse brain; control or unilateral 6-OHDA Parkinson's disease model, "
-            "depending on sample identifier"
-        )
-        sample_details = (
-            "Adult male C57BL/6J mouse brain; fresh frozen / snap frozen; "
-            "striatal-level section"
-        )
-        section_thickness = "12 µm"
-
-    elif sample_type == "mouse_substantia_nigra":
-        organism = "Mus musculus"
-        organism_part = "Brain; substantia nigra"
-        condition = "Unilateral 6-OHDA Parkinson's disease mouse model"
-        sample_details = (
-            "Adult male C57BL/6J mouse brain; fresh frozen / snap frozen; "
-            "substantia-nigra-level section"
-        )
-        section_thickness = "12 µm"
-
-    elif sample_type == "human_striatum":
-        organism = "Homo sapiens"
-        organism_part = "Brain; striatum / caudate-putamen / caudate nucleus"
-        condition = "Parkinson's disease postmortem brain"
-        sample_details = (
-            "Human postmortem Parkinson's disease brain sample; fresh frozen / "
-            "snap frozen"
-        )
-        section_thickness = "10 µm"
-
-    else:
-        raise ValueError(f"Unsupported SAMPLE_TYPE: {sample_type}")
-
-    return {
-        "Data_Type": "Imaging MS",
-
-        "Sample_Information": {
-            "Organism": organism,
-            "Organism_Part": organism_part,
-            "Condition": condition,
-            "Sample_Growth_Conditions": sample_details,
-        },
-
-        "Sample_Preparation": {
-            "Sample_Stabilisation": (
-                f"Fresh frozen / snap frozen; stored frozen; cryosectioned at "
-                f"{section_thickness}"
-            ),
-            "Tissue_Modification": tissue_modification,
-            "MALDI_Matrix": maldi_matrix,
-            "MALDI_Matrix_Application": "TM-Sprayer robotic sprayer; HTX Technologies",
-            "Solvent": solvent,
-        },
-
-        "MS_Analysis": {
-            "Polarity": polarity,
-            "Ionisation_Source": "MALDI",
-            "Analyzer": "FTICR",
-            "Detector_Resolving_Power": {
-                "mz": 400,
-                "Resolving_Power": resolving_power,
-            },
-            "Pixel_Size": {
-                "Xaxis": 100,
-                "Yaxis": 100,
-            },
-        },
-
-        "Additional_Information": {
-            "Supplementary": (
-                "Source: Spatial Multimodal Analysis (SMA) MALDI-MSI dataset. "
-                "Use this metadata as a starting point and verify against the "
-                "specific imzML header / instrument method before publication. "
-                + adduct_note
-            )
-        },
-    }
-
-
-def adducts_for_matrix(matrix_mode: str) -> list[str]:
-    matrix_mode = matrix_mode.lower()
-
-    if matrix_mode in {"dhb", "norharmane_pos", "fmp-10", "fmp10"}:
-        return ["+H", "+Na", "+K"]
-
-    if matrix_mode in {"9-aa", "9aa", "norharmane_neg"}:
-        return ["-H", "+Cl"]
-
-    raise ValueError(f"Unsupported MATRIX_MODE: {matrix_mode}")
-
-
-# ----------------------------
-# VALIDATION
-# ----------------------------
-
-def find_processed_dataset(sm: SMInstance, sample_name: str):
-    """
-    Look for an already-processed, FINISHED METASPACE dataset whose name
-    matches *sample_name*.  Returns the dataset object, or None.
-
-    Figshare stems like "v11l12-109-a1" appear on METASPACE inconsistently:
-    some keep the dash before the section letter ("V11L12-038-B1.from_smamsi"),
-    others replace it with an underscore ("V11L12-109_A1.Visium...").
-    Searching by the full stem therefore misses the underscore variants.
-
-    Strategy: search by the plate prefix (everything up to the last '-'),
-    then filter candidates whose name contains the section identifier with
-    either separator.
-    """
-    # Split "v11l12-109-a1" into plate prefix "v11l12-109" and section "a1".
-    parts = sample_name.lower().rsplit("-", 1)
-    plate_prefix, section = (parts[0], parts[1]) if len(parts) == 2 else (sample_name.lower(), "")
+    parts = sample_stem.lower().rsplit("-", 1)
+    plate_prefix, section = (
+        (parts[0], parts[1]) if len(parts) == 2 else (sample_stem.lower(), "")
+    )
 
     candidates = sm.datasets(nameMask=plate_prefix)
     finished = [d for d in candidates if getattr(d, "status", None) == "FINISHED"]
-
-    # Keep only datasets whose name contains the section with '-' or '_'.
     if section:
         finished = [
-            d for d in finished
+            d
+            for d in finished
             if f"-{section}" in d.name.lower() or f"_{section}" in d.name.lower()
         ]
 
     if not finished:
         return None
 
-    # Prefer "from_smamsi" datasets (submitted by the authors from the raw data)
-    # over older Visium re-runs, then fall back to most recently submitted.
     preferred = [d for d in finished if "from_smamsi" in d.name.lower()]
     chosen = (preferred or finished)[0]
 
-    print(f"Found {len(finished)} processed match(es) for {sample_name!r}:")
-    for d in finished:
-        marker = " <-- using" if d is chosen else ""
-        print(f"    {d.id} | {d.name}{marker}")
+    print(f"Found {len(finished)} processed METASPACE match(es) for {sample_stem!r}:")
+    for dataset in finished:
+        marker = " <-- using" if dataset is chosen else ""
+        print(f"    {dataset.id} | {dataset.name}{marker}")
     return chosen
 
 
-def export_results(ds, dataset_id: str) -> None:
-    """Pull annotations for every database and write them to OUT_DIR."""
+def export_results(ds, prefix: str, out_dir: Path, fdr: float) -> None:
+    """Export METASPACE annotations for all databases on one processed dataset."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dataset_id = ds.id
     print(f"Exporting annotations from {ds.name} ({dataset_id})...")
 
-    # For an existing public dataset, export every database it was processed
-    # against — the DATABASES setting only controls what a *new* submission
-    # requests, so filtering by it here would silently drop e.g. CoreMetabolome
-    # or KEGG that the authors used but aren't in DATABASES.
     available = [(d.name, d.version) for d in getattr(ds, "database_details", [])]
-    wanted = available or DATABASES
+    if not available:
+        raise ValueError(f"{ds.name} has no database_details; cannot export results")
 
     exported = []
-    for db in wanted:
+    for db in available:
         try:
-            results = ds.results(database=db, fdr=FDR).reset_index()
-        except Exception as e:
-            print(f"  skip {db}: {type(e).__name__}: {e}")
+            results = ds.results(database=db, fdr=fdr).reset_index()
+        except Exception as exc:
+            print(f"  skip {db}: {type(exc).__name__}: {exc}")
             continue
 
         db_label = "_".join(map(str, db)).replace(" ", "_").replace("/", "_")
-        out_csv = OUT_DIR / f"{DATASET_NAME}.{db_label}.fdr{FDR}.csv"
+        out_csv = out_dir / f"{prefix}.{db_label}.fdr{fdr_label(fdr)}.csv"
         results.to_csv(out_csv, index=False)
 
-        print(f"  {db}: {len(results):,} annotations at FDR <= {FDR} -> {out_csv}")
-        exported.append({
-            "dataset_id": dataset_id,
-            "database": str(db),
-            "fdr": FDR,
-            "n_annotations": len(results),
-            "csv": str(out_csv),
-        })
-
-    summary = pd.DataFrame(exported)
-    summary_csv = OUT_DIR / f"{DATASET_NAME}.summary.csv"
-    summary.to_csv(summary_csv, index=False)
-    print("Done.")
-    print(summary)
-
-
-def submit_from_figshare(sm: SMInstance) -> str:
-    """
-    Fallback path: stream the imzML/IBD from Figshare into a temp dir, submit
-    to METASPACE, then delete the temp files.  Returns the new dataset_id.
-    """
-    # TemporaryDirectory is deleted automatically when the context exits,
-    # even if an exception is raised.
-    with tempfile.TemporaryDirectory(prefix="sma_msi_") as _tmpdir:
-        tmpdir = Path(_tmpdir)
-
-        imzml_path, ibd_path = fetch_pair(SAMPLE_NAME, tmpdir)
-        print(f"imzML: {imzml_path}  ({imzml_path.stat().st_size / 1e6:.1f} MB)")
-        print(f"IBD:   {ibd_path}  ({ibd_path.stat().st_size / 1e9:.2f} GB)")
-
-        metadata = sma_metadata(
-            sample_type=SAMPLE_TYPE,
-            matrix_mode=MATRIX_MODE,
-            resolving_power=DETECTOR_RESOLVING_POWER,
+        print(f"  {db}: {len(results):,} annotations at FDR <= {fdr} -> {out_csv}")
+        exported.append(
+            {
+                "dataset_id": dataset_id,
+                "dataset_name": ds.name,
+                "database": str(db),
+                "fdr": fdr,
+                "n_annotations": len(results),
+                "csv": str(out_csv),
+            }
         )
-        adducts = adducts_for_matrix(MATRIX_MODE)
 
-        metadata_json = OUT_DIR / f"{DATASET_NAME}.metadata.json"
-        metadata_json.write_text(json.dumps(metadata, indent=2))
-        print(f"Wrote metadata: {metadata_json}")
-
-        print("Submitting dataset to METASPACE...")
-        dataset_id = sm.submit_dataset(
-            imzml_fn=str(imzml_path),
-            ibd_fn=str(ibd_path),
-            name=DATASET_NAME,
-            metadata=metadata,
-            is_public=IS_PUBLIC,
-            databases=DATABASES,
-            adducts=adducts,
-            ppm=PPM,
-            num_isotopic_peaks=NUM_ISOTOPIC_PEAKS,
-            description=(
-                "Programmatic METASPACE annotation of SMA MALDI-MSI imzML/IBD data."
-            ),
-        )
-        print(f"Submitted dataset_id: {dataset_id}")
-
-    # TemporaryDirectory (and the 35-70 GB IBD) is deleted here.
-    print("Temporary files cleaned up.")
-
-    # Poll until annotation finishes.
-    while True:
-        ds = sm.dataset(id=dataset_id)
-        print(f"Status: {ds.status}")
-        if ds.status == "FINISHED":
-            break
-        if ds.status == "FAILED":
-            raise RuntimeError(f"METASPACE annotation failed: {dataset_id}")
-        time.sleep(POLL_SECONDS)
-
-    return dataset_id
+    if exported:
+        summary_csv = out_dir / f"{prefix}.summary.csv"
+        pd.DataFrame(exported).to_csv(summary_csv, index=False)
+        print(f"Wrote summary: {summary_csv}")
 
 
-def annotate_msi_peaks(msi_path: Path) -> None:
-    """
-    Match METASPACE annotations back onto MSI peaks by PPM-tolerance m/z
-    lookup and write the result to the h5ad var['annotated'] column.
+def parse_molecule_names(value) -> str:
+    """Parse METASPACE moleculeNames values into a display string."""
+    if isinstance(value, list):
+        return ", ".join(map(str, value))
+    if pd.isna(value):
+        return ""
+    try:
+        parsed = ast.literal_eval(str(value))
+    except (ValueError, SyntaxError):
+        return str(value)
+    if isinstance(parsed, list):
+        return ", ".join(map(str, parsed))
+    return str(parsed)
 
-    All per-database CSVs previously exported for DATASET_NAME are combined
-    before matching so that annotations from every database contribute.
-    Duplicate (mz, adduct) pairs across databases are deduplicated.
 
-    The updated h5ad is written alongside the original with a
-    '.metaspace_annotated.h5ad' suffix.
-    """
-    import anndata as ad
+def build_peak_annotations(
+    msi_var: pd.DataFrame,
+    results: pd.DataFrame,
+    ppm_match_tol: float,
+) -> pd.Series:
+    """Return an annotation string per MSI feature index."""
+    mz_col = "mz_raw" if "mz_raw" in msi_var.columns else "mz"
+    if mz_col not in msi_var.columns:
+        raise KeyError("MSI var must contain either 'mz_raw' or 'mz'")
 
-    # Collect and combine all annotation CSVs for this dataset.
-    csv_files = [
-        f for f in OUT_DIR.glob(f"{DATASET_NAME}.*.fdr{FDR}.csv")
-        if "summary" not in f.name
-    ]
-    if not csv_files:
-        print("No annotation CSVs found — skipping MSI annotation step.")
-        return
+    mz_peaks = pd.to_numeric(msi_var[mz_col], errors="coerce").to_numpy()
+    mz_anno = pd.to_numeric(results["mz"], errors="coerce").to_numpy()
 
-    results = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
-    results = results.drop_duplicates(subset=["mz", "adduct"])
-    print(f"Loaded {len(results)} unique annotations from {len(csv_files)} database(s).")
+    valid_peaks = np.isfinite(mz_peaks)
+    valid_anno = np.isfinite(mz_anno)
+    if not valid_peaks.any() or not valid_anno.any():
+        return pd.Series("", index=msi_var.index, dtype="object", name="annotated")
 
-    # Load MSI AnnData in full (not backed) so var can be modified.
-    msi = ad.read_h5ad(msi_path)
-    mz_col = "mz_raw" if "mz_raw" in msi.var.columns else "mz"
-    mz_peaks = msi.var[mz_col].astype(float).values   # (n_peaks,)
-    mz_anno  = results["mz"].astype(float).values        # (n_anno,)
+    peak_indices = np.flatnonzero(valid_peaks)
+    anno_indices = np.flatnonzero(valid_anno)
+    mz_peaks_valid = mz_peaks[valid_peaks]
+    mz_anno_valid = mz_anno[valid_anno]
 
-    # PPM distance matrix — shape (n_anno, n_peaks).
-    ppm_dist = np.abs(mz_anno[:, None] - mz_peaks[None, :]) / mz_peaks[None, :] * 1e6
-    anno_idx, peak_idx = np.where(ppm_dist < PPM_MATCH_TOL)
+    ppm_dist = (
+        np.abs(mz_anno_valid[:, None] - mz_peaks_valid[None, :])
+        / mz_peaks_valid[None, :]
+        * 1e6
+    )
+    anno_match_idx, peak_match_idx = np.where(ppm_dist <= ppm_match_tol)
 
-    if len(anno_idx) == 0:
-        print("No peaks matched within PPM tolerance — var['annotated'] unchanged.")
-        return
+    annotations = pd.Series("", index=msi_var.index, dtype="object", name="annotated")
+    if len(anno_match_idx) == 0:
+        return annotations
 
-    # Parse moleculeNames from its stringified-list representation.
-    def _names(val):
-        try:
-            names = ast.literal_eval(val)
-            return ", ".join(names) if isinstance(names, list) else str(val)
-        except Exception:
-            return str(val)
-
-    matched = pd.DataFrame({
-        "peak_var_name": msi.var.index[peak_idx],
-        "ion":           results["ion"].iloc[anno_idx].values,
-        "moleculeNames": [_names(v) for v in results["moleculeNames"].iloc[anno_idx].values],
-        "fdr":           results["fdr"].iloc[anno_idx].values,
-    })
-
-    # One peak can match multiple annotations — join them with ' | '.
-    annotation_str = (
-        matched.groupby("peak_var_name", sort=False)
-        .apply(lambda g: " | ".join(
-            f"{row.ion} ({row.moleculeNames}) FDR={row.fdr:.2f}"
-            for _, row in g.iterrows()
-        ))
-        .rename("annotated")
+    matched_results = results.iloc[anno_indices[anno_match_idx]]
+    matched = pd.DataFrame(
+        {
+            "peak_var_name": msi_var.index[peak_indices[peak_match_idx]],
+            "ion": matched_results.get(
+                "ion", pd.Series("", index=matched_results.index)
+            )
+            .astype(str)
+            .values,
+            "moleculeNames": [
+                parse_molecule_names(value)
+                for value in matched_results.get(
+                    "moleculeNames", pd.Series("", index=matched_results.index)
+                ).values
+            ],
+            "database": matched_results.get(
+                "database", pd.Series("", index=matched_results.index)
+            ).astype(str).values,
+            "fdr": pd.to_numeric(
+                matched_results.get(
+                    "fdr", pd.Series(np.nan, index=matched_results.index)
+                ),
+                errors="coerce",
+            ).values,
+        }
     )
 
-    msi.var["annotated"] = annotation_str   # NaN for unmatched peaks
+    def format_group(group: pd.DataFrame) -> str:
+        parts = []
+        for row in group.drop_duplicates().itertuples(index=False):
+            fdr = "" if pd.isna(row.fdr) else f" FDR={row.fdr:.2f}"
+            database = "" if not row.database else f" [{row.database}]"
+            name = f" ({row.moleculeNames})" if row.moleculeNames else ""
+            parts.append(f"{row.ion}{name}{fdr}{database}".strip())
+        return " | ".join(parts)
 
-    n_annotated = msi.var["annotated"].notna().sum()
-    print(f"Annotated {n_annotated}/{len(msi.var)} peaks (PPM_TOL={PPM_MATCH_TOL}, FDR<={FDR}).")
+    grouped = matched.groupby("peak_var_name", sort=False)[
+        ["ion", "moleculeNames", "database", "fdr"]
+    ].apply(format_group)
+    annotations.update(grouped)
+    return annotations
 
-    out_path = msi_path.with_suffix(".metaspace_annotated.h5ad")
-    msi.write_h5ad(out_path)
-    print(f"Saved annotated MSI to {out_path}")
+
+def annotate_h5mu(
+    sample_id: str,
+    export_dir: Path,
+    results: pd.DataFrame,
+    ppm_match_tol: float,
+) -> dict[str, int | str]:
+    """Annotate mdata.mod['msi'].var and overwrite the sample h5mu file."""
+    h5mu_path = export_dir / f"{sample_id}.h5mu"
+    mdata = load_sample(sample_id, export_dir=export_dir)
+    if "msi" not in mdata.mod:
+        raise KeyError(f"{h5mu_path} has no 'msi' modality")
+
+    msi = mdata.mod["msi"]
+    annotations = build_peak_annotations(msi.var, results, ppm_match_tol)
+    msi.var["annotated"] = annotations.reindex(msi.var.index).fillna("")
+
+    n_annotated = int(msi.var["annotated"].astype(bool).sum())
+    print(
+        f"Annotated {n_annotated}/{msi.n_vars} MSI features in {sample_id} "
+        f"(PPM_MATCH_TOL={ppm_match_tol})."
+    )
+
+    # Keep MuData-level axis metadata consistent with the updated modality var.
+    mdata.update()
+    mdata.write(h5mu_path)
+    print(f"Overwrote {h5mu_path}")
+
+    return {
+        "sample_id": sample_id,
+        "h5mu": str(h5mu_path),
+        "n_msi_features": int(msi.n_vars),
+        "n_annotated": n_annotated,
+    }
 
 
-def main():
-    sm = SMInstance()
+def is_notebook() -> bool:
+    try:
+        from IPython import get_ipython
+        shell = get_ipython().__class__.__name__
+        if shell == "ZMQInteractiveShell":
+            return True
+        elif shell == "TerminalInteractiveShell":
+            return False
+        else:
+            return False
+    except Exception:
+        return False
 
-    # First run only: prompts for your METASPACE API key and stores it.
-    sm.save_login()
 
-    # ---- Preferred path: no download, no upload ----
-    if PREFER_EXISTING_METASPACE:
-        ds = find_processed_dataset(sm, SAMPLE_NAME)
-        if ds is not None:
-            export_results(ds, ds.id)
-            annotate_msi_peaks(MSI_PATH)
-            return
-        print(
-            f"No processed METASPACE dataset found for {SAMPLE_NAME!r}; "
-            f"falling back to Figshare download + submission."
-        )
+def parse_args(notebook: bool = False) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--export-dir",
+        type=Path,
+        default=H5MU_EXPORT_DIR,
+        help="Directory containing aligned SMA .h5mu files.",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=OUT_DIR,
+        help="Directory for cached/exported METASPACE CSVs.",
+    )
+    parser.add_argument(
+        "--samples",
+        nargs="*",
+        default=None,
+        help="Optional h5mu sample IDs to annotate. Defaults to all .h5mu files.",
+    )
+    parser.add_argument("--fdr", type=float, default=FDR)
+    parser.add_argument("--ppm-match-tol", type=float, default=PPM_MATCH_TOL)
+    parser.add_argument(
+        "--cached-only",
+        action="store_true",
+        help="Only use existing METASPACE CSVs; do not query METASPACE.",
+    )
+    parser.add_argument(
+        "--login",
+        action="store_true",
+        help="Call SMInstance.save_login() before querying METASPACE.",
+    )
+    if notebook:
+        return parser.parse_args([])
+    return parser.parse_args()
 
-    # ---- Fallback path: download from Figshare and submit ----
-    dataset_id = submit_from_figshare(sm)
-    ds = sm.dataset(id=dataset_id)
-    print("Annotation finished.")
-    export_results(ds, dataset_id)
-    annotate_msi_peaks(MSI_PATH)
+#%%
+def main() -> None:
+    NOTEBOOK = is_notebook()
+    args = parse_args(notebook=NOTEBOOK)
+
+    export_dir = args.export_dir.expanduser()
+    out_dir = args.out_dir.expanduser()
+
+    sample_ids = args.samples or list_samples(export_dir)
+    if not sample_ids:
+        raise FileNotFoundError(f"No .h5mu files found in {export_dir}")
+
+    sm = None
+    if not args.cached_only:
+        sm = SMInstance()
+        if args.login:
+            sm.save_login()
+
+    summaries = []
+    for sample_id in sample_ids:
+        prefix = dataset_prefix(sample_id)
+        sample_stem = sample_id_to_metaspace_stem(sample_id)
+        print(f"\n=== {sample_id} ({sample_stem}) ===")
+
+        results = load_annotation_results(prefix, out_dir, args.fdr)
+        if results is None and not args.cached_only:
+            ds = find_processed_dataset(sm, sample_stem)
+            if ds is not None:
+                export_results(ds, prefix, out_dir, args.fdr)
+                results = load_annotation_results(prefix, out_dir, args.fdr)
+            else:
+                print(f"No processed METASPACE dataset found for {sample_stem!r}.")
+
+        if results is None:
+            print(f"No annotations available for {sample_id}; h5mu left unchanged.")
+            summaries.append(
+                {
+                    "sample_id": sample_id,
+                    "h5mu": str(export_dir / f"{sample_id}.h5mu"),
+                    "n_msi_features": 0,
+                    "n_annotated": 0,
+                    "status": "skipped",
+                }
+            )
+            continue
+
+        summary = annotate_h5mu(sample_id, export_dir, results, args.ppm_match_tol)
+        summary["status"] = "annotated"
+        summaries.append(summary)
+
+    print("\nAnnotation summary:")
+    print(pd.DataFrame(summaries))
 
 
 if __name__ == "__main__":

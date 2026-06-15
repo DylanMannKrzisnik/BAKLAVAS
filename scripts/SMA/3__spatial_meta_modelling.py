@@ -177,15 +177,20 @@ sc.tl.leiden(
 # %%
 sc.pl.umap(
     joint_adata,
-    color=["VAE_clusters_latent10"]
+    color=["VAE_clusters_latent10", "region", "lesion", "msi:Dopamine"],
+    ncols=2,
+    size=100,
+    wspace=0.3,
+    color_map="Reds"
 )
 
 sc.pl.spatial(
     joint_adata,
     img_key="hires",
-    color=["VAE_clusters_latent10"],
+    color=["VAE_clusters_latent10", "region", "lesion", "msi:Dopamine"],
     size=0.075,
-    show=False
+    show=False,
+    ncols=2,
 )
 
 sc.pl.spatial(joint_adata,

@@ -33,16 +33,47 @@ def load_joint_adata(path: Path = JOINT_RAW_PATH):
 
 
 #%% load data
-joint_adata = load_joint_adata()
+#joint_adata = load_joint_adata()
+
+import muon as mu
+
+sample_id = "V11L12-109_B1"
+joint_mudata = mu.read_h5mu(os.path.join(BAKLAVA_BASE, "data", "vicari_2023", "h5mu_export", f"{sample_id}.h5mu"))
+
+# Keep only observations/cells/spots shared across modalities
+mu.pp.intersect_obs(joint_mudata)
+
+rna = joint_mudata.mod["rna"]   # change to your key, e.g. "ST"
+msi = joint_mudata.mod["msi"]   # change to your key, e.g. "SM"
+
+# Make feature names unique and modality-prefixed
+rna = rna.copy()
+msi = msi.copy()
+
+rna.var_names = ["rna:" + str(v) for v in rna.var_names]
+msi.var_names = ["msi:" + str(v) for v in msi.var_names]
+
+# Concatenate features into one AnnData
+adata = sc.concat(
+    {"ST": rna, "SM": msi},
+    axis=1,
+    join="inner",
+    label="type",
+    merge="same",
+)
+
+joint_adata = smt.util._classes.AnnDataJointSMST(adata)
 
 # %% remove HSP, MT, RPL, DNAJ features
 
 joint_adata = smt.pp.removeHSP_MT_RPL_DNAJ(joint_adata)
 joint_adata.layers["counts"] = joint_adata.X.copy()
 
-smt.pp.normalize_total_joint_adata_sm_st(joint_adata,
-                         target_sum_SM=1e4,
-                         target_sum_ST=1e4)
+smt.pp.normalize_total_joint_adata_sm_st(
+    joint_adata,
+    target_sum_SM=1e4,
+    target_sum_ST=1e4
+)
 
 joint_adata.layers["normalized"] = joint_adata.X.copy()
 joint_adata.raw = joint_adata
@@ -53,15 +84,15 @@ smt.pp.spatial_variable_joint_adata_sm_st(joint_adata,
                                          add_key = "highly_variable_moranI")
 
 joint_adata = joint_adata[:,joint_adata.var.highly_variable_moranI]
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-joint_adata.write_h5ad(JOINT_HVF_PATH)
+#DATA_DIR.mkdir(parents=True, exist_ok=True)
+#joint_adata.write_h5ad(JOINT_HVF_PATH)
 
 #%%
 
-joint_adata = sc.read_h5ad(JOINT_HVF_PATH)
+#joint_adata = sc.read_h5ad(JOINT_HVF_PATH)
 joint_adata.X = joint_adata.layers["counts"]
 
-smt.pp.normalize_total_joint_adata_sm_st(
+smt.pp.normalize_total_joint_adata_sm_st( # again?
     joint_adata,
     target_sum_SM=1e3,
     target_sum_ST=None
@@ -94,8 +125,6 @@ Z = model.get_latent_embedding()
 X = model.get_normalized_expression()
 C = model.get_modality_contribution()
 
-# %%
-
 joint_adata.layers['reconstruction'] = X
 joint_adata.obsm['X_emb']=Z
 joint_adata.obs['contribution_st']=C
@@ -115,8 +144,8 @@ sc.tl.leiden(
     joint_adata,
     key_added="VAE_clusters_latent10"
 )
-# %%
 
+# %%
 # To resume after model training, uncomment:
 # joint_adata = sc.read_h5ad(JOINT_SPATIALMETA_PATH)
 # %%
@@ -182,5 +211,5 @@ plt.xticks(rotation=90)
 plt.show()
 
 #%%
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-joint_adata.write_h5ad(JOINT_SPATIALMETA_PATH)
+#DATA_DIR.mkdir(parents=True, exist_ok=True)
+#joint_adata.write_h5ad(JOINT_SPATIALMETA_PATH)

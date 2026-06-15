@@ -54,7 +54,7 @@ scglue.config.GRAPH_SHUFFLE_NUM_WORKERS = 0
 # Per-modality preparation                                                    #
 # --------------------------------------------------------------------------- #
 def prep_glue_modality(
-    adata: ad.AnnData, prob_model: str, paired: bool, n_comps: int = 50
+    adata: ad.AnnData, prob_model: str, paired: bool, n_comps: int = 50, use_rep: str = "X_pca_harmony"
 ) -> ad.AnnData:
     """Prepare one modality for ``fit_SCGLUE``.
 
@@ -83,7 +83,7 @@ def prep_glue_modality(
         prob_model,
         use_highly_variable=False,
         use_layer=use_layer,
-        use_rep="X_pca",
+        use_rep=use_rep,
         use_obs_names=paired,
     )
     return out

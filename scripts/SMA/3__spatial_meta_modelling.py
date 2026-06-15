@@ -418,14 +418,15 @@ def detach_H(H, keys=("q_mu",), nested_keys=("q_mu",), device=None):
             out[k] = detach_tensor(v)
     return out
 
-epoch_H, batch_H, current_epoch_H, student_distill_loss = [], [], [], []
+epoch_H, batch_H, current_epoch_H = [], [], []
+student_distill_loss, epoch_student_distill_loss = [], []
 
-def capture_hook(module, inputs, outputs):
+def capture_teacher_outputs(module, outputs):
     H, Rs, L = outputs
     indices = getattr(module, "_current_batch_indices", None)
     if indices is None:
         raise RuntimeError(
-            "Teacher batch indices were not available in the forward hook. "
+            "Teacher batch indices were not available during distillation. "
             "Make sure patch_model_encode_for_gcn(teacher_model) has been applied."
         )
 
@@ -450,12 +451,22 @@ def capture_hook(module, inputs, outputs):
     # epoch boundary: count batches (shuffle=True → order varies, but epoch = 1 full pass)
     if len(current_epoch_H) == batches_per_epoch:
         epoch_H.append(current_epoch_H.copy())
+        epoch_student_distill_loss.append(
+            float(np.mean([record["student_distill_loss"] for record in current_epoch_H]))
+        )
         current_epoch_H.clear()
 
 n_per_batch = 128
 
 batches_per_epoch = len(teacher_model.as_dataloader(batch_size=n_per_batch, shuffle=True))
-handle = teacher_model.register_forward_hook(capture_hook)
+_teacher_forward = teacher_model.forward
+
+def teacher_forward_with_distillation(*args, **kwargs):
+    outputs = _teacher_forward(*args, **kwargs)
+    capture_teacher_outputs(teacher_model, outputs)
+    return outputs
+
+teacher_model.forward = teacher_forward_with_distillation
 try:
     loss_dict = teacher_model.fit(
         max_epoch=250,
@@ -464,7 +475,9 @@ try:
         n_per_batch=n_per_batch, #num_nodes if graph_conv else 128,
     )
 finally:
-    handle.remove()
+    teacher_model.forward = _teacher_forward
+
+loss_dict["epoch_student_distill_loss_list"] = epoch_student_distill_loss
 
 
 

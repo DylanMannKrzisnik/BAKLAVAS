@@ -65,7 +65,18 @@ def build_spatial_edge_index(
     return edge_index.to(device)
 
 
-def replace_fc_encoder_with_gcn(sae, edge_index, layer_idx: int = 0) -> None:
+def build_identity_edge_index(
+    num_nodes: int,
+    device: str = "cpu",
+):
+    """Self-loop-only graph: each node only sends messages to itself."""
+    import torch
+
+    node_idx = torch.arange(num_nodes, dtype=torch.long, device=device)
+    return torch.stack((node_idx, node_idx), dim=0)
+
+
+def replace_fc_encoder_with_gcn(sae, edge_index, num_nodes: int, layer_idx: int = 0) -> None:
     """Replace one SAE encoder FCLayer with GCNConv + the same BN/ReLU/Dropout tail."""
     import torch.nn as nn
     from torch_geometric.nn import GCNConv
@@ -130,7 +141,7 @@ def replace_fc_encoder_with_gcn(sae, edge_index, layer_idx: int = 0) -> None:
     sae.layers[enc_idx] = GCNEncoderLayer(
         fc_layer,
         edge_index,
-        num_nodes=edge_index.max().item() + 1,
+        num_nodes=num_nodes,
         post=nn.Sequential(*post_modules),
     )
 
@@ -291,19 +302,28 @@ model = smt.model.ConditionalVAESTSM(
 )
 
 graph_conv = True
+full_graph = False
 
 if graph_conv:
     if "spatial" not in joint_adata.obsm:
         joint_adata.obsm["spatial"] = joint_mudata.mod["rna"].obsm["spatial"].copy()
 
-    edge_index = build_spatial_edge_index(
-        joint_adata.obsm["spatial"],
-        n_neighbors=6,
-        device=str(model.device),
-    )
+    if full_graph:
+        edge_index = build_spatial_edge_index(
+            joint_adata.obsm["spatial"],
+            n_neighbors=6,
+            device=str(model.device),
+        )
+    else:
+        edge_index = build_identity_edge_index(
+            joint_adata.n_obs,
+            device=str(model.device),
+        )
+
     # SAE.layers = ModuleList([FCLayer(in->128), None]) for encode_only stacks=[128]
-    replace_fc_encoder_with_gcn(model.encoder_ST, edge_index, layer_idx=0)
-    replace_fc_encoder_with_gcn(model.encoder_SM, edge_index, layer_idx=0)
+    num_nodes = joint_adata.n_obs
+    replace_fc_encoder_with_gcn(model.encoder_ST, edge_index, num_nodes, layer_idx=0)
+    replace_fc_encoder_with_gcn(model.encoder_SM, edge_index, num_nodes, layer_idx=0)
     patch_model_encode_for_gcn(model)
     model.to(model.device)
 
@@ -311,7 +331,7 @@ loss_dict = model.fit(
     max_epoch=250,
     lr=1e-3,
     mode='single',
-    n_per_batch=128, #joint_adata.n_obs if graph_conv else 128,
+    n_per_batch=128, #num_nodes if graph_conv else 128,
 )
 
 # %%

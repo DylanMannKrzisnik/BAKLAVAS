@@ -139,33 +139,59 @@ def patch_model_encode_for_gcn(model) -> None:
     """Track mini-batch node indices so GCN encoder layers can build subgraphs."""
     import torch
 
+    class IndexTrackingLoader:
+        def __init__(self, loader):
+            self.loader = loader
+
+        def __iter__(self):
+            try:
+                for batch in self.loader:
+                    model._current_batch_indices = batch[0].detach().cpu()
+                    yield batch
+            finally:
+                model._current_batch_indices = None
+
+        def __len__(self):
+            return len(self.loader)
+
     def _set_gcn_batch_indices(node_idx):
+        if node_idx is not None:
+            node_idx = torch.as_tensor(node_idx, dtype=torch.long)
         for encoder in (model.encoder_ST, model.encoder_SM):
             layer = encoder.layers[0]
             if hasattr(layer, "set_batch_node_idx"):
-                layer.set_batch_node_idx(
-                    None if node_idx is None else torch.as_tensor(node_idx, dtype=torch.long)
-                )
-
-    _orig_forward = model.forward
-
-    def forward_with_gcn_indices(X, batch_index=None, reduction="sum"):
-        if X.size(0) < model._n_record:
-            _set_gcn_batch_indices(model._current_batch_indices)
-        else:
-            _set_gcn_batch_indices(None)
-        return _orig_forward(X, batch_index=batch_index, reduction=reduction)
-
-    model.forward = forward_with_gcn_indices
+                layer.set_batch_node_idx(node_idx)
 
     _orig_as_dataloader = model.as_dataloader
 
     def as_dataloader_with_index_tracking(*args, **kwargs):
-        for batch in _orig_as_dataloader(*args, **kwargs):
-            model._current_batch_indices = batch[0].cpu().numpy()
-            yield batch
+        return IndexTrackingLoader(_orig_as_dataloader(*args, **kwargs))
 
     model.as_dataloader = as_dataloader_with_index_tracking
+
+    _orig_encode = model.encode
+
+    def encode_with_gcn_indices(X, *args, **kwargs):
+        node_idx = None
+        if X.size(0) != model._n_record:
+            node_idx = getattr(model, "_current_batch_indices", None)
+            if node_idx is None:
+                raise RuntimeError(
+                    "GCN mini-batch encode requires original node indices. "
+                    "Call through model.as_dataloader() or use n_per_batch=model._n_record."
+                )
+            if len(node_idx) != X.size(0):
+                raise RuntimeError(
+                    f"GCN batch index length ({len(node_idx)}) does not match "
+                    f"input batch size ({X.size(0)})."
+                )
+        _set_gcn_batch_indices(node_idx)
+        try:
+            return _orig_encode(X, *args, **kwargs)
+        finally:
+            _set_gcn_batch_indices(None)
+
+    model.encode = encode_with_gcn_indices
 
 
 #%% load data
@@ -282,10 +308,10 @@ if graph_conv:
     model.to(model.device)
 
 loss_dict = model.fit(
-    max_epoch=50,
+    max_epoch=250,
     lr=1e-3,
     mode='single',
-    n_per_batch=joint_adata.n_obs if graph_conv else 128,
+    n_per_batch=128, #joint_adata.n_obs if graph_conv else 128,
 )
 
 # %%

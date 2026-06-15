@@ -44,6 +44,130 @@ def _assert_identical(a, b, path="uns['spatial']"):
         assert a == b, f"{path}: values differ"
 
 
+def build_spatial_edge_index(
+    coords: np.ndarray,
+    n_neighbors: int = 6,
+    device: str = "cpu",
+):
+    """kNN graph on spot coordinates for PyG GCNConv (spots = nodes)."""
+    import torch
+    from sklearn.neighbors import kneighbors_graph
+    from torch_geometric.utils import from_scipy_sparse_matrix
+
+    adj = kneighbors_graph(
+        coords,
+        n_neighbors=n_neighbors,
+        mode="connectivity",
+        include_self=False,
+    )
+    adj = adj.maximum(adj.T)
+    edge_index, _ = from_scipy_sparse_matrix(adj.tocoo())
+    return edge_index.to(device)
+
+
+def replace_fc_encoder_with_gcn(sae, edge_index, layer_idx: int = 0) -> None:
+    """Replace one SAE encoder FCLayer with GCNConv + the same BN/ReLU/Dropout tail."""
+    import torch.nn as nn
+    from torch_geometric.nn import GCNConv
+
+    enc_idx = layer_idx * 2
+    fc_layer = sae.layers[enc_idx]
+    if fc_layer is None:
+        raise ValueError(f"encoder layer {layer_idx} is missing")
+
+    post_modules = [
+        module for module in fc_layer._fclayer if not isinstance(module, nn.Linear)
+    ]
+
+    class GCNEncoderLayer(nn.Module):
+        """GCNConv drop-in replacement for SpatialMETA's encoder FCLayer."""
+
+        def __init__(self, fc, edge_index_, num_nodes, post):
+            super().__init__()
+            self.in_dim = fc.in_dim
+            self.out_dim = fc.out_dim
+            self.device = fc.device
+            self.num_nodes = num_nodes
+            self.register_buffer("edge_index", edge_index_)
+            self.gcn = GCNConv(self.in_dim, self.out_dim, bias=True)
+            self.post = post
+            self._batch_node_idx = None
+
+        def set_batch_node_idx(self, node_idx):
+            self._batch_node_idx = node_idx
+
+        def _gcn_edge_index(self, x):
+            if x.size(0) == self.num_nodes:
+                return self.edge_index
+            if self._batch_node_idx is None:
+                raise RuntimeError(
+                    "GCN mini-batch requires node indices; use n_per_batch=n_obs "
+                    "or patch_model_encode_for_gcn()."
+                )
+            from torch_geometric.utils import subgraph
+
+            node_idx = self._batch_node_idx.to(x.device)
+            sub_edge_index, _ = subgraph(
+                node_idx,
+                self.edge_index,
+                relabel_nodes=True,
+                num_nodes=self.num_nodes,
+            )
+            return sub_edge_index
+
+        def forward(self, x, cat_list=None):
+            if cat_list is not None:
+                raise NotImplementedError(
+                    "GCN encoder replacement does not support categorical inputs."
+                )
+            return self.post(self.gcn(x, self._gcn_edge_index(x)))
+
+        def to(self, device):
+            super().to(device)
+            self.device = device
+            return self
+
+    sae.layers[enc_idx] = GCNEncoderLayer(
+        fc_layer,
+        edge_index,
+        num_nodes=edge_index.max().item() + 1,
+        post=nn.Sequential(*post_modules),
+    )
+
+
+def patch_model_encode_for_gcn(model) -> None:
+    """Track mini-batch node indices so GCN encoder layers can build subgraphs."""
+    import torch
+
+    def _set_gcn_batch_indices(node_idx):
+        for encoder in (model.encoder_ST, model.encoder_SM):
+            layer = encoder.layers[0]
+            if hasattr(layer, "set_batch_node_idx"):
+                layer.set_batch_node_idx(
+                    None if node_idx is None else torch.as_tensor(node_idx, dtype=torch.long)
+                )
+
+    _orig_forward = model.forward
+
+    def forward_with_gcn_indices(X, batch_index=None, reduction="sum"):
+        if X.size(0) < model._n_record:
+            _set_gcn_batch_indices(model._current_batch_indices)
+        else:
+            _set_gcn_batch_indices(None)
+        return _orig_forward(X, batch_index=batch_index, reduction=reduction)
+
+    model.forward = forward_with_gcn_indices
+
+    _orig_as_dataloader = model.as_dataloader
+
+    def as_dataloader_with_index_tracking(*args, **kwargs):
+        for batch in _orig_as_dataloader(*args, **kwargs):
+            model._current_batch_indices = batch[0].cpu().numpy()
+            yield batch
+
+    model.as_dataloader = as_dataloader_with_index_tracking
+
+
 #%% load data
 #joint_adata = load_joint_adata()
 
@@ -140,10 +264,28 @@ model = smt.model.ConditionalVAESTSM(
     reconstruction_method_st='zinb',
 )
 
+graph_conv = True
+
+if graph_conv:
+    if "spatial" not in joint_adata.obsm:
+        joint_adata.obsm["spatial"] = joint_mudata.mod["rna"].obsm["spatial"].copy()
+
+    edge_index = build_spatial_edge_index(
+        joint_adata.obsm["spatial"],
+        n_neighbors=6,
+        device=str(model.device),
+    )
+    # SAE.layers = ModuleList([FCLayer(in->128), None]) for encode_only stacks=[128]
+    replace_fc_encoder_with_gcn(model.encoder_ST, edge_index, layer_idx=0)
+    replace_fc_encoder_with_gcn(model.encoder_SM, edge_index, layer_idx=0)
+    patch_model_encode_for_gcn(model)
+    model.to(model.device)
+
 loss_dict = model.fit(
-    max_epoch=250,
+    max_epoch=50,
     lr=1e-3,
-    mode='single'
+    mode='single',
+    n_per_batch=joint_adata.n_obs if graph_conv else 128,
 )
 
 # %%

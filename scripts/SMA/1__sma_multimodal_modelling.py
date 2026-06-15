@@ -28,6 +28,16 @@ from adjustText import adjust_text
 from matplotlib import pyplot as plt
 
 from load_aligned_mudata import load_sample
+from sma_fusion import (
+    concat_modalities_keep_obs_var,
+    load_fmp10_dhb_fused_mudata,
+    load_fmp10_nineaa_fused_mudata,
+    load_fmp10_partner_fused_mudata,
+    prep_fusion_modality,
+    raw_barcode,
+    split_msi_by_source,
+    tic_pseudocounts,
+)
 
 # %%
 kwargs = {"frameon": False, "size": 1.5, "img_key": "lowres"}
@@ -68,130 +78,50 @@ SAMPLES = {
 }
 
 
-def raw_barcode(obs_name: str) -> str:
-    barcode = str(obs_name).split(":", 1)[-1]
-    return re.sub(r"(-\d+)[_.]\d+$", r"\1", barcode)
-
-
-def prep_fusion_modality(adata: ad.AnnData, source: str, sample_id: str) -> ad.AnnData:
-    out = adata.copy()
-    out.obs["source"] = source
-    out.obs["source_sample_id"] = sample_id
-    out.obs["raw_barcode"] = [raw_barcode(obs_name) for obs_name in out.obs_names]
-
-    # Keep FMP-10 and DHB rows distinct after concatenation.
-    out.obs_names = [f"{source}:{barcode}" for barcode in out.obs["raw_barcode"]]
-    return out
-
-
-def _combine_var_tables(inputs: dict[str, ad.AnnData], var_names: pd.Index) -> pd.DataFrame:
-    """Restore var annotations after AnnData concatenation.
-
-    anndata.concat drops var columns unless told how to merge them. Here we keep
-    all columns and add the source(s) each feature was observed in.
-    """
-    frames = []
-    for source, adata in inputs.items():
-        var = adata.var.copy()
-        var["feature_sources"] = source
-        frames.append(var)
-
-    var = pd.concat(frames, axis=0, sort=False)
-    if var.index.has_duplicates:
-        feature_sources = var.groupby(level=0)["feature_sources"].agg(
-            lambda values: ";".join(sorted(pd.unique(values.astype(str))))
-        )
-        var = var.drop(columns="feature_sources").groupby(level=0).first()
-        var["feature_sources"] = feature_sources
-
-    return var.reindex(var_names)
-
-
-def concat_modalities_keep_obs_var(inputs: dict[str, ad.AnnData]) -> ad.AnnData:
-    out = ad.concat(
-        inputs,
-        label="source_batch",
-        index_unique=None,
-        join="outer",
-        merge="same",
-        uns_merge="same",
-    )
-    out.var = _combine_var_tables(inputs, out.var_names)
-    return out
-
-
-def load_fmp10_partner_fused_mudata(
-    fmp10_sample_id: str = "V11L12-109_B1",
-    partner_sample_id: str = "V11L12-038_B1",
-    partner_source: str = "dhb",
-    export_dir: Path = H5MU_EXPORT,
-    write: bool = False,
-) -> mu.MuData:
-    fmp10 = load_sample(fmp10_sample_id, export_dir=export_dir)
-    partner = load_sample(partner_sample_id, export_dir=export_dir)
-
-    rna_inputs = {
-        "fmp10": prep_fusion_modality(fmp10.mod["rna"], "fmp10", fmp10_sample_id),
-        partner_source: prep_fusion_modality(
-            partner.mod["rna"], partner_source, partner_sample_id
-        ),
-    }
-    msi_inputs = {
-        "fmp10": prep_fusion_modality(fmp10.mod["msi"], "fmp10", fmp10_sample_id),
-        partner_source: prep_fusion_modality(
-            partner.mod["msi"], partner_source, partner_sample_id
-        ),
-    }
-
-    mdata = mu.MuData(
-        {
-            "rna": concat_modalities_keep_obs_var(rna_inputs),
-            "msi": concat_modalities_keep_obs_var(msi_inputs),
-        }
-    )
-    mdata.update()
-
-    if write:
-        out_path = export_dir / (
-            f"{fmp10_sample_id}__{partner_sample_id}.fmp10_{partner_source}_concat.h5mu"
-        )
-        mdata.write(out_path)
-
-    return mdata
-
-
-def load_fmp10_dhb_fused_mudata(
-    fmp10_sample_id: str = "V11L12-109_B1",
-    dhb_sample_id: str = "V11L12-038_B1",
-    export_dir: Path = H5MU_EXPORT,
-    write: bool = False,
-) -> mu.MuData:
-    return load_fmp10_partner_fused_mudata(
-        fmp10_sample_id=fmp10_sample_id,
-        partner_sample_id=dhb_sample_id,
-        partner_source="dhb",
-        export_dir=export_dir,
-        write=write,
-    )
-
-
-def load_fmp10_nineaa_fused_mudata(
-    fmp10_sample_id: str = "V11L12-109_B1",
-    nineaa_sample_id: str = "V11L12-038_D1",
-    export_dir: Path = H5MU_EXPORT,
-    write: bool = False,
-) -> mu.MuData:
-    return load_fmp10_partner_fused_mudata(
-        fmp10_sample_id=fmp10_sample_id,
-        partner_sample_id=nineaa_sample_id,
-        partner_source="nineaa",
-        export_dir=export_dir,
-        write=write,
-    )
-
-
 def _dense_X(adata: ad.AnnData) -> np.ndarray:
     return adata.X.toarray() if hasattr(adata.X, "toarray") else np.asarray(adata.X)
+
+
+def batch_correct_rna_harmony(
+    mdata: mu.MuData,
+    mod: str = "rna",
+    batch_key: str = "source_batch",
+    n_top_genes: int = N_TOP_RNA,
+    theta: float = 10.0,
+    max_iter_harmony: int = 20,
+    plot: bool = True,
+) -> ad.AnnData:
+    """Normalize, PCA, Harmony-correct fused RNA; build neighbors/UMAP on X_pca_harmony."""
+    import harmonypy as hm
+
+    adata = mdata[mod].copy()
+
+    sc.pp.normalize_total(adata)
+    sc.pp.log1p(adata)
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_top_genes)
+    sc.pp.scale(adata, max_value=10)
+    sc.pp.pca(adata)
+
+    harmony_out = hm.run_harmony(
+        adata.obsm["X_pca"],
+        adata.obs,
+        batch_key,
+        theta=theta,
+        max_iter_harmony=max_iter_harmony,
+    )
+    adata.obsm["X_pca_harmony"] = harmony_out.Z_corr.T
+
+    sc.pp.neighbors(adata, use_rep="X_pca_harmony")
+    sc.tl.umap(adata)
+
+    mdata[mod] = adata
+    mdata.update()
+
+    if plot:
+        sc.pl.umap(adata, color=batch_key, show=False)
+        show_figure()
+
+    return adata
 
 
 def dopamine_correlations_in_intact_striatum(mdata: mu.MuData) -> pd.Series:
@@ -222,6 +152,12 @@ fused_mdata
 # %%
 fused_nineaa_mdata = load_fmp10_nineaa_fused_mudata()
 fused_nineaa_mdata
+
+# %%
+batch_correct_rna_harmony(fused_mdata)
+
+# %%
+batch_correct_rna_harmony(fused_nineaa_mdata)
 
 # %%
 spear_dopamine_series = dopamine_correlations_in_intact_striatum(fused_mdata)
@@ -481,6 +417,76 @@ def process_sample(sample_id: str, cfg: dict, metalinks: pd.DataFrame) -> dict:
 # %%
 metalinks = load_metalinks()
 metalinks.head()
+
+# %% [markdown]
+# ## scGLUE feature-level integration of the disjoint MSI matrices
+#
+# Aligns the two MALDI matrices as separate modalities using a metalinks guidance graph,
+# over a 2x2 grid: {paired, unpaired} x {rna_anchored, metabolite_only}. Paired restricts
+# to the shared Visium array barcodes and matches cells across modalities by obs name.
+# Needs `fused_mdata` and `metalinks` (defined above).
+#
+# KNOWN ISSUE: scGLUE training currently hangs/crawls in this environment (its graph
+# dataloader deadlocks with workers, and is CPU-bound without them) -- run_glue() has not
+# been confirmed end-to-end. See the detailed note in sma_glue.py. Everything up to the fit
+# (guidance graph, configure_dataset) is validated. The MultiVI route
+# (2__sma_metabolite_multivi.py) is fully working as the alternative.
+
+# %%
+import sma_glue
+
+
+def build_glue_modalities(mode: str, paired: bool) -> tuple[dict, dict]:
+    """Per-source MSI (+ RNA when rna_anchored) modalities ready for fit_SCGLUE."""
+    msi_by_source = split_msi_by_source(fused_mdata)
+    if paired:
+        shared = set.intersection(*(set(a.obs_names) for a in msi_by_source.values()))
+        msi_by_source = {s: a[sorted(shared)].copy() for s, a in msi_by_source.items()}
+
+    modalities = {
+        f"msi_{s}": sma_glue.prep_glue_modality(a, "ZILN", paired)
+        for s, a in msi_by_source.items()
+    }
+    if mode == "rna_anchored":
+        rna = fused_mdata["rna"]
+        rna = rna[:, rna.var["feature_sources"].astype(str).str.contains(";")].copy()
+        rna.obs_names = rna.obs["raw_barcode"].astype(str).values
+        if paired:
+            rna = rna[sorted(shared)].copy()
+        modalities["rna"] = sma_glue.prep_glue_modality(rna, "NB", paired)
+    return modalities, msi_by_source
+
+
+def run_glue_grid(max_epochs: int | None = None) -> dict:
+    out = {}
+    for mode in ("rna_anchored", "metabolite_only"):
+        for paired in (True, False):
+            tag = f"{mode}__{'paired' if paired else 'unpaired'}"
+            print(f"\n=== scGLUE {tag} ===")
+            modalities, msi_by_source = build_glue_modalities(mode, paired)
+            graph = sma_glue.build_guidance_graph(
+                modalities, msi_by_source, metalinks, mode
+            )
+            print(f"  guidance edges: {graph.number_of_edges()} nodes: {graph.number_of_nodes()}")
+            out[tag] = sma_glue.run_glue(modalities, graph, paired, max_epochs=max_epochs)
+            print(f"  integration consistency: {out[tag]['consistency']}")
+    return out
+
+
+glue_results = run_glue_grid()
+
+# %% scGLUE integration UMAPs (joint latent, coloured by source modality)
+for tag, res in glue_results.items():
+    latents = res["latents"]
+    joint = ad.AnnData(X=np.concatenate(list(latents.values()), axis=0))
+    joint.obs["modality"] = np.repeat(
+        list(latents), [lat.shape[0] for lat in latents.values()]
+    )
+    joint.obsm["X_glue"] = joint.X
+    sc.pp.neighbors(joint, use_rep="X_glue")
+    sc.tl.umap(joint)
+    sc.pl.umap(joint, color="modality", title=tag, show=False)
+    show_figure()
 
 # %% V11L12-038 B1 (DHB lipids) and D1 (9-AA metabolites)
 

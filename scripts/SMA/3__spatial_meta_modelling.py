@@ -90,9 +90,9 @@ _assert_identical(rna_spatial, msi_spatial)
 joint_adata.uns["spatial"] = rna_spatial
 joint_adata.var = joint_adata.var.merge(joint_mudata.mod["msi"].var[['annotation']], left_on='feature_id', right_index=True, how='left')
 
-# %% remove HSP, MT, RPL, DNAJ features
+# %% identify spatially highly variable genes and metabolites
 
-joint_adata = smt.pp.removeHSP_MT_RPL_DNAJ(joint_adata)
+joint_adata = smt.pp.removeHSP_MT_RPL_DNAJ(joint_adata) # remove HSP, MT, RPL, DNAJ features
 joint_adata.layers["counts"] = joint_adata.X.copy()
 
 smt.pp.normalize_total_joint_adata_sm_st(
@@ -124,6 +124,15 @@ smt.pp.normalize_total_joint_adata_sm_st( # again?
     target_sum_ST=None
 )
 
+sm_mask = joint_adata.var["type"].eq("SM").to_numpy()
+joint_adata.X[:, sm_mask] = np.log1p(joint_adata.X[:, sm_mask])
+
+# Optional: preserves zeros, unlike zero_center=True
+sm = joint_adata[:, sm_mask].copy()
+sc.pp.scale(sm, zero_center=False, max_value=10)
+joint_adata.X[:, sm_mask] = sm.X
+
+# %%
 model = smt.model.ConditionalVAESTSM(
     joint_adata,
     device='cuda:0',
@@ -131,15 +140,14 @@ model = smt.model.ConditionalVAESTSM(
     reconstruction_method_st='zinb',
 )
 
-# %%
-
 loss_dict = model.fit(
-    max_epoch=64,
+    max_epoch=250,
     lr=1e-3,
     mode='single'
 )
 
 # %%
+# CAPTION: Training loss curves for SpatialMETA (ConditionalVAESTSM) over 200 epochs. Each panel shows one tracked loss term (ST/SM reconstruction, correlation branches, KL, MMD). Use to assess convergence and balance between transcriptomics and metabolomics objectives.
 
 fig,axes=plt.subplots(3,3,figsize=(20,10))
 axes=axes.flatten()
@@ -172,9 +180,8 @@ sc.tl.leiden(
 )
 
 # %%
-# To resume after model training, uncomment:
-# joint_adata = sc.read_h5ad(JOINT_SPATIALMETA_PATH)
-# %%
+# CAPTION: UMAP of the joint ST+SM latent embedding (10-dim VAE, Leiden clusters). Colors: VAE clusters, tissue region, lesion status, and Dopamine (MSI). Shows how anatomy and pathology align with the integrated representation.
+
 sc.pl.umap(
     joint_adata,
     color=["VAE_clusters_latent10", "region", "lesion", "msi:Dopamine"],
@@ -183,6 +190,8 @@ sc.pl.umap(
     wspace=0.3,
     color_map="Reds"
 )
+
+# CAPTION: Spatial maps of VAE clusters, region, lesion, and Dopamine on the H&E image. Same variables as UMAP, projected onto aligned Visium coordinates.
 
 sc.pl.spatial(
     joint_adata,
@@ -193,6 +202,8 @@ sc.pl.spatial(
     ncols=2,
 )
 
+# CAPTION: Observed (normalized) spatial expression of striatal markers Pcp4 and Tac1 (RNA) and Dopamine (MSI) before model reconstruction.
+
 sc.pl.spatial(joint_adata,
               img_key="hires",
               color_map = "vlag",
@@ -202,6 +213,8 @@ sc.pl.spatial(joint_adata,
               wspace=0.005,
               show=False)
 
+# CAPTION: SpatialMETA model reconstruction of Pcp4, Tac1, and Dopamine. Compare with normalized layer to judge reconstruction fidelity and spatial detail retention.
+
 sc.pl.spatial(joint_adata,
               img_key="hires",
               color_map = "vlag",
@@ -210,6 +223,8 @@ sc.pl.spatial(joint_adata,
               size=0.075,
               wspace=0.005,
               show=False)
+
+# CAPTION: Per-spot modality contribution to the joint embedding (teal = ST/transcriptomics, orange = SM/metabolomics). Highlights regions driven more by RNA or MSI signal.
 
 sc.pl.spatial(
     joint_adata,
@@ -228,6 +243,8 @@ obs_filter_df = pd.concat([
     obs_df[['VAE_clusters_latent10', 'contribution_st']].rename(columns={'contribution_st': 'contribution'}).assign(type='st'),
     obs_df[['VAE_clusters_latent10', 'contribution_sm']].rename(columns={'contribution_sm': 'contribution'}).assign(type='sm')
 ])
+
+# CAPTION: Split violin plots of ST vs SM modality contribution within each VAE cluster. Shows whether clusters are RNA-dominated, MSI-dominated, or mixed.
 
 fig,ax = smt.pl.create_fig(
     figsize = (12,4)

@@ -326,7 +326,8 @@ def spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False):
         replace_fc_encoder_with_gcn(model.encoder_SM, edge_index, num_nodes, layer_idx=0)
         patch_model_encode_for_gcn(model)
         model.to(model.device)
-        return model
+
+    return model
 
 teacher_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=True)
 student_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False)
@@ -337,33 +338,119 @@ import torch.optim as optim
 
 student_optimizer = optim.Adam(student_model.parameters(), lr=1e-3)
 
-def jepa_distillation_train(H_teacher, student_model, teacher_dataloader, epochs=250, lr=1e-3):
-    for batch in teacher_dataloader:
-        H_student, _, _ = student_model.encode(batch)
-        distil_loss = torch.nn.functional.mse_loss(H_student, H_teacher)
-        distil_loss.backward()
-        student_optimizer.step()
-        student_optimizer.zero_grad()
+DISTILL_TARGETS = (
+    (("q_mu",), 1.0),
+    (("st", "q_mu"), 0.5),
+    (("sm", "q_mu"), 0.5),
+)
 
-def detach_H(H, keys=("z", "q_mu", "q_var")):
+
+def get_expression_batch(model, indices):
+    """Fetch a model input batch by original observation indices."""
+    from scipy.sparse import issparse
+
+    indices = torch.as_tensor(indices, dtype=torch.long).detach().cpu()
+    indices_np = indices.numpy()
+    if issparse(model.X):
+        X_batch = model.X[indices_np].toarray()
+    else:
+        X_batch = model.X[indices_np]
+    return torch.as_tensor(np.asarray(X_batch), dtype=torch.float32, device=model.device)
+
+
+def encode_indices(model, indices):
+    """Encode the same observations used by the teacher batch."""
+    indices = torch.as_tensor(indices, dtype=torch.long).detach().cpu()
+    had_current_indices = hasattr(model, "_current_batch_indices")
+    old_current_indices = getattr(model, "_current_batch_indices", None)
+    model._current_batch_indices = indices
+    try:
+        X_batch = get_expression_batch(model, indices)
+        return model.encode(X_batch)
+    finally:
+        if had_current_indices:
+            model._current_batch_indices = old_current_indices
+        else:
+            delattr(model, "_current_batch_indices")
+
+
+def get_nested(mapping, path):
+    value = mapping
+    for key in path:
+        value = value[key]
+    return value
+
+
+def h_distillation_loss(H_student, H_teacher, targets=DISTILL_TARGETS):
+    loss = None
+    for path, weight in targets:
+        student_value = get_nested(H_student, path)
+        teacher_value = get_nested(H_teacher, path).to(student_value.device)
+        term = weight * torch.nn.functional.mse_loss(student_value, teacher_value)
+        loss = term if loss is None else loss + term
+    return loss
+
+
+def jepa_distillation_step(H_teacher, student_model, indices, optimizer):
+    student_model.train()
+    H_student = encode_indices(student_model, indices)
+    distil_loss = h_distillation_loss(H_student, H_teacher)
+    optimizer.zero_grad(set_to_none=True)
+    distil_loss.backward()
+    optimizer.step()
+    return float(distil_loss.detach().cpu())
+
+
+def detach_H(H, keys=("q_mu",), nested_keys=("q_mu",), device=None):
+    def detach_tensor(x):
+        x = x.detach()
+        return x if device is None else x.to(device)
+
     out = {}
     for k, v in H.items():
         if k in ("st", "sm"):
-            out[k] = {sk: sv.detach() for sk, sv in v.items()}
+            out[k] = {
+                sk: detach_tensor(sv)
+                for sk, sv in v.items()
+                if sk in nested_keys and torch.is_tensor(sv)
+            }
         elif k in keys and torch.is_tensor(v):
-            out[k] = v.detach()
+            out[k] = detach_tensor(v)
     return out
 
-epoch_H, batch_H = [], []
+epoch_H, batch_H, current_epoch_H, student_distill_loss = [], [], [], []
 
 def capture_hook(module, inputs, outputs):
     H, Rs, L = outputs
-    batch_H.append(detach_H(H))
+    indices = getattr(module, "_current_batch_indices", None)
+    if indices is None:
+        raise RuntimeError(
+            "Teacher batch indices were not available in the forward hook. "
+            "Make sure patch_model_encode_for_gcn(teacher_model) has been applied."
+        )
+
+    indices = indices.detach().cpu().clone()
+    H_teacher = detach_H(H)
+    distil_loss = jepa_distillation_step(
+        H_teacher,
+        student_model,
+        indices,
+        student_optimizer,
+    )
+
+    batch_record = dict(
+        indices=indices,
+        H=detach_H(H, device="cpu"),
+        student_distill_loss=distil_loss,
+    )
+    batch_H.append(batch_record)
+    current_epoch_H.append(batch_record)
+    student_distill_loss.append(distil_loss)
 
     # epoch boundary: count batches (shuffle=True → order varies, but epoch = 1 full pass)
-    if len(batch_H) % batches_per_epoch == 0:
-        epoch_H.append(batch_H[-batches_per_epoch:])
-        jepa_distillation_train(epoch_H[-1], student_model, teacher_model.as_dataloader(batch_size=n_per_batch, shuffle=True))  # your secondary trainer
+    if len(current_epoch_H) == batches_per_epoch:
+        epoch_H.append(current_epoch_H.copy())
+        current_epoch_H.clear()
 
 n_per_batch = 128
 
@@ -390,29 +477,43 @@ for ax,(k,v) in zip(axes, loss_dict.items()):
     ax.plot(v)
     ax.set_title(k)
 
-Z = model.get_latent_embedding()
-X = model.get_normalized_expression()
-C = model.get_modality_contribution()
+def process_latent_embedding(domain):
 
-joint_adata.layers['reconstruction'] = X
-joint_adata.obsm['X_emb']=Z
-joint_adata.obs['contribution_st']=C
-joint_adata.obs['contribution_sm']=1-C
+    embedding_model = teacher_model if domain == "teacher" else student_model
 
-sc.pp.neighbors(
-    joint_adata,
-    use_rep="X_emb",
-    n_neighbors=15
-)
-sc.tl.umap(
-    joint_adata,
-    min_dist=1,
-    spread=1
-)
-sc.tl.leiden(
-    joint_adata,
-    key_added="VAE_clusters_latent10"
-)
+    Z = embedding_model.get_latent_embedding()
+    X = embedding_model.get_normalized_expression()
+    C = embedding_model.get_modality_contribution()
+
+    joint_adata.layers[f'{domain}_reconstruction'] = X
+    joint_adata.obsm[f'{domain}_X_emb']=Z
+    joint_adata.obs[f'{domain}_contribution_st']=C
+    joint_adata.obs[f'{domain}_contribution_sm']=1-C
+
+    neighbors_key = f"{domain}_neighbors"
+    umap_key = f"{domain}_umap"
+
+    sc.pp.neighbors(
+        joint_adata,
+        use_rep=f"{domain}_X_emb",
+        n_neighbors=15,
+        key_added=neighbors_key,
+    )
+    sc.tl.umap(
+        joint_adata,
+        min_dist=1,
+        spread=1,
+        neighbors_key=neighbors_key,
+    )
+    joint_adata.obsm[umap_key] = joint_adata.obsm["X_umap"].copy()
+    sc.tl.leiden(
+        joint_adata,
+        key_added=f"{domain}_VAE_clusters_latent10",
+        neighbors_key=neighbors_key,
+    )
+
+process_latent_embedding("teacher")
+process_latent_embedding("student")
 
 # %%
 # CAPTION: UMAP of the joint ST+SM latent embedding (10-dim VAE, Leiden clusters). Colors: VAE clusters, tissue region, lesion status, and Dopamine (MSI). Shows how anatomy and pathology align with the integrated representation.

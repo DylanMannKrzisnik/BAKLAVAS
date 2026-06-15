@@ -5,6 +5,7 @@ load_dotenv(dotenv_path="/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA/.env")
 import subprocess
 from pathlib import Path
 import os
+import numpy as np
 import spatialmeta as smt
 import pandas as pd
 import scanpy as sc
@@ -31,14 +32,28 @@ def load_joint_adata(path: Path = JOINT_RAW_PATH):
         )
     return smt.util._classes.AnnDataJointSMST(sc.read_h5ad(path))
 
+def _assert_identical(a, b, path="uns['spatial']"):
+    assert type(a) is type(b), f"{path}: type mismatch ({type(a)} vs {type(b)})"
+    if isinstance(a, dict):
+        assert a.keys() == b.keys(), f"{path}: keys differ"
+        for key in a:
+            _assert_identical(a[key], b[key], f"{path}[{key!r}]")
+    elif isinstance(a, np.ndarray):
+        np.testing.assert_array_equal(a, b, err_msg=path)
+    else:
+        assert a == b, f"{path}: values differ"
+
 
 #%% load data
 #joint_adata = load_joint_adata()
 
 import muon as mu
+import sys
+sys.path.insert(0, os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
+from load_aligned_mudata import load_sample
 
 sample_id = "V11L12-109_B1"
-joint_mudata = mu.read_h5mu(os.path.join(BAKLAVA_BASE, "data", "vicari_2023", "h5mu_export", f"{sample_id}.h5mu"))
+joint_mudata = load_sample(sample_id, export_dir=Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "h5mu_export")))
 
 # Keep only observations/cells/spots shared across modalities
 mu.pp.intersect_obs(joint_mudata)
@@ -50,8 +65,12 @@ msi = joint_mudata.mod["msi"]   # change to your key, e.g. "SM"
 rna = rna.copy()
 msi = msi.copy()
 
+annotations = msi.var["annotation"].astype("string")
+has_annotation = annotations.notna() & annotations.str.strip().ne("")
+feature_ids = msi.var["feature_id"].astype("string") if "feature_id" in msi.var.columns else msi.var.index.astype("string")
+msi_var_names = annotations.where(has_annotation, feature_ids)
+msi.var_names = ["msi:" + str(v) for v in msi_var_names]
 rna.var_names = ["rna:" + str(v) for v in rna.var_names]
-msi.var_names = ["msi:" + str(v) for v in msi.var_names]
 
 # Concatenate features into one AnnData
 adata = sc.concat(
@@ -63,6 +82,13 @@ adata = sc.concat(
 )
 
 joint_adata = smt.util._classes.AnnDataJointSMST(adata)
+
+rna_spatial = joint_mudata.mod["rna"].uns["spatial"]
+msi_spatial = joint_mudata.mod["msi"].uns["spatial"]
+_assert_identical(rna_spatial, msi_spatial)
+
+joint_adata.uns["spatial"] = rna_spatial
+joint_adata.var = joint_adata.var.merge(joint_mudata.mod["msi"].var[['annotation']], left_on='feature_id', right_index=True, how='left')
 
 # %% remove HSP, MT, RPL, DNAJ features
 
@@ -158,21 +184,26 @@ sc.pl.spatial(
     joint_adata,
     img_key="hires",
     color=["VAE_clusters_latent10"],
+    size=0.075,
     show=False
 )
 
 sc.pl.spatial(joint_adata,
               img_key="hires",
               color_map = "vlag",
-              color=["CD8A","137.04580812911064"],
+              color=["rna:Pcp4", "rna:Tac1", "msi:Dopamine"],
               layer="normalized",
+              size=0.075,
+              wspace=0.005,
               show=False)
 
 sc.pl.spatial(joint_adata,
               img_key="hires",
               color_map = "vlag",
-              color=["CD8A","137.04580812911064"],
+              color=["rna:Pcp4", "rna:Tac1", "msi:Dopamine"],
               layer="reconstruction",
+              size=0.075,
+              wspace=0.005,
               show=False)
 
 sc.pl.spatial(
@@ -181,9 +212,10 @@ sc.pl.spatial(
     color_map = smt.pl.make_colormap(['#2ec4b6','#ffffff','#ff9f1c' ]),
     color=['contribution_st','contribution_sm'],
     layer="normalized",
+    wspace=0.005,
     show=False,
     alpha_img=0.1,
-    size=1.5
+    size=0.075
 )
 
 obs_df = joint_adata.obs
@@ -191,6 +223,7 @@ obs_filter_df = pd.concat([
     obs_df[['VAE_clusters_latent10', 'contribution_st']].rename(columns={'contribution_st': 'contribution'}).assign(type='st'),
     obs_df[['VAE_clusters_latent10', 'contribution_sm']].rename(columns={'contribution_sm': 'contribution'}).assign(type='sm')
 ])
+
 fig,ax = smt.pl.create_fig(
     figsize = (12,4)
 )

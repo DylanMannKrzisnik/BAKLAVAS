@@ -294,45 +294,92 @@ sc.pp.scale(sm, zero_center=False, max_value=10)
 joint_adata.X[:, sm_mask] = sm.X
 
 # %%
-model = smt.model.ConditionalVAESTSM(
-    joint_adata,
-    device='cuda:0',
-    reconstruction_method_sm='g',
-    reconstruction_method_st='zinb',
-)
 
-graph_conv = True
-full_graph = False
+def spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False):
 
-if graph_conv:
-    if "spatial" not in joint_adata.obsm:
-        joint_adata.obsm["spatial"] = joint_mudata.mod["rna"].obsm["spatial"].copy()
+    model = smt.model.ConditionalVAESTSM(
+        joint_adata,
+        device='cuda:0',
+        reconstruction_method_sm='g',
+        reconstruction_method_st='zinb',
+    )
 
-    if full_graph:
-        edge_index = build_spatial_edge_index(
-            joint_adata.obsm["spatial"],
-            n_neighbors=6,
-            device=str(model.device),
-        )
-    else:
-        edge_index = build_identity_edge_index(
-            joint_adata.n_obs,
-            device=str(model.device),
-        )
+    if graph_conv:
+        if "spatial" not in joint_adata.obsm:
+            joint_adata.obsm["spatial"] = joint_mudata.mod["rna"].obsm["spatial"].copy()
 
-    # SAE.layers = ModuleList([FCLayer(in->128), None]) for encode_only stacks=[128]
-    num_nodes = joint_adata.n_obs
-    replace_fc_encoder_with_gcn(model.encoder_ST, edge_index, num_nodes, layer_idx=0)
-    replace_fc_encoder_with_gcn(model.encoder_SM, edge_index, num_nodes, layer_idx=0)
-    patch_model_encode_for_gcn(model)
-    model.to(model.device)
+        if full_graph:
+            edge_index = build_spatial_edge_index(
+                joint_adata.obsm["spatial"],
+                n_neighbors=6,
+                device=str(model.device),
+            )
+        else:
+            edge_index = build_identity_edge_index(
+                joint_adata.n_obs,
+                device=str(model.device),
+            )
 
-loss_dict = model.fit(
-    max_epoch=250,
-    lr=1e-3,
-    mode='single',
-    n_per_batch=128, #num_nodes if graph_conv else 128,
-)
+        # SAE.layers = ModuleList([FCLayer(in->128), None]) for encode_only stacks=[128]
+        num_nodes = joint_adata.n_obs
+        replace_fc_encoder_with_gcn(model.encoder_ST, edge_index, num_nodes, layer_idx=0)
+        replace_fc_encoder_with_gcn(model.encoder_SM, edge_index, num_nodes, layer_idx=0)
+        patch_model_encode_for_gcn(model)
+        model.to(model.device)
+        return model
+
+teacher_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=True)
+student_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False)
+nonspatial_model = spatialJEPA_model(joint_adata, graph_conv=False, full_graph=False)
+
+import torch
+import torch.optim as optim
+
+student_optimizer = optim.Adam(student_model.parameters(), lr=1e-3)
+
+def jepa_distillation_train(H_teacher, student_model, teacher_dataloader, epochs=250, lr=1e-3):
+    for batch in teacher_dataloader:
+        H_student, _, _ = student_model.encode(batch)
+        distil_loss = torch.nn.functional.mse_loss(H_student, H_teacher)
+        distil_loss.backward()
+        student_optimizer.step()
+        student_optimizer.zero_grad()
+
+def detach_H(H, keys=("z", "q_mu", "q_var")):
+    out = {}
+    for k, v in H.items():
+        if k in ("st", "sm"):
+            out[k] = {sk: sv.detach() for sk, sv in v.items()}
+        elif k in keys and torch.is_tensor(v):
+            out[k] = v.detach()
+    return out
+
+epoch_H, batch_H = [], []
+
+def capture_hook(module, inputs, outputs):
+    H, Rs, L = outputs
+    batch_H.append(detach_H(H))
+
+    # epoch boundary: count batches (shuffle=True → order varies, but epoch = 1 full pass)
+    if len(batch_H) % batches_per_epoch == 0:
+        epoch_H.append(batch_H[-batches_per_epoch:])
+        jepa_distillation_train(epoch_H[-1], student_model, teacher_model.as_dataloader(batch_size=n_per_batch, shuffle=True))  # your secondary trainer
+
+n_per_batch = 128
+
+batches_per_epoch = len(teacher_model.as_dataloader(batch_size=n_per_batch, shuffle=True))
+handle = teacher_model.register_forward_hook(capture_hook)
+try:
+    loss_dict = teacher_model.fit(
+        max_epoch=250,
+        lr=1e-3,
+        mode='single',
+        n_per_batch=n_per_batch, #num_nodes if graph_conv else 128,
+    )
+finally:
+    handle.remove()
+
+
 
 # %%
 # CAPTION: Training loss curves for SpatialMETA (ConditionalVAESTSM) over 200 epochs. Each panel shows one tracked loss term (ST/SM reconstruction, correlation branches, KL, MMD). Use to assess convergence and balance between transcriptomics and metabolomics objectives.

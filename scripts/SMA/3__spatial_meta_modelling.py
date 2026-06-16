@@ -11,6 +11,8 @@ import pandas as pd
 import scanpy as sc
 import seaborn as sns
 import matplotlib.pyplot as plt
+import torch
+import torch.optim as optim
 
 BAKLAVA_BASE = Path(os.getenv("BAKLAVA_BASE_DIR"))
 DATA_DIR = BAKLAVA_BASE / "data" / "spatialmeta_tutorial"
@@ -204,6 +206,200 @@ def patch_model_encode_for_gcn(model) -> None:
 
     model.encode = encode_with_gcn_indices
 
+def spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False):
+
+    model = smt.model.ConditionalVAESTSM(
+        joint_adata,
+        device='cuda:0',
+        reconstruction_method_sm='g',
+        reconstruction_method_st='zinb',
+    )
+
+    if graph_conv:
+        if "spatial" not in joint_adata.obsm:
+            joint_adata.obsm["spatial"] = joint_mudata.mod["rna"].obsm["spatial"].copy()
+
+        if full_graph:
+            edge_index = build_spatial_edge_index(
+                joint_adata.obsm["spatial"],
+                n_neighbors=6,
+                device=str(model.device),
+            )
+        else:
+            edge_index = build_identity_edge_index(
+                joint_adata.n_obs,
+                device=str(model.device),
+            )
+
+        # SAE.layers = ModuleList([FCLayer(in->128), None]) for encode_only stacks=[128]
+        num_nodes = joint_adata.n_obs
+        replace_fc_encoder_with_gcn(model.encoder_ST, edge_index, num_nodes, layer_idx=0)
+        replace_fc_encoder_with_gcn(model.encoder_SM, edge_index, num_nodes, layer_idx=0)
+        patch_model_encode_for_gcn(model)
+        model.to(model.device)
+
+    return model
+
+class SpatialJEPA_trainer:
+    """Train a full-graph teacher while distilling its batch embeddings to a student."""
+
+    DISTILL_TARGETS = (
+        (("q_mu",), 1.0),
+        (("st", "q_mu"), 0.5),
+        (("sm", "q_mu"), 0.5),
+    )
+
+    def __init__(
+        self,
+        teacher_model,
+        student_model,
+        n_per_batch=128,
+        distill_targets=DISTILL_TARGETS,
+        student_lr=1e-3,
+        student_weight_decay=1e-4,
+        student_optimizer=None,
+    ):
+        self.teacher_model = teacher_model
+        self.student_model = student_model
+        self.n_per_batch = n_per_batch
+        self.distill_targets = distill_targets
+        self.student_optimizer = student_optimizer or optim.Adam(
+            self.student_model.parameters(),
+            lr=student_lr,
+            weight_decay=student_weight_decay,
+        )
+
+        self.batches_per_epoch = len(
+            self.teacher_model.as_dataloader(batch_size=n_per_batch, shuffle=True)
+        )
+        self.epoch_H = []
+        self.batch_H = []
+        self.current_epoch_H = []
+        self.student_distill_loss = []
+        self.epoch_student_distill_loss = []
+
+    def get_expression_batch(self, model, indices):
+        """Fetch a model input batch by original observation indices."""
+        from scipy.sparse import issparse
+
+        indices = torch.as_tensor(indices, dtype=torch.long).detach().cpu()
+        indices_np = indices.numpy()
+        if issparse(model.X):
+            X_batch = model.X[indices_np].toarray()
+        else:
+            X_batch = model.X[indices_np]
+        return torch.as_tensor(np.asarray(X_batch), dtype=torch.float32, device=model.device)
+
+    def encode_indices(self, model, indices):
+        """Encode the same observations used by the teacher batch."""
+        indices = torch.as_tensor(indices, dtype=torch.long).detach().cpu()
+        had_current_indices = hasattr(model, "_current_batch_indices")
+        old_current_indices = getattr(model, "_current_batch_indices", None)
+        model._current_batch_indices = indices
+        try:
+            X_batch = self.get_expression_batch(model, indices)
+            return model.encode(X_batch)
+        finally:
+            if had_current_indices:
+                model._current_batch_indices = old_current_indices
+            else:
+                delattr(model, "_current_batch_indices")
+
+    @staticmethod
+    def get_nested(mapping, path):
+        value = mapping
+        for key in path:
+            value = value[key]
+        return value
+
+    @staticmethod
+    def detach_H(H, keys=("q_mu",), nested_keys=("q_mu",), device=None):
+        def detach_tensor(x):
+            x = x.detach()
+            return x if device is None else x.to(device)
+
+        out = {}
+        for k, v in H.items():
+            if k in ("st", "sm"):
+                out[k] = {
+                    sk: detach_tensor(sv)
+                    for sk, sv in v.items()
+                    if sk in nested_keys and torch.is_tensor(sv)
+                }
+            elif k in keys and torch.is_tensor(v):
+                out[k] = detach_tensor(v)
+        return out
+
+    def h_distillation_loss(self, H_student, H_teacher):
+        loss = None
+        for path, weight in self.distill_targets:
+            student_value = self.get_nested(H_student, path)
+            teacher_value = self.get_nested(H_teacher, path).to(student_value.device)
+            term = weight * torch.nn.functional.mse_loss(student_value, teacher_value)
+            loss = term if loss is None else loss + term
+        return loss
+
+    def jepa_distillation_step(self, H_teacher, indices):
+        self.student_model.train()
+        H_student = self.encode_indices(self.student_model, indices)
+        distil_loss = self.h_distillation_loss(H_student, H_teacher)
+        self.student_optimizer.zero_grad(set_to_none=True)
+        distil_loss.backward()
+        self.student_optimizer.step()
+        return float(distil_loss.detach().cpu())
+
+    def capture_teacher_outputs(self, outputs):
+        H, Rs, L = outputs
+        indices = getattr(self.teacher_model, "_current_batch_indices", None)
+        if indices is None:
+            raise RuntimeError(
+                "Teacher batch indices were not available during distillation. "
+                "Make sure patch_model_encode_for_gcn(teacher_model) has been applied."
+            )
+
+        indices = indices.detach().cpu().clone()
+        H_teacher = self.detach_H(H)
+        distil_loss = self.jepa_distillation_step(H_teacher, indices)
+
+        batch_record = dict(
+            indices=indices,
+            H=self.detach_H(H, device="cpu"),
+            student_distill_loss=distil_loss,
+        )
+        self.batch_H.append(batch_record)
+        self.current_epoch_H.append(batch_record)
+        self.student_distill_loss.append(distil_loss)
+
+        if len(self.current_epoch_H) == self.batches_per_epoch:
+            self.epoch_H.append(self.current_epoch_H.copy())
+            self.epoch_student_distill_loss.append(
+                float(np.mean([
+                    record["student_distill_loss"]
+                    for record in self.current_epoch_H
+                ]))
+            )
+            self.current_epoch_H.clear()
+
+    def fit_teacher(self, **fit_kwargs):
+        teacher_forward = self.teacher_model.forward
+
+        def teacher_forward_with_distillation(*args, **kwargs):
+            outputs = teacher_forward(*args, **kwargs)
+            self.capture_teacher_outputs(outputs)
+            return outputs
+
+        self.teacher_model.forward = teacher_forward_with_distillation
+        try:
+            loss_dict = self.teacher_model.fit(
+                n_per_batch=self.n_per_batch,
+                **fit_kwargs,
+            )
+        finally:
+            self.teacher_model.forward = teacher_forward
+
+        loss_dict["epoch_student_distill_loss_list"] = self.epoch_student_distill_loss
+        return loss_dict
+
 
 #%% load data
 #joint_adata = load_joint_adata()
@@ -295,191 +491,29 @@ joint_adata.X[:, sm_mask] = sm.X
 
 # %%
 
-def spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False):
-
-    model = smt.model.ConditionalVAESTSM(
-        joint_adata,
-        device='cuda:0',
-        reconstruction_method_sm='g',
-        reconstruction_method_st='zinb',
-    )
-
-    if graph_conv:
-        if "spatial" not in joint_adata.obsm:
-            joint_adata.obsm["spatial"] = joint_mudata.mod["rna"].obsm["spatial"].copy()
-
-        if full_graph:
-            edge_index = build_spatial_edge_index(
-                joint_adata.obsm["spatial"],
-                n_neighbors=6,
-                device=str(model.device),
-            )
-        else:
-            edge_index = build_identity_edge_index(
-                joint_adata.n_obs,
-                device=str(model.device),
-            )
-
-        # SAE.layers = ModuleList([FCLayer(in->128), None]) for encode_only stacks=[128]
-        num_nodes = joint_adata.n_obs
-        replace_fc_encoder_with_gcn(model.encoder_ST, edge_index, num_nodes, layer_idx=0)
-        replace_fc_encoder_with_gcn(model.encoder_SM, edge_index, num_nodes, layer_idx=0)
-        patch_model_encode_for_gcn(model)
-        model.to(model.device)
-
-    return model
-
+# instantiate models
 teacher_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=True)
 student_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False)
-nonspatial_model = spatialJEPA_model(joint_adata, graph_conv=False, full_graph=False)
+#nonspatial_model = spatialJEPA_model(joint_adata, graph_conv=False, full_graph=False)
 
-import torch
-import torch.optim as optim
-
-student_optimizer = optim.Adam(student_model.parameters(), lr=1e-3, weight_decay=1e-4)
-
-DISTILL_TARGETS = (
-    (("q_mu",), 1.0),
-    (("st", "q_mu"), 0.5),
-    (("sm", "q_mu"), 0.5),
-)
-
-
-def get_expression_batch(model, indices):
-    """Fetch a model input batch by original observation indices."""
-    from scipy.sparse import issparse
-
-    indices = torch.as_tensor(indices, dtype=torch.long).detach().cpu()
-    indices_np = indices.numpy()
-    if issparse(model.X):
-        X_batch = model.X[indices_np].toarray()
-    else:
-        X_batch = model.X[indices_np]
-    return torch.as_tensor(np.asarray(X_batch), dtype=torch.float32, device=model.device)
-
-
-def encode_indices(model, indices):
-    """Encode the same observations used by the teacher batch."""
-    indices = torch.as_tensor(indices, dtype=torch.long).detach().cpu()
-    had_current_indices = hasattr(model, "_current_batch_indices")
-    old_current_indices = getattr(model, "_current_batch_indices", None)
-    model._current_batch_indices = indices
-    try:
-        X_batch = get_expression_batch(model, indices)
-        return model.encode(X_batch)
-    finally:
-        if had_current_indices:
-            model._current_batch_indices = old_current_indices
-        else:
-            delattr(model, "_current_batch_indices")
-
-
-def get_nested(mapping, path):
-    value = mapping
-    for key in path:
-        value = value[key]
-    return value
-
-
-def h_distillation_loss(H_student, H_teacher, targets=DISTILL_TARGETS):
-    loss = None
-    for path, weight in targets:
-        student_value = get_nested(H_student, path)
-        teacher_value = get_nested(H_teacher, path).to(student_value.device)
-        term = weight * torch.nn.functional.mse_loss(student_value, teacher_value)
-        loss = term if loss is None else loss + term
-    return loss
-
-
-def jepa_distillation_step(H_teacher, student_model, indices, optimizer):
-    student_model.train()
-    H_student = encode_indices(student_model, indices)
-    distil_loss = h_distillation_loss(H_student, H_teacher)
-    optimizer.zero_grad(set_to_none=True)
-    distil_loss.backward()
-    optimizer.step()
-    return float(distil_loss.detach().cpu())
-
-
-def detach_H(H, keys=("q_mu",), nested_keys=("q_mu",), device=None):
-    def detach_tensor(x):
-        x = x.detach()
-        return x if device is None else x.to(device)
-
-    out = {}
-    for k, v in H.items():
-        if k in ("st", "sm"):
-            out[k] = {
-                sk: detach_tensor(sv)
-                for sk, sv in v.items()
-                if sk in nested_keys and torch.is_tensor(sv)
-            }
-        elif k in keys and torch.is_tensor(v):
-            out[k] = detach_tensor(v)
-    return out
-
-epoch_H, batch_H, current_epoch_H = [], [], []
-student_distill_loss, epoch_student_distill_loss = [], []
-
-def capture_teacher_outputs(module, outputs):
-    H, Rs, L = outputs
-    indices = getattr(module, "_current_batch_indices", None)
-    if indices is None:
-        raise RuntimeError(
-            "Teacher batch indices were not available during distillation. "
-            "Make sure patch_model_encode_for_gcn(teacher_model) has been applied."
-        )
-
-    indices = indices.detach().cpu().clone()
-    H_teacher = detach_H(H)
-    distil_loss = jepa_distillation_step(
-        H_teacher,
-        student_model,
-        indices,
-        student_optimizer,
-    )
-
-    batch_record = dict(
-        indices=indices,
-        H=detach_H(H, device="cpu"),
-        student_distill_loss=distil_loss,
-    )
-    batch_H.append(batch_record)
-    current_epoch_H.append(batch_record)
-    student_distill_loss.append(distil_loss)
-
-    # epoch boundary: count batches (shuffle=True → order varies, but epoch = 1 full pass)
-    if len(current_epoch_H) == batches_per_epoch:
-        epoch_H.append(current_epoch_H.copy())
-        epoch_student_distill_loss.append(
-            float(np.mean([record["student_distill_loss"] for record in current_epoch_H]))
-        )
-        current_epoch_H.clear()
-
+# instantiate trainer for SpatialJEPA
 n_per_batch = 128
-
-batches_per_epoch = len(teacher_model.as_dataloader(batch_size=n_per_batch, shuffle=True))
-_teacher_forward = teacher_model.forward
-
-def teacher_forward_with_distillation(*args, **kwargs):
-    outputs = _teacher_forward(*args, **kwargs)
-    capture_teacher_outputs(teacher_model, outputs)
-    return outputs
-
-teacher_model.forward = teacher_forward_with_distillation
-try:
-    loss_dict = teacher_model.fit(
-        max_epoch=250,
-        lr=1e-5,
-        mode='single',
-        n_per_batch=n_per_batch, #num_nodes if graph_conv else 128,
-    )
-finally:
-    teacher_model.forward = _teacher_forward
-
-loss_dict["epoch_student_distill_loss_list"] = epoch_student_distill_loss
-
-
+spatialjepa_trainer = SpatialJEPA_trainer(
+    teacher_model,
+    student_model,
+    n_per_batch=n_per_batch,
+)
+# train models
+loss_dict = spatialjepa_trainer.fit_teacher(
+    max_epoch=250,
+    lr=1e-5,
+    mode="single",
+)
+# extract outputs
+epoch_H = spatialjepa_trainer.epoch_H
+batch_H = spatialjepa_trainer.batch_H
+student_distill_loss = spatialjepa_trainer.student_distill_loss
+epoch_student_distill_loss = spatialjepa_trainer.epoch_student_distill_loss
 
 # %%
 # CAPTION: Training loss curves for SpatialMETA (ConditionalVAESTSM) over 200 epochs. Each panel shows one tracked loss term (ST/SM reconstruction, correlation branches, KL, MMD). Use to assess convergence and balance between transcriptomics and metabolomics objectives.

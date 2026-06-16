@@ -410,6 +410,10 @@ sys.path.insert(0, os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
 from load_aligned_mudata import load_sample
 
 sample_id = "V11L12-038_B1"
+METADATA_PATH = Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "mendeley_sma", "metadata.csv"))
+metadata = pd.read_csv(METADATA_PATH)
+sample_metadata = metadata.loc[metadata["Sample.ID"].eq(sample_id)]
+print(sample_metadata.loc[~sample_metadata['Data.Type'].eq('RNA'), ['Sample.ID', 'Matrix', 'Data.Type']].set_index('Sample.ID'))
 joint_mudata = load_sample(sample_id, export_dir=Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "h5mu_export")))
 
 # Keep only observations/cells/spots shared across modalities

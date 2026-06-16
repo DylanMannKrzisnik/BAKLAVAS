@@ -336,7 +336,7 @@ nonspatial_model = spatialJEPA_model(joint_adata, graph_conv=False, full_graph=F
 import torch
 import torch.optim as optim
 
-student_optimizer = optim.Adam(student_model.parameters(), lr=1e-3)
+student_optimizer = optim.Adam(student_model.parameters(), lr=1e-3, weight_decay=1e-4)
 
 DISTILL_TARGETS = (
     (("q_mu",), 1.0),
@@ -470,7 +470,7 @@ teacher_model.forward = teacher_forward_with_distillation
 try:
     loss_dict = teacher_model.fit(
         max_epoch=250,
-        lr=1e-3,
+        lr=1e-5,
         mode='single',
         n_per_batch=n_per_batch, #num_nodes if graph_conv else 128,
     )
@@ -490,25 +490,36 @@ for ax,(k,v) in zip(axes, loss_dict.items()):
     ax.plot(v)
     ax.set_title(k)
 
-def process_latent_embedding(domain):
+DOMAIN_MODELS = {
+    "teacher": teacher_model,
+    "student": student_model,
+}
+MARKER_FEATURES = ["rna:Pcp4", "rna:Tac1", "msi:Dopamine"]
+CONTRIBUTION_CMAP = smt.pl.make_colormap(["#2ec4b6", "#ffffff", "#ff9f1c"])
 
-    embedding_model = teacher_model if domain == "teacher" else student_model
+
+def domain_key(domain: str, suffix: str) -> str:
+    return f"{domain}_{suffix}"
+
+
+def process_latent_embedding(domain: str) -> None:
+    embedding_model = DOMAIN_MODELS[domain]
 
     Z = embedding_model.get_latent_embedding()
     X = embedding_model.get_normalized_expression()
     C = embedding_model.get_modality_contribution()
 
-    joint_adata.layers[f'{domain}_reconstruction'] = X
-    joint_adata.obsm[f'{domain}_X_emb']=Z
-    joint_adata.obs[f'{domain}_contribution_st']=C
-    joint_adata.obs[f'{domain}_contribution_sm']=1-C
+    joint_adata.layers[domain_key(domain, "reconstruction")] = X
+    joint_adata.obsm[domain_key(domain, "X_emb")] = Z
+    joint_adata.obs[domain_key(domain, "contribution_st")] = C
+    joint_adata.obs[domain_key(domain, "contribution_sm")] = 1 - C
 
-    neighbors_key = f"{domain}_neighbors"
-    umap_key = f"{domain}_umap"
+    neighbors_key = domain_key(domain, "neighbors")
+    umap_key = domain_key(domain, "umap")
 
     sc.pp.neighbors(
         joint_adata,
-        use_rep=f"{domain}_X_emb",
+        use_rep=domain_key(domain, "X_emb"),
         n_neighbors=15,
         key_added=neighbors_key,
     )
@@ -521,98 +532,102 @@ def process_latent_embedding(domain):
     joint_adata.obsm[umap_key] = joint_adata.obsm["X_umap"].copy()
     sc.tl.leiden(
         joint_adata,
-        key_added=f"{domain}_VAE_clusters_latent10",
+        key_added=domain_key(domain, "VAE_clusters_latent10"),
         neighbors_key=neighbors_key,
     )
 
-process_latent_embedding("teacher")
-process_latent_embedding("student")
+
+def plot_domain_results(domain: str) -> None:
+    cluster_col = domain_key(domain, "VAE_clusters_latent10")
+
+    sc.pl.embedding(
+        joint_adata,
+        color=[cluster_col, "region", "lesion", "msi:Dopamine"],
+        ncols=2,
+        size=100,
+        wspace=0.3,
+        color_map="Reds",
+        basis=domain_key(domain, "umap"),
+    )
+    sc.pl.spatial(
+        joint_adata,
+        img_key="hires",
+        color=[cluster_col, "region", "lesion", "msi:Dopamine"],
+        size=0.075,
+        show=False,
+        ncols=2,
+    )
+    sc.pl.spatial(
+        joint_adata,
+        img_key="hires",
+        color_map="vlag",
+        color=MARKER_FEATURES,
+        layer=domain_key(domain, "reconstruction"),
+        size=0.075,
+        wspace=0.005,
+        show=False,
+    )
+    sc.pl.spatial(
+        joint_adata,
+        img_key="hires",
+        color_map=CONTRIBUTION_CMAP,
+        color=[
+            domain_key(domain, "contribution_st"),
+            domain_key(domain, "contribution_sm"),
+        ],
+        layer="normalized",
+        wspace=0.005,
+        show=False,
+        alpha_img=0.1,
+        size=0.075,
+    )
+
+    obs_filter_df = pd.concat([
+        joint_adata.obs[[cluster_col, domain_key(domain, "contribution_st")]]
+        .rename(columns={domain_key(domain, "contribution_st"): "contribution"})
+        .assign(type="st"),
+        joint_adata.obs[[cluster_col, domain_key(domain, "contribution_sm")]]
+        .rename(columns={domain_key(domain, "contribution_sm"): "contribution"})
+        .assign(type="sm"),
+    ])
+    fig, ax = smt.pl.create_fig(figsize=(12, 4))
+    sns.violinplot(
+        data=obs_filter_df,
+        x=cluster_col,
+        y="contribution",
+        hue="type",
+        split=True,
+        inner="quart",
+        palette=["#2ec4b6", "#FFCC70"],
+        scale="width",
+        bw=0.2,
+        cut=0,
+    )
+    plt.xticks(rotation=90)
+    plt.show()
+
+
+for domain in DOMAIN_MODELS:
+    process_latent_embedding(domain)
 
 # %%
 # CAPTION: UMAP of the joint ST+SM latent embedding (10-dim VAE, Leiden clusters). Colors: VAE clusters, tissue region, lesion status, and Dopamine (MSI). Shows how anatomy and pathology align with the integrated representation.
 
-sc.pl.umap(
-    joint_adata,
-    color=["VAE_clusters_latent10", "region", "lesion", "msi:Dopamine"],
-    ncols=2,
-    size=100,
-    wspace=0.3,
-    color_map="Reds"
-)
-
-# CAPTION: Spatial maps of VAE clusters, region, lesion, and Dopamine on the H&E image. Same variables as UMAP, projected onto aligned Visium coordinates.
-
-sc.pl.spatial(
-    joint_adata,
-    img_key="hires",
-    color=["VAE_clusters_latent10", "region", "lesion", "msi:Dopamine"],
-    size=0.075,
-    show=False,
-    ncols=2,
-)
+for domain in DOMAIN_MODELS:
+    plot_domain_results(domain)
 
 # CAPTION: Observed (normalized) spatial expression of striatal markers Pcp4 and Tac1 (RNA) and Dopamine (MSI) before model reconstruction.
 
-sc.pl.spatial(joint_adata,
-              img_key="hires",
-              color_map = "vlag",
-              color=["rna:Pcp4", "rna:Tac1", "msi:Dopamine"],
-              layer="normalized",
-              size=0.075,
-              wspace=0.005,
-              show=False)
-
-# CAPTION: SpatialMETA model reconstruction of Pcp4, Tac1, and Dopamine. Compare with normalized layer to judge reconstruction fidelity and spatial detail retention.
-
-sc.pl.spatial(joint_adata,
-              img_key="hires",
-              color_map = "vlag",
-              color=["rna:Pcp4", "rna:Tac1", "msi:Dopamine"],
-              layer="reconstruction",
-              size=0.075,
-              wspace=0.005,
-              show=False)
-
-# CAPTION: Per-spot modality contribution to the joint embedding (teal = ST/transcriptomics, orange = SM/metabolomics). Highlights regions driven more by RNA or MSI signal.
-
 sc.pl.spatial(
     joint_adata,
     img_key="hires",
-    color_map = smt.pl.make_colormap(['#2ec4b6','#ffffff','#ff9f1c' ]),
-    color=['contribution_st','contribution_sm'],
+    color_map="vlag",
+    color=MARKER_FEATURES,
     layer="normalized",
+    size=0.075,
     wspace=0.005,
     show=False,
-    alpha_img=0.1,
-    size=0.075
 )
-
-obs_df = joint_adata.obs
-obs_filter_df = pd.concat([
-    obs_df[['VAE_clusters_latent10', 'contribution_st']].rename(columns={'contribution_st': 'contribution'}).assign(type='st'),
-    obs_df[['VAE_clusters_latent10', 'contribution_sm']].rename(columns={'contribution_sm': 'contribution'}).assign(type='sm')
-])
-
-# CAPTION: Split violin plots of ST vs SM modality contribution within each VAE cluster. Shows whether clusters are RNA-dominated, MSI-dominated, or mixed.
-
-fig,ax = smt.pl.create_fig(
-    figsize = (12,4)
-)
-sns.violinplot(
-    data=obs_filter_df,
-    x="VAE_clusters_latent10",
-    y="contribution",
-    hue="type",
-    split=True,
-    inner="quart",
-    palette=['#2ec4b6', '#FFCC70'],
-    scale='width',  # Make violins the same width
-    bw=0.2,         # Adjust smoothness (lower value = fatter violins)
-    cut=0           # Limit the violin to data range
-)
-
-plt.xticks(rotation=90)
-plt.show()
 
 #%%
 #DATA_DIR.mkdir(parents=True, exist_ok=True)

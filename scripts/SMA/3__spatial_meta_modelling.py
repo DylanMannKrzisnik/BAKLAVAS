@@ -409,14 +409,14 @@ import sys
 sys.path.insert(0, os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
 from load_aligned_mudata import load_sample
 
-sample_id = "V11L12-038_B1"
+sample_id = "V11L12-038_D1"
 METADATA_PATH = Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "mendeley_sma", "metadata.csv"))
 metadata = pd.read_csv(METADATA_PATH)
 sample_metadata = metadata.loc[metadata["Sample.ID"].eq(sample_id)]
-print(sample_metadata.loc[~sample_metadata['Data.Type'].eq('RNA'), ['Sample.ID', 'Matrix', 'Data.Type']].set_index('Sample.ID'))
-joint_mudata = load_sample(sample_id, export_dir=Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "h5mu_export")))
+print(sample_metadata.loc[~sample_metadata['Data.Type'].eq('RNA'), ['Sample.ID', 'sample', 'Matrix', 'Data.Type']].set_index('Sample.ID'))
 
 # Keep only observations/cells/spots shared across modalities
+joint_mudata = load_sample(sample_id, export_dir=Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "h5mu_export")))
 mu.pp.intersect_obs(joint_mudata)
 
 rna = joint_mudata.mod["rna"]   # change to your key, e.g. "ST"
@@ -540,15 +540,27 @@ DOMAIN_MODELS = {
 }
 MARKER_FEATURES = {
     "V11L12-109_B1": ["rna:Pcp4", "rna:Tac1", "msi:Dopamine"],
+    #"V11L12-109_B1": ["rna:Snca", "rna:Pink1", "rna:Park7", "msi:Dopamine"],
+    "V11L12-038_D1": ["rna:Psap", "rna:Sort1", "rna:Snca", "msi:(3'-sulfo)Galbeta-Cer(d18:1/24:0(2OH))"],
     "V11L12-038_B1": ["rna:Gba2", "rna:Ugcg", "msi:Glucosylceramide (d18:1/24:0)"],
 }.get(sample_id)
 
-CONTRIBUTION_CMAP = smt.pl.make_colormap(["#2ec4b6", "#ffffff", "#ff9f1c"])
+sc.pl.spatial(
+    joint_adata,
+    img_key="hires",
+    color_map="vlag",
+    color=MARKER_FEATURES,
+    layer="normalized",
+    size=0.075,
+    wspace=0.005,
+    show=False,
+)
 
+
+CONTRIBUTION_CMAP = smt.pl.make_colormap(["#2ec4b6", "#ffffff", "#ff9f1c"])
 
 def domain_key(domain: str, suffix: str) -> str:
     return f"{domain}_{suffix}"
-
 
 def process_latent_embedding(domain: str) -> None:
     embedding_model = DOMAIN_MODELS[domain]
@@ -660,17 +672,6 @@ for domain in DOMAIN_MODELS:
 
 # %%
 # CAPTION: Observed (normalized) spatial expression of striatal markers Pcp4 and Tac1 (RNA) and Dopamine (MSI) before model reconstruction.
-
-sc.pl.spatial(
-    joint_adata,
-    img_key="hires",
-    color_map="vlag",
-    color=MARKER_FEATURES,
-    layer="normalized",
-    size=0.075,
-    wspace=0.005,
-    show=False,
-)
 
 if sample_id == "V11L12-038_B1":
     dopamine_striatum_lipids = [

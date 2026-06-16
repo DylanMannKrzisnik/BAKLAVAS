@@ -409,7 +409,7 @@ import sys
 sys.path.insert(0, os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
 from load_aligned_mudata import load_sample
 
-sample_id = "V11L12-109_B1"
+sample_id = "V11L12-038_B1"
 joint_mudata = load_sample(sample_id, export_dir=Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "h5mu_export")))
 
 # Keep only observations/cells/spots shared across modalities
@@ -428,6 +428,12 @@ feature_ids = msi.var["feature_id"].astype("string") if "feature_id" in msi.var.
 msi_var_names = annotations.where(has_annotation, feature_ids)
 msi.var_names = ["msi:" + str(v) for v in msi_var_names]
 rna.var_names = ["rna:" + str(v) for v in rna.var_names]
+
+if not msi.var_names.is_unique:
+    msi = msi[:, ~msi.var_names.duplicated()]
+    print("Removed duplicate MSI feature names!")
+
+assert msi.var_names.is_unique, "MSI feature (var) names are not unique!"
 
 # Concatenate features into one AnnData
 adata = sc.concat(
@@ -475,7 +481,7 @@ joint_adata = joint_adata[:,joint_adata.var.highly_variable_moranI]
 #joint_adata = sc.read_h5ad(JOINT_HVF_PATH)
 joint_adata.X = joint_adata.layers["counts"]
 
-smt.pp.normalize_total_joint_adata_sm_st( # again?
+smt.pp.normalize_total_joint_adata_sm_st( # again, now on the spatially variable features
     joint_adata,
     target_sum_SM=1e3,
     target_sum_ST=None
@@ -528,7 +534,11 @@ DOMAIN_MODELS = {
     "teacher": teacher_model,
     "student": student_model,
 }
-MARKER_FEATURES = ["rna:Pcp4", "rna:Tac1", "msi:Dopamine"]
+MARKER_FEATURES = {
+    "V11L12-109_B1": ["rna:Pcp4", "rna:Tac1", "msi:Dopamine"],
+    "V11L12-038_B1": ["rna:Gba2", "rna:Ugcg", "msi:Glucosylceramide (d18:1/24:0)"],
+}.get(sample_id)
+
 CONTRIBUTION_CMAP = smt.pl.make_colormap(["#2ec4b6", "#ffffff", "#ff9f1c"])
 
 
@@ -576,7 +586,7 @@ def plot_domain_results(domain: str) -> None:
 
     sc.pl.embedding(
         joint_adata,
-        color=[cluster_col, "region", "lesion", "msi:Dopamine"],
+        color=[cluster_col, "region", "lesion", MARKER_FEATURES[-1]],
         ncols=2,
         size=100,
         wspace=0.3,
@@ -586,7 +596,7 @@ def plot_domain_results(domain: str) -> None:
     sc.pl.spatial(
         joint_adata,
         img_key="hires",
-        color=[cluster_col, "region", "lesion", "msi:Dopamine"],
+        color=[cluster_col, "region", "lesion", MARKER_FEATURES[-1]],
         size=0.075,
         show=False,
         ncols=2,
@@ -645,11 +655,6 @@ for domain in DOMAIN_MODELS:
     process_latent_embedding(domain)
 
 # %%
-# CAPTION: UMAP of the joint ST+SM latent embedding (10-dim VAE, Leiden clusters). Colors: VAE clusters, tissue region, lesion status, and Dopamine (MSI). Shows how anatomy and pathology align with the integrated representation.
-
-for domain in DOMAIN_MODELS:
-    plot_domain_results(domain)
-
 # CAPTION: Observed (normalized) spatial expression of striatal markers Pcp4 and Tac1 (RNA) and Dopamine (MSI) before model reconstruction.
 
 sc.pl.spatial(
@@ -662,6 +667,47 @@ sc.pl.spatial(
     wspace=0.005,
     show=False,
 )
+
+if sample_id == "V11L12-038_B1":
+    dopamine_striatum_lipids = [
+        # --- Sphingolipids (GBA1 Pathway & Vesicular Dynamics) ---
+        "Glucosylceramide (d18:1/24:0)",
+        "Lactosylceramide (d18:1/12:0)",
+        #"N-(2-hydroxydocosanoyl)-1-O-beta-D-glucosyl-15-methylhexadecasphing-4-enine",
+        #"N-(2-hydroxytetracosanoyl)-1-O-beta-D-glucosyl-15-methylhexadecasphing-4-enine, N-(2-hydroxytricosanoyl)-D-galactosylsphingosine",
+        #"beta-D-glucosyl-(1<->1')-N-tetracosanoyl-14-methylhexadecasphingosine, N-tetracosanoyl-1-O-beta-D-glucosyl-15-methylhexadecasphing-4-enine, N-tricosanoyl-D-galactosylsphingosine, beta-D-glucosyl-N-(tricosanoyl)sphingosine, beta-D-galactosyl-N-(tricosanoyl)sphingosine",
+        
+        # --- Sphingomyelins (Lipid Rafts & Dopamine Receptor Anchoring) ---
+        "SM C16:1",
+        "SM(d18:1/24:1(15Z))",
+        
+        # --- Polyunsaturated Phosphatidylcholines (Vulnerable to Dopamine Oxidative Stress) ---
+        #"PC(14:0/20:4(5Z,8Z,11Z,14Z)), PC(14:0/20:4(8Z,11Z,14Z,17Z)), PC(18:4(6Z,9Z,12Z,15Z)/16:0), PE(22:4(7Z,10Z,13Z,16Z)/15:0), PE(15:0/22:4(7Z,10Z,13Z,16Z)), PC(20:4(8Z,11Z,14Z,17Z)/14:0), PC(20:3(5Z,8Z,11Z)/14:1(9Z)), PC(14:1(9Z)/20:3(8Z,11Z,14Z)), PC(14:1(9Z)/20:3(5Z,8Z,11Z)), PC(20:3(8Z,11Z,14Z)/14:1(9Z)), PC(16:1(9Z)/18:3(9Z,12Z,15Z)), PC(16:1(9Z)/18:3(6Z,9Z,12Z)), PC(18:3(6Z,9Z,12Z)/16:1(9Z)), PC(20:4(5Z,8Z,11Z,14Z)/14:0), PC(18:3(9Z,12Z,15Z)/16:1(9Z))",
+        #"PC(16:0/18:4(6Z,9Z,12Z,15Z)), PC(14:0/20:4(5Z,8Z,11Z,14Z)), PC(14:0/20:4(8Z,11Z,14Z,17Z)), PC(18:4(6Z,9Z,12Z,15Z)/16:0), PE(22:4(7Z,10Z,13Z,16Z)/15:0), PE(15:0/22:4(7Z,10Z,13Z,16Z)), PC(20:4(8Z,11Z,14Z,17Z)/14:0), PC(20:3(5Z,8Z,11Z)/14:1(9Z)), PC(14:1(9Z)/20:3(8Z,11Z,14Z)), PC(14:1(9Z)/20:3(5Z,8Z,11Z)), PC(20:3(8Z,11Z,14Z)/14:1(9Z)), PC(16:1(9Z)/18:3(9Z,12Z,15Z)), PC(16:1(9Z)/18:3(6Z,9Z,12Z)), PC(18:3(6Z,9Z,12Z)/16:1(9Z)), PC(20:4(5Z,8Z,11Z,14Z)/14:0), PC(18:3(9Z,12Z,15Z)/16:1(9Z))",
+        #"PC(18:2(9Z,12Z)/22:6(4Z,7Z,10Z,13Z,16Z,19Z)), PC(22:4(7Z,10Z,13Z,16Z)/18:4(6Z,9Z,12Z,15Z)), PC(22:6(4Z,7Z,10Z,13Z,16Z,19Z)/18:2(9Z,12Z)), PC(20:3(8Z,11Z,14Z)/20:5(5Z,8Z,11Z,14Z,17Z)), PC(20:5(5Z,8Z,11Z,14Z,17Z)/20:3(8Z,11Z,14Z)), PC(18:4(6Z,9Z,12Z,15Z)/22:4(7Z,10Z,13Z,16Z)), PC(20:4(5Z,8Z,11Z,14Z)/20:4(5Z,8Z,11Z,14Z))",
+        #"PC(22:6(4Z,7Z,10Z,13Z,16Z,19Z)/22:6(4Z,7Z,10Z,13Z,16Z,19Z))",
+        
+        # --- Polyunsaturated Phosphatidylethanolamines & Plasmalogens (Vesicular Fusion) ---
+        #"PE(18:4(6Z,9Z,12Z,15Z)/20:1(11Z)), PE(18:0/20:5(5Z,8Z,11Z,14Z,17Z)), PE(18:3(9Z,12Z,15Z)/20:2(11Z,14Z)), PE(20:4(5Z,8Z,11Z,14Z)/18:1(9Z)), PE(18:2(9Z,12Z)/20:3(8Z,11Z,14Z)), PE(20:2(11Z,14Z)/18:3(9Z,12Z,15Z)), PE(18:3(6Z,9Z,12Z)/20:2(11Z,14Z)), PE(16:1(9Z)/22:4(7Z,10Z,13Z,16Z)), PE(20:2(11Z,14Z)/18:3(6Z,9Z,12Z)), PE(18:1(9Z)/20:4(5Z,8Z,11Z,14Z)), PE(20:3(8Z,11Z,14Z)/18:2(9Z,12Z)), PE(22:4(7Z,10Z,13Z,16Z)/16:1(9Z)), PE(20:5(5Z,8Z,11Z,14Z,17Z)/18:0), PC(15:0/20:5(5Z,8Z,11Z,14Z,17Z)), PE(20:1(11Z)/18:4(6Z,9Z,12Z,15Z))",
+        #"PE(P-18:0/22:6(4Z,7Z,10Z,13Z,16Z,19Z))"
+    ]
+    dopamine_striatum_lipids = ['msi:' + l for l in dopamine_striatum_lipids]
+
+    sc.pl.spatial(
+        joint_adata,
+        img_key="hires",
+        color_map="vlag",
+        color=dopamine_striatum_lipids,
+        layer="normalized",
+        size=0.075,
+        wspace=0.005,
+        show=False,
+    )
+
+# CAPTION: UMAP of the joint ST+SM latent embedding (10-dim VAE, Leiden clusters). Colors: VAE clusters, tissue region, lesion status, and Dopamine (MSI). Shows how anatomy and pathology align with the integrated representation.
+
+for domain in DOMAIN_MODELS:
+    plot_domain_results(domain)
 
 #%%
 #DATA_DIR.mkdir(parents=True, exist_ok=True)

@@ -499,6 +499,23 @@ sm = joint_adata[:, sm_mask].copy()
 sc.pp.scale(sm, zero_center=False, max_value=10)
 joint_adata.X[:, sm_mask] = sm.X
 
+#%% differential expression/abundance analysis, comparing intact vs lesioned striatum
+
+striatum_mask = joint_adata.obs["region"].eq("striatum")
+striatum_adata = joint_adata[striatum_mask].copy()
+striatum_adata.X = striatum_adata.layers["normalized"]
+
+# reference="intact" reports lesioned vs intact; reference="lesioned" reports intact vs lesioned
+sc.tl.rank_genes_groups(
+    striatum_adata, groupby="lesion", reference="intact", method="wilcoxon", key_added="lesioned_vs_intact"
+)
+sc.tl.rank_genes_groups(
+    striatum_adata, groupby="lesion", reference="lesioned", method="wilcoxon", key_added="intact_vs_lesioned"
+)
+
+sc.pl.rank_genes_groups(striatum_adata, key="lesioned_vs_intact", n_genes=10)
+sc.pl.rank_genes_groups(striatum_adata, key="intact_vs_lesioned", n_genes=10)
+
 # %%
 
 # instantiate models
@@ -538,24 +555,51 @@ DOMAIN_MODELS = {
     "teacher": teacher_model,
     "student": student_model,
 }
-MARKER_FEATURES = {
-    "V11L12-109_B1": ["rna:Pcp4", "rna:Tac1", "msi:Dopamine"],
-    #"V11L12-109_B1": ["rna:Snca", "rna:Pink1", "rna:Park7", "msi:Dopamine"],
-    "V11L12-038_D1": ["rna:Psap", "rna:Sort1", "rna:Snca", "msi:(3'-sulfo)Galbeta-Cer(d18:1/24:0(2OH))"],
-    "V11L12-038_B1": ["rna:Gba2", "rna:Ugcg", "msi:Glucosylceramide (d18:1/24:0)"],
-}.get(sample_id)
+MARKER_GENES = [
+    "Pcp4", "Tac1",          # V11L12-109_B1
+    "Psap", "Sort1", "Snca", # V11L12-038_D1
+    "Gba2", "Ugcg",          # V11L12-038_B1
+    "Snca", "Pink1", "Park7",
+    "mt-Nd2", "mt-Nd4", "mt-Nd1", "Ndufb9", "Ndufa13", "Ndufa4", "Ndufa3", # Complex I
+]
+MARKER_MSI = [
+    "Dopamine",
+    "(3'-sulfo)Galbeta-Cer(d18:1/24:0(2OH))",
+    "307.07157500000005",
+    "Glucosylceramide (d18:1/24:0)",
+    "PI(12:0/22:2(13Z,16Z)), PI(14:1(9Z)/20:1(11Z)), PI(15:1(9Z)/19:1(9Z)), PI(17:2(9Z,12Z)/17:0), PI(20:1(11Z)/14:1(9Z)), PI(18:2(9Z,12Z)/16:0), PI(17:1(9Z)/17:1(9Z)), PI(16:1(9Z)/18:1(9Z)), PI(14:0/20:2(11Z,14Z)), PI(17:0/17:2(9Z,12Z)), PI(19:1(9Z)/15:1(9Z)), PI(20:2(11Z,14Z)/14:0), PI(22:2(13Z,16Z)/12:0), PI(18:1(9Z)/16:1(9Z)), PI(16:0/18:2(9Z,12Z))",
+    #"5-Hydroxydantrolene",
+]
+MARKER_FEATURES = \
+    ["rna:" + g for g in MARKER_GENES if "rna:" + g in joint_adata.var_names] + \
+    ["msi:" + m for m in MARKER_MSI if "msi:" + m in joint_adata.var_names]
 
-sc.pl.spatial(
-    joint_adata,
-    img_key="hires",
-    color_map="vlag",
-    color=MARKER_FEATURES,
-    layer="normalized",
-    size=0.075,
-    wspace=0.005,
-    show=False,
-)
+def spatial_plot(joint_adata, mask=None):
+    name_mapper = {
+        "msi:PI(12:0/22:2(13Z,16Z)), PI(14:1(9Z)/20:1(11Z)), PI(15:1(9Z)/19:1(9Z)), PI(17:2(9Z,12Z)/17:0), PI(20:1(11Z)/14:1(9Z)), PI(18:2(9Z,12Z)/16:0), PI(17:1(9Z)/17:1(9Z)), PI(16:1(9Z)/18:1(9Z)), PI(14:0/20:2(11Z,14Z)), PI(17:0/17:2(9Z,12Z)), PI(19:1(9Z)/15:1(9Z)), PI(20:2(11Z,14Z)/14:0), PI(22:2(13Z,16Z)/12:0), PI(18:1(9Z)/16:1(9Z)), PI(16:0/18:2(9Z,12Z))":
+        "msi:Phosphatidylinositols (PI)",
+        "msi:(3'-sulfo)Galbeta-Cer(d18:1/24:0(2OH))":
+        "Sulfated Galactosylceramide",
+    }
+    spatial_axes = sc.pl.spatial(
+        joint_adata[mask] if mask is not None else joint_adata,
+        img_key="hires",
+        color_map="vlag",
+        color=MARKER_FEATURES + ["lesion", "region"],
+        layer="normalized",
+        size=0.075,
+        wspace=0.005,
+        show=False,
+    )
+    if not isinstance(spatial_axes, list):
+        spatial_axes = [spatial_axes]
+    for ax in spatial_axes:
+        title = ax.get_title()
+        if title in name_mapper:
+            ax.set_title(name_mapper[title])
 
+spatial_plot(joint_adata)
+spatial_plot(joint_adata, striatum_mask)
 
 CONTRIBUTION_CMAP = smt.pl.make_colormap(["#2ec4b6", "#ffffff", "#ff9f1c"])
 

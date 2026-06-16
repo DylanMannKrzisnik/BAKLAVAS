@@ -641,12 +641,12 @@ def process_latent_embedding(domain: str) -> None:
     )
 
 
-def plot_domain_results(domain: str) -> None:
+def plot_domain_results(domain: str, plot_marker: str) -> None:
     cluster_col = domain_key(domain, "VAE_clusters_latent10")
 
     sc.pl.embedding(
         joint_adata,
-        color=[cluster_col, "region", "lesion", MARKER_FEATURES[-1]],
+        color=[cluster_col, "region", "lesion", plot_marker],
         ncols=2,
         size=100,
         wspace=0.3,
@@ -656,7 +656,7 @@ def plot_domain_results(domain: str) -> None:
     sc.pl.spatial(
         joint_adata,
         img_key="hires",
-        color=[cluster_col, "region", "lesion", MARKER_FEATURES[-1]],
+        color=[cluster_col, "region", "lesion", plot_marker],
         size=0.075,
         show=False,
         ncols=2,
@@ -756,8 +756,29 @@ if sample_id == "V11L12-038_B1":
 # CAPTION: UMAP of the joint ST+SM latent embedding (10-dim VAE, Leiden clusters). Colors: VAE clusters, tissue region, lesion status, and Dopamine (MSI). Shows how anatomy and pathology align with the integrated representation.
 
 for domain in DOMAIN_MODELS:
-    plot_domain_results(domain)
+    plot_domain_results(domain, MARKER_FEATURES[-3])
 
 #%%
-#DATA_DIR.mkdir(parents=True, exist_ok=True)
-#joint_adata.write_h5ad(JOINT_SPATIALMETA_PATH)
+OUTPUT_DIR = Path(os.getenv("OUTPATH"))
+MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / sample_id
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+def save_spatialjepa_model(model, path, *, full_graph: bool):
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "full_graph": full_graph,
+            "graph_conv": True,
+            "reconstruction_method_sm": model.reconstruction_method_sm,
+            "reconstruction_method_st": model.reconstruction_method_st,
+            "hidden_stacks": model.hidden_stacks,
+            "n_latent": model.n_latent,
+        },
+        path,
+    )
+
+save_spatialjepa_model(teacher_model, MODEL_DIR / "teacher.pt", full_graph=True)
+save_spatialjepa_model(student_model, MODEL_DIR / "student.pt", full_graph=False)
+
+# model.initialize_dataset() reads from adata.X at construction time
+joint_adata.write_h5ad(MODEL_DIR / "joint_adata.h5ad")

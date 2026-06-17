@@ -39,7 +39,7 @@ The core (`annotate_var_table`) is pure pandas/numpy and operates on a `var`
 DataFrame + a METASPACE results DataFrame, so it can be unit-tested and reused
 for either a standalone MSI .h5ad or the "msi" modality of an aligned .h5mu.
 """
-
+#%%
 from __future__ import annotations
 
 import argparse
@@ -542,10 +542,43 @@ def add_spaceranger_metadata_to_modalities(mdata, sample_id: str, sma_root: Path
 # 8. CLI: annotate the 'msi' modality of each aligned .h5mu in place
 # --------------------------------------------------------------------------- #
 
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--h5mu-dir", type=Path, required=True, help="Directory of aligned <sample>.h5mu files")
-    p.add_argument("--metaspace-dir", type=Path, required=True, help="Directory of cached METASPACE CSVs")
+def is_notebook() -> bool:
+    try:
+        from IPython import get_ipython
+        shell = get_ipython().__class__.__name__
+        return shell == "ZMQInteractiveShell"
+    except Exception:
+        return False
+
+
+def _load_dotenv() -> None:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path="/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA/.env")
+
+
+def _default_h5mu_dir() -> Path:
+    return Path(os.getenv("DATAPATH", "")) / "vicari_2023" / "h5mu_export"
+
+
+def _default_metaspace_dir() -> Path:
+    return Path(os.getenv("OUTPATH", "")) / "metaspace_output"
+
+
+def parse_args(notebook: bool = False) -> argparse.Namespace:
+    _load_dotenv()
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,  # avoid Jupyter --f=<kernel.json> matching --fdr / --fmp-...
+    )
+    p.add_argument(
+        "--h5mu-dir", type=Path, default=_default_h5mu_dir(),
+        help="Directory of aligned <sample>.h5mu files (default: $DATAPATH/vicari_2023/h5mu_export)",
+    )
+    p.add_argument(
+        "--metaspace-dir", type=Path, default=_default_metaspace_dir(),
+        help="Directory of cached METASPACE CSVs (default: $OUTPATH/metaspace_output)",
+    )
     p.add_argument("--metadata-csv", type=Path, default=None, help="SMA metadata.csv (Sample.ID, Matrix)")
     p.add_argument("--sma-root", type=Path, default=None, help="SMA Mendeley root containing sma/ or sma.zip")
     p.add_argument("--fmp-reference-h5ad", type=Path, default=None, help="Annotated FMP h5ad to source the panel")
@@ -553,7 +586,14 @@ def main() -> None:
     p.add_argument("--fdr", type=float, default=0.20)
     p.add_argument("--panel-ppm", type=float, default=20.0)
     p.add_argument("--metaspace-ppm", type=float, default=10.0)
-    args = p.parse_args()
+    if notebook:
+        return p.parse_known_args()[0]
+    return p.parse_args()
+
+
+#%%
+def main() -> None:
+    args = parse_args(notebook=is_notebook())
 
     import mudata as mu  # imported here so the core stays dependency-light
 

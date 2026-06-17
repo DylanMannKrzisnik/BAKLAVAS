@@ -13,6 +13,11 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import torch
 import torch.optim as optim
+import muon as mu
+
+import sys
+sys.path.insert(0, os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
+from load_aligned_mudata import load_sample
 
 BAKLAVA_BASE = Path(os.getenv("BAKLAVA_BASE_DIR"))
 DATA_DIR = BAKLAVA_BASE / "data" / "spatialmeta_tutorial"
@@ -221,12 +226,7 @@ class SpatialJEPA_trainer:
 #%% load data
 #joint_adata = load_joint_adata()
 
-import muon as mu
-import sys
-sys.path.insert(0, os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
-from load_aligned_mudata import load_sample
-
-sample_id = "V11L12-038_D1"
+sample_id = "V11T17-102_C1"
 METADATA_PATH = Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "mendeley_sma", "metadata.csv"))
 metadata = pd.read_csv(METADATA_PATH)
 sample_metadata = metadata.loc[metadata["Sample.ID"].eq(sample_id)]
@@ -276,7 +276,11 @@ joint_adata.var = joint_adata.var.merge(joint_mudata.mod["msi"].var[['annotation
 
 # %% identify spatially highly variable genes and metabolites
 
-joint_adata = smt.pp.removeHSP_MT_RPL_DNAJ(joint_adata) # remove HSP, MT, RPL, DNAJ features
+if sample_id.startswith("V11T17-102"):
+    joint_adata = smt.pp.removeHSP_MT_RPL_DNAJ(joint_adata) # remove HSP, MT, RPL, DNAJ features in human
+else:
+    joint_adata = smt.pp.removeHsp_mt_Rpl_Dnaj(joint_adata) # remove Hsp, mt, Rpl, Dnaj features in mouse
+
 joint_adata.layers["counts"] = joint_adata.X.copy()
 
 smt.pp.normalize_total_joint_adata_sm_st(

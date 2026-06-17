@@ -227,6 +227,7 @@ class SpatialJEPA_trainer:
 #joint_adata = load_joint_adata()
 
 sample_id = "V11T17-102_C1"
+species = "human" if sample_id.startswith("V11T17-102") else "mouse"
 METADATA_PATH = Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "mendeley_sma", "metadata.csv"))
 metadata = pd.read_csv(METADATA_PATH)
 sample_metadata = metadata.loc[metadata["Sample.ID"].eq(sample_id)]
@@ -276,7 +277,7 @@ joint_adata.var = joint_adata.var.merge(joint_mudata.mod["msi"].var[['annotation
 
 # %% identify spatially highly variable genes and metabolites
 
-if sample_id.startswith("V11T17-102"):
+if species == "human":
     joint_adata = smt.pp.removeHSP_MT_RPL_DNAJ(joint_adata) # remove HSP, MT, RPL, DNAJ features in human
 else:
     joint_adata = smt.pp.removeHsp_mt_Rpl_Dnaj(joint_adata) # remove Hsp, mt, Rpl, Dnaj features in mouse
@@ -321,9 +322,19 @@ sc.pp.scale(sm, zero_center=False, max_value=10)
 joint_adata.X[:, sm_mask] = sm.X
 
 #%% differential expression/abundance analysis, comparing intact vs lesioned striatum
+if species == "human":
+    striatum_adata = joint_adata.copy()
+    x_dopamine = striatum_adata[:, 'msi:Dopamine'].X.toarray().flatten()
 
-striatum_mask = joint_adata.obs["region"].eq("striatum")
-striatum_adata = joint_adata[striatum_mask].copy()
+    # create artificial lesion mask
+    thresh_dopamine = 1.1
+    plt.figure(figsize=[3,2]); plt.hist(x_dopamine, bins=50); plt.axvline(thresh_dopamine, color='r'); plt.xlabel('Dopamine')
+    striatum_adata.obs['lesion'] = pd.Series(x_dopamine < thresh_dopamine, index=striatum_adata.obs_names).map({True: 'lesioned', False: 'intact'})
+
+elif species == "mouse":
+    striatum_mask = joint_adata.obs["region"].eq("striatum")
+    striatum_adata = joint_adata[striatum_mask].copy()
+
 striatum_adata.X = striatum_adata.layers["normalized"]
 
 # reference="intact" reports lesioned vs intact; reference="lesioned" reports intact vs lesioned

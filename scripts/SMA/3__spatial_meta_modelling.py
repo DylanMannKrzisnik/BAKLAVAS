@@ -226,7 +226,7 @@ class SpatialJEPA_trainer:
 #%% load data
 #joint_adata = load_joint_adata()
 
-sample_id = "V11T17-102_C1"
+sample_id = "V11T17-102_B1"
 species = "human" if sample_id.startswith("V11T17-102") else "mouse"
 METADATA_PATH = Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "mendeley_sma", "metadata.csv"))
 metadata = pd.read_csv(METADATA_PATH)
@@ -325,10 +325,15 @@ joint_adata.X[:, sm_mask] = sm.X
 if species == "human":
     # create artificial lesion mask
     x_dopamine = joint_adata[:, 'msi:Dopamine'].X.toarray().flatten()
-    thresh_dopamine = 1.675
+    thresh_dopamine = {
+        "V11T17-102_A1": 1.5,
+        "V11T17-102_B1": 0.6,
+        "V11T17-102_C1": 1.675,
+        "V11T17-102_D1": 1.,
+    }.get(sample_id)
     plt.figure(figsize=[3,2]); plt.hist(x_dopamine, bins=50); plt.axvline(thresh_dopamine, color='r'); plt.xlabel('Dopamine')
-    joint_adata.obs['lesion'] = pd.Series(x_dopamine < thresh_dopamine, index=joint_adata.obs_names).map({True: 'lesioned', False: 'intact'})
 
+    joint_adata.obs['lesion'] = pd.Series(x_dopamine < thresh_dopamine, index=joint_adata.obs_names).map({True: 'lesioned', False: 'intact'})
     striatum_adata = joint_adata.copy()
 
 elif species == "mouse":
@@ -354,6 +359,7 @@ sc.pl.rank_genes_groups(striatum_adata, key="intact_vs_lesioned", n_genes=10)
 teacher_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=True)
 student_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False)
 #nonspatial_model = spatialJEPA_model(joint_adata, graph_conv=False, full_graph=False)
+#nonspatial_model.fit(max_epoch=250, lr=1e-5, mode="single")
 
 # instantiate trainer for SpatialJEPA
 n_per_batch = 128
@@ -365,7 +371,7 @@ spatialjepa_trainer = SpatialJEPA_trainer(
 # train models
 loss_dict = spatialjepa_trainer.fit_teacher(
     max_epoch=250,
-    lr=1e-5,
+    lr=1e-10,
     mode="single",
 )
 # extract outputs

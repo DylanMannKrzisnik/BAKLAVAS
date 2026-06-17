@@ -228,55 +228,93 @@ class SpatialJEPA_trainer:
 ## sample notes
 # V11T17-102_B1 probably has a large fold that increases dopamine and related genes
 
-sample_id = "V11T17-102_D1"
+# sample_ids may be a single sample ID (str) for vertical-only integration, or a
+# list of sample IDs that share a prefix (e.g. all "V11T17-102_*") to additionally
+# enable horizontal (multi-section) integration of the same sample/donor.
+sample_ids = "V11T17-102_D1"
+# e.g. sample_ids = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]
 
-species = "human" if sample_id.startswith("V11T17-102") else "mouse"
+SAMPLE_IDS = [sample_ids] if isinstance(sample_ids, str) else list(sample_ids)
+SECTION_KEY = "section"
+MULTI = len(SAMPLE_IDS) > 1
+
+# All sections must come from the same sample/donor (shared prefix)
+PREFIX = SAMPLE_IDS[0].split("_")[0]
+assert all(s.split("_")[0] == PREFIX for s in SAMPLE_IDS), (
+    f"All sample IDs must share a prefix for horizontal integration; got {SAMPLE_IDS}"
+)
+RUN_ID = SAMPLE_IDS[0] if not MULTI else PREFIX
+species = "human" if PREFIX == "V11T17-102" else "mouse"
+
 METADATA_PATH = Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "mendeley_sma", "metadata.csv"))
 metadata = pd.read_csv(METADATA_PATH)
-sample_metadata = metadata.loc[metadata["Sample.ID"].eq(sample_id)]
+sample_metadata = metadata.loc[metadata["Sample.ID"].isin(SAMPLE_IDS)]
 print(sample_metadata.loc[~sample_metadata['Data.Type'].eq('RNA'), ['Sample.ID', 'sample', 'Matrix', 'Data.Type']].set_index('Sample.ID'))
 
-# Keep only observations/cells/spots shared across modalities
-joint_mudata = load_sample(sample_id, export_dir=Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "h5mu_export")))
-mu.pp.intersect_obs(joint_mudata)
+H5MU_EXPORT_DIR = Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "h5mu_export"))
 
-rna = joint_mudata.mod["rna"]   # change to your key, e.g. "ST"
-msi = joint_mudata.mod["msi"]   # change to your key, e.g. "SM"
 
-# Make feature names unique and modality-prefixed
-rna = rna.copy()
-msi = msi.copy()
+def assemble_section(sample_id):
+    """Load one section and return a per-section ST+SM AnnData tagged with its section id."""
+    # Keep only observations/cells/spots shared across modalities
+    joint_mudata = load_sample(sample_id, export_dir=H5MU_EXPORT_DIR)
+    mu.pp.intersect_obs(joint_mudata)
 
-annotations = msi.var["annotation"].astype("string")
-has_annotation = annotations.notna() & annotations.str.strip().ne("")
-feature_ids = msi.var["feature_id"].astype("string") if "feature_id" in msi.var.columns else msi.var.index.astype("string")
-msi_var_names = annotations.where(has_annotation, feature_ids)
-msi.var_names = ["msi:" + str(v) for v in msi_var_names]
-rna.var_names = ["rna:" + str(v) for v in rna.var_names]
+    rna = joint_mudata.mod["rna"].copy()   # change to your key, e.g. "ST"
+    msi = joint_mudata.mod["msi"].copy()   # change to your key, e.g. "SM"
 
-if not msi.var_names.is_unique:
-    msi = msi[:, ~msi.var_names.duplicated()]
-    print("Removed duplicate MSI feature names!")
+    # Make feature names unique and modality-prefixed
+    annotations = msi.var["annotation"].astype("string")
+    has_annotation = annotations.notna() & annotations.str.strip().ne("")
+    feature_ids = msi.var["feature_id"].astype("string") if "feature_id" in msi.var.columns else msi.var.index.astype("string")
+    msi_var_names = annotations.where(has_annotation, feature_ids)
+    msi.var_names = ["msi:" + str(v) for v in msi_var_names]
+    rna.var_names = ["rna:" + str(v) for v in rna.var_names]
 
-assert msi.var_names.is_unique, "MSI feature (var) names are not unique!"
+    if not msi.var_names.is_unique:
+        msi = msi[:, ~msi.var_names.duplicated()]
+        print(f"[{sample_id}] Removed duplicate MSI feature names!")
+    assert msi.var_names.is_unique, "MSI feature (var) names are not unique!"
 
-# Concatenate features into one AnnData
-adata = sc.concat(
-    {"ST": rna, "SM": msi},
-    axis=1,
-    join="inner",
-    label="type",
-    merge="same",
-)
+    # Concatenate features (modalities) into one AnnData
+    adata = sc.concat(
+        {"ST": rna, "SM": msi},
+        axis=1,
+        join="inner",
+        label="type",
+        merge="same",
+    )
+    # carry spot coordinates explicitly (per-section pixel coords)
+    adata.obsm["spatial"] = rna.obsm["spatial"]
+
+    rna_spatial = joint_mudata.mod["rna"].uns["spatial"]
+    msi_spatial = joint_mudata.mod["msi"].uns["spatial"]
+    _assert_identical(rna_spatial, msi_spatial)
+
+    # Re-key the spatial dict under the section id so keys stay unique across sections
+    spatial_uns = dict(rna_spatial)
+    if len(spatial_uns) == 1:
+        spatial_uns = {sample_id: next(iter(spatial_uns.values()))}
+    adata.uns["spatial"] = spatial_uns
+
+    adata.var = adata.var.merge(msi.var[['annotation']], left_on='feature_id', right_index=True, how='left')
+    adata.obs[SECTION_KEY] = sample_id
+    return adata
+
+
+sections = [assemble_section(s) for s in SAMPLE_IDS]
+if MULTI:
+    # concat spots across sections; intersect features, keep shared var columns
+    adata = sc.concat(sections, axis=0, join="inner", merge="same")
+    merged_spatial = {}
+    for sec in sections:
+        merged_spatial.update(sec.uns["spatial"])
+    adata.uns["spatial"] = merged_spatial
+else:
+    adata = sections[0]
+adata.obs[SECTION_KEY] = adata.obs[SECTION_KEY].astype("category")
 
 joint_adata = smt.util._classes.AnnDataJointSMST(adata)
-
-rna_spatial = joint_mudata.mod["rna"].uns["spatial"]
-msi_spatial = joint_mudata.mod["msi"].uns["spatial"]
-_assert_identical(rna_spatial, msi_spatial)
-
-joint_adata.uns["spatial"] = rna_spatial
-joint_adata.var = joint_adata.var.merge(joint_mudata.mod["msi"].var[['annotation']], left_on='feature_id', right_index=True, how='left')
 
 # %% identify spatially highly variable genes and metabolites
 
@@ -296,10 +334,16 @@ smt.pp.normalize_total_joint_adata_sm_st(
 joint_adata.layers["normalized"] = joint_adata.X.copy()
 joint_adata.raw = joint_adata
 
+# When integrating multiple sections, the batch_key branch also removes features whose abundance differs strongly *between* sections (assumed technical batch effects). That
+# filter cannot tell a batch effect from genuine cross-section biology: e.g. Dopamine
+# (and anything co-depleted with it) varies across sections by lesion extent (log2FC ~= 19.7 between A1 and C1) and gets dropped at the default min_logfc=3. Use a very lenient threshold so only the most extreme present/absent artifacts (log2FC > 25) are removed, retaining the dopamine-correlated biological axis.
 smt.pp.spatial_variable_joint_adata_sm_st(joint_adata,
                                          n_top_genes = 2000,
                                          n_top_metabolites = 800,
-                                         add_key = "highly_variable_moranI")
+                                         add_key = "highly_variable_moranI",
+                                         batch_key = SECTION_KEY if MULTI else None,
+                                         min_frac = 0.8,
+                                         min_logfc = 25)
 
 joint_adata = joint_adata[:,joint_adata.var.highly_variable_moranI]
 
@@ -332,17 +376,20 @@ joint_adata.X[:, sm_mask] = sm.X
 
 #%% differential expression/abundance analysis, comparing intact vs lesioned striatum
 if species == "human":
-    # create artificial lesion mask
+    # create artificial lesion mask, using a per-section Dopamine threshold
     x_dopamine = joint_adata[:, 'msi:Dopamine'].X.toarray().flatten()
     thresh_dopamine = {
         "V11T17-102_A1": 1.5,
         "V11T17-102_B1": 0.6,
         "V11T17-102_C1": 1.675,
         "V11T17-102_D1": 1.,
-    }.get(sample_id)
-    plt.figure(figsize=[3,2]); plt.hist(x_dopamine, bins=50); plt.axvline(thresh_dopamine, color='r'); plt.xlabel('Dopamine')
+    }
+    thresh_vec = joint_adata.obs[SECTION_KEY].map(thresh_dopamine).to_numpy(dtype=float)
+    for s in SAMPLE_IDS:
+        m = (joint_adata.obs[SECTION_KEY] == s).to_numpy()
+        plt.figure(figsize=[3,2]); plt.hist(x_dopamine[m], bins=50); plt.axvline(thresh_dopamine[s], color='r'); plt.xlabel(f'Dopamine ({s})')
 
-    joint_adata.obs['lesion'] = pd.Series(x_dopamine < thresh_dopamine, index=joint_adata.obs_names).map({True: 'lesioned', False: 'intact'})
+    joint_adata.obs['lesion'] = pd.Series(x_dopamine < thresh_vec, index=joint_adata.obs_names).map({True: 'lesioned', False: 'intact'})
     striatum_adata = joint_adata.copy()
 
 elif species == "mouse":
@@ -410,15 +457,25 @@ def spatial_plot(joint_adata, mask=None):
         if title in name_mapper:
             ax.set_title(name_mapper[title])
 
-spatial_plot(joint_adata)
-if species == "mouse":
-    spatial_plot(joint_adata, striatum_mask)
+for sample_id in SAMPLE_IDS:
+    section_adata = joint_adata[joint_adata.obs[SECTION_KEY].eq(sample_id)].copy()
+    # keep the {library_id: {...}} wrapper so sc.pl.spatial sees a single library
+    section_adata.uns['spatial'] = {sample_id: section_adata.uns['spatial'][sample_id]}
+    spatial_plot(section_adata)
+    if species == "mouse":
+        section_striatum_mask = section_adata.obs["region"].eq("striatum")
+        spatial_plot(section_adata, section_striatum_mask)
 
 # %%
 
 # instantiate models
-teacher_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=True)
-student_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False)
+# For horizontal integration (MULTI) pass the section as a batch key: this enables
+# decoder batch conditioning + the MMD alignment loss, and a block-diagonal spatial
+# graph (no cross-section edges) for the full-graph teacher.
+batch_keys = [SECTION_KEY] if MULTI else None
+section_key = SECTION_KEY if MULTI else None
+teacher_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=True, batch_keys=batch_keys, section_key=section_key)
+student_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False, batch_keys=batch_keys, section_key=section_key)
 #nonspatial_model = spatialJEPA_model(joint_adata, graph_conv=False, full_graph=False)
 #nonspatial_model.fit(max_epoch=250, lr=1e-5, mode="single")
 
@@ -429,11 +486,11 @@ spatialjepa_trainer = SpatialJEPA_trainer(
     student_model,
     n_per_batch=n_per_batch,
 )
-# train models
+# train models; mode="multi" upweights the MMD loss for horizontal integration
 loss_dict = spatialjepa_trainer.fit_teacher(
     max_epoch=250,
     lr=1e-5,
-    mode="single",
+    mode="multi" if MULTI else "single",
 )
 # extract outputs
 epoch_H = spatialjepa_trainer.epoch_H
@@ -496,6 +553,20 @@ def process_latent_embedding(domain: str) -> None:
     )
 
 
+def _spatial_by_section(adata, **kwargs):
+    """sc.pl.spatial once per section: with multiple sections, uns['spatial'] holds
+    one library per section, so plotting the pooled object raises 'multiple libraries'.
+    Subset to each section's spots and narrow uns to its single library. A single
+    library (single-section run) falls through to one plain call."""
+    libs = list(adata.uns["spatial"].keys()) if "spatial" in adata.uns else []
+    if len(libs) <= 1:
+        return sc.pl.spatial(adata, **kwargs)
+    for lib in libs:
+        sub = adata[adata.obs[SECTION_KEY].eq(lib)].copy()
+        sub.uns["spatial"] = {lib: adata.uns["spatial"][lib]}
+        sc.pl.spatial(sub, **kwargs)
+
+
 def plot_domain_results(domain: str, plot_marker: str) -> None:
     cluster_col = domain_key(domain, "VAE_clusters_latent10")
 
@@ -508,25 +579,25 @@ def plot_domain_results(domain: str, plot_marker: str) -> None:
         color_map="Reds",
         basis=domain_key(domain, "umap"),
     )
-    sc.pl.spatial(
+    _spatial_by_section(
         joint_adata,
         img_key="hires" if species == "mouse" else None,
         color=[cluster_col, "lesion", plot_marker] + (["region"] if species == "mouse" else []),
-        size=0.075,
+        size=0.125 if species == "human" else 0.075,
         show=False,
         ncols=2 if species == "mouse" else 3,
     )
-    sc.pl.spatial(
+    _spatial_by_section(
         joint_adata,
         img_key="hires" if species == "mouse" else None,
         color_map="vlag",
         color=MARKER_FEATURES,
         layer=domain_key(domain, "reconstruction"),
-        size=0.075,
+        size=0.125 if species == "human" else 0.075,
         wspace=0.005,
         show=False,
     )
-    sc.pl.spatial(
+    _spatial_by_section(
         joint_adata,
         img_key="hires" if species == "mouse" else None,
         color_map=CONTRIBUTION_CMAP,
@@ -538,7 +609,7 @@ def plot_domain_results(domain: str, plot_marker: str) -> None:
         wspace=0.005,
         show=False,
         alpha_img=0.1,
-        size=0.075,
+        size=0.125 if species == "human" else 0.075,
     )
 
     obs_filter_df = pd.concat([
@@ -571,7 +642,7 @@ for domain in DOMAIN_MODELS:
 
 # %%
 # CAPTION: UMAP of the joint ST+SM latent embedding (10-dim VAE, Leiden clusters). Colors: VAE clusters, tissue region, lesion status, and Dopamine (MSI). Shows how anatomy and pathology align with the integrated representation.
-plot_marker = MARKER_FEATURES[1]
+plot_marker = MARKER_FEATURES[-1]
 print("Plotting marker:", plot_marker)
 
 for domain in DOMAIN_MODELS:
@@ -579,7 +650,7 @@ for domain in DOMAIN_MODELS:
 
 #%%
 OUTPUT_DIR = Path(os.getenv("OUTPATH"))
-MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / sample_id
+MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / RUN_ID
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 save_spatialjepa_model(teacher_model, MODEL_DIR / "teacher.pt", full_graph=True)

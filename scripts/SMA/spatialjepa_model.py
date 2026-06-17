@@ -18,20 +18,52 @@ def build_spatial_edge_index(
     coords: np.ndarray,
     n_neighbors: int = 6,
     device: str = "cpu",
+    section_labels=None,
 ):
-    """kNN graph on spot coordinates for PyG GCNConv (spots = nodes)."""
+    """kNN graph on spot coordinates for PyG GCNConv (spots = nodes).
+
+    With ``section_labels`` (one label per row of ``coords``), the kNN graph is
+    built **per section** and unioned into a single block-diagonal ``edge_index``
+    (global node indexing, no edges between sections). This is required for
+    horizontal integration: Visium pixel coordinates overlap across slides, so a
+    single kNN over the pooled coordinates would create spurious cross-section
+    edges.
+    """
     from sklearn.neighbors import kneighbors_graph
     from torch_geometric.utils import from_scipy_sparse_matrix
 
-    adj = kneighbors_graph(
-        coords,
-        n_neighbors=n_neighbors,
-        mode="connectivity",
-        include_self=False,
-    )
-    adj = adj.maximum(adj.T)
-    edge_index, _ = from_scipy_sparse_matrix(adj.tocoo())
-    return edge_index.to(device)
+    def _section_edges(sub_coords):
+        k = min(n_neighbors, sub_coords.shape[0] - 1)
+        if k < 1:
+            return torch.empty((2, 0), dtype=torch.long)
+        adj = kneighbors_graph(
+            sub_coords,
+            n_neighbors=k,
+            mode="connectivity",
+            include_self=False,
+        )
+        adj = adj.maximum(adj.T)
+        edge_index, _ = from_scipy_sparse_matrix(adj.tocoo())
+        return edge_index.long()
+
+    coords = np.asarray(coords)
+    if section_labels is None:
+        return _section_edges(coords).to(device)
+
+    section_labels = np.asarray(section_labels)
+    global_idx = np.arange(coords.shape[0])
+    edge_blocks = []
+    for section in np.unique(section_labels):
+        mask = section_labels == section
+        local_edges = _section_edges(coords[mask])
+        if local_edges.numel() == 0:
+            continue
+        # map per-section local node indices back to global row indices
+        local_to_global = torch.as_tensor(global_idx[mask], dtype=torch.long)
+        edge_blocks.append(local_to_global[local_edges])
+    if not edge_blocks:
+        return torch.empty((2, 0), dtype=torch.long, device=device)
+    return torch.cat(edge_blocks, dim=1).to(device)
 
 
 def build_identity_edge_index(
@@ -170,12 +202,24 @@ def patch_model_encode_for_gcn(model) -> None:
     model.encode = encode_with_gcn_indices
 
 
-def spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False, device="cuda:0"):
+def spatialJEPA_model(
+    joint_adata,
+    graph_conv=True,
+    full_graph=False,
+    device="cuda:0",
+    batch_keys=None,
+    section_key=None,
+):
     """Build a ConditionalVAESTSM, optionally with GCN encoders.
 
     ``joint_adata`` must carry spot coordinates in ``obsm['spatial']`` when
     ``graph_conv=True`` (full-graph teacher needs them to build the kNN graph;
     the identity-graph student only needs ``n_obs``).
+
+    For horizontal (multi-section) integration, pass ``batch_keys`` (a list of
+    ``obs`` columns identifying the section/batch) to enable decoder batch
+    conditioning + the MMD alignment loss, and ``section_key`` so the full-graph
+    teacher builds a block-diagonal spatial graph (no cross-section edges).
     """
 
     model = smt.model.ConditionalVAESTSM(
@@ -183,6 +227,7 @@ def spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False, device="cu
         device=device,
         reconstruction_method_sm='g',
         reconstruction_method_st='zinb',
+        batch_keys=batch_keys,
     )
 
     if graph_conv:
@@ -193,10 +238,16 @@ def spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False, device="cu
             )
 
         if full_graph:
+            section_labels = (
+                joint_adata.obs[section_key].to_numpy()
+                if section_key is not None
+                else None
+            )
             edge_index = build_spatial_edge_index(
                 joint_adata.obsm["spatial"],
                 n_neighbors=6,
                 device=str(model.device),
+                section_labels=section_labels,
             )
         else:
             edge_index = build_identity_edge_index(
@@ -225,6 +276,7 @@ def save_spatialjepa_model(model, path, *, full_graph: bool):
             "reconstruction_method_st": model.reconstruction_method_st,
             "hidden_stacks": model.hidden_stacks,
             "n_latent": model.n_latent,
+            "batch_keys": getattr(model, "batch_keys", None),
         },
         path,
     )
@@ -244,6 +296,7 @@ def load_spatialjepa_model(checkpoint_path, template_joint_adata, device="cuda:0
         graph_conv=ckpt["graph_conv"],
         full_graph=ckpt["full_graph"],
         device=device,
+        batch_keys=ckpt.get("batch_keys"),
     )
     state = {
         k: v for k, v in ckpt["state_dict"].items() if not k.endswith("edge_index")

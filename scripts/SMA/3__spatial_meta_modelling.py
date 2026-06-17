@@ -224,9 +224,12 @@ class SpatialJEPA_trainer:
 
 
 #%% load data
-#joint_adata = load_joint_adata()
 
-sample_id = "V11T17-102_B1"
+## sample notes
+# V11T17-102_B1 probably has a large fold that increases dopamine and related genes
+
+sample_id = "V11T17-102_D1"
+
 species = "human" if sample_id.startswith("V11T17-102") else "mouse"
 METADATA_PATH = Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "mendeley_sma", "metadata.csv"))
 metadata = pd.read_csv(METADATA_PATH)
@@ -299,8 +302,14 @@ smt.pp.spatial_variable_joint_adata_sm_st(joint_adata,
                                          add_key = "highly_variable_moranI")
 
 joint_adata = joint_adata[:,joint_adata.var.highly_variable_moranI]
-#DATA_DIR.mkdir(parents=True, exist_ok=True)
-#joint_adata.write_h5ad(JOINT_HVF_PATH)
+
+# Drop spots with zero RNA library over the retained features. The ZINB ST decoder scales px_rna_scale by lib_size = X_ST.sum(1); a zero-library spot forces logits = log(mu/theta) = log(0) = -inf -> NaN loss on the first forward (independent of learning rate). C1 is the only human sample with none of these.
+st_mask = joint_adata.var["type"].eq("ST").to_numpy()
+st_lib = np.asarray(joint_adata[:, st_mask].X.sum(1)).ravel()
+n_empty_rna = int((st_lib == 0).sum())
+if n_empty_rna:
+    print(f"Dropping {n_empty_rna} spots with zero RNA library over HVF genes")
+    joint_adata = joint_adata[st_lib > 0].copy()
 
 #%%
 
@@ -353,46 +362,8 @@ sc.tl.rank_genes_groups(
 sc.pl.rank_genes_groups(striatum_adata, key="lesioned_vs_intact", n_genes=10)
 sc.pl.rank_genes_groups(striatum_adata, key="intact_vs_lesioned", n_genes=10)
 
-# %%
+#%% plot marker features
 
-# instantiate models
-teacher_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=True)
-student_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False)
-#nonspatial_model = spatialJEPA_model(joint_adata, graph_conv=False, full_graph=False)
-#nonspatial_model.fit(max_epoch=250, lr=1e-5, mode="single")
-
-# instantiate trainer for SpatialJEPA
-n_per_batch = 128
-spatialjepa_trainer = SpatialJEPA_trainer(
-    teacher_model,
-    student_model,
-    n_per_batch=n_per_batch,
-)
-# train models
-loss_dict = spatialjepa_trainer.fit_teacher(
-    max_epoch=250,
-    lr=1e-10,
-    mode="single",
-)
-# extract outputs
-epoch_H = spatialjepa_trainer.epoch_H
-batch_H = spatialjepa_trainer.batch_H
-student_distill_loss = spatialjepa_trainer.student_distill_loss
-epoch_student_distill_loss = spatialjepa_trainer.epoch_student_distill_loss
-
-# %%
-# CAPTION: Training loss curves for SpatialMETA (ConditionalVAESTSM) over 200 epochs. Each panel shows one tracked loss term (ST/SM reconstruction, correlation branches, KL, MMD). Use to assess convergence and balance between transcriptomics and metabolomics objectives.
-
-fig,axes=plt.subplots(3,3,figsize=(20,10))
-axes=axes.flatten()
-for ax,(k,v) in zip(axes, loss_dict.items()):
-    ax.plot(v)
-    ax.set_title(k)
-
-DOMAIN_MODELS = {
-    "teacher": teacher_model,
-    "student": student_model,
-}
 MARKER_GENES = [
     "Pcp4", "Tac1",          # V11L12-109_B1
     "Psap", "Sort1", "Snca", # V11L12-038_D1
@@ -424,8 +395,8 @@ def spatial_plot(joint_adata, mask=None):
     }
     spatial_axes = sc.pl.spatial(
         joint_adata[mask] if mask is not None else joint_adata,
-        img_key="hires",
-        color_map="terrain",
+        img_key="hires" if species == "mouse" else None,
+        color_map="vlag",
         color=MARKER_FEATURES + [key for key in ["lesion", "region"] if key in joint_adata.obs.keys()],
         layer="normalized",
         size=0.125 if species == "human" else 0.075,
@@ -442,6 +413,48 @@ def spatial_plot(joint_adata, mask=None):
 spatial_plot(joint_adata)
 if species == "mouse":
     spatial_plot(joint_adata, striatum_mask)
+
+# %%
+
+# instantiate models
+teacher_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=True)
+student_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False)
+#nonspatial_model = spatialJEPA_model(joint_adata, graph_conv=False, full_graph=False)
+#nonspatial_model.fit(max_epoch=250, lr=1e-5, mode="single")
+
+# instantiate trainer for SpatialJEPA
+n_per_batch = 128
+spatialjepa_trainer = SpatialJEPA_trainer(
+    teacher_model,
+    student_model,
+    n_per_batch=n_per_batch,
+)
+# train models
+loss_dict = spatialjepa_trainer.fit_teacher(
+    max_epoch=250,
+    lr=1e-5,
+    mode="single",
+)
+# extract outputs
+epoch_H = spatialjepa_trainer.epoch_H
+batch_H = spatialjepa_trainer.batch_H
+student_distill_loss = spatialjepa_trainer.student_distill_loss
+epoch_student_distill_loss = spatialjepa_trainer.epoch_student_distill_loss
+
+# CAPTION: Training loss curves for SpatialMETA (ConditionalVAESTSM) over 200 epochs. Each panel shows one tracked loss term (ST/SM reconstruction, correlation branches, KL, MMD). Use to assess convergence and balance between transcriptomics and metabolomics objectives.
+
+fig,axes=plt.subplots(3,3,figsize=(20,10))
+axes=axes.flatten()
+for ax,(k,v) in zip(axes, loss_dict.items()):
+    ax.plot(v)
+    ax.set_title(k)
+
+# %%
+
+DOMAIN_MODELS = {
+    "teacher": teacher_model,
+    "student": student_model,
+}
 
 CONTRIBUTION_CMAP = smt.pl.make_colormap(["#2ec4b6", "#ffffff", "#ff9f1c"])
 
@@ -497,7 +510,7 @@ def plot_domain_results(domain: str, plot_marker: str) -> None:
     )
     sc.pl.spatial(
         joint_adata,
-        img_key="hires",
+        img_key="hires" if species == "mouse" else None,
         color=[cluster_col, "lesion", plot_marker] + (["region"] if species == "mouse" else []),
         size=0.075,
         show=False,
@@ -505,7 +518,7 @@ def plot_domain_results(domain: str, plot_marker: str) -> None:
     )
     sc.pl.spatial(
         joint_adata,
-        img_key="hires",
+        img_key="hires" if species == "mouse" else None,
         color_map="vlag",
         color=MARKER_FEATURES,
         layer=domain_key(domain, "reconstruction"),
@@ -515,7 +528,7 @@ def plot_domain_results(domain: str, plot_marker: str) -> None:
     )
     sc.pl.spatial(
         joint_adata,
-        img_key="hires",
+        img_key="hires" if species == "mouse" else None,
         color_map=CONTRIBUTION_CMAP,
         color=[
             domain_key(domain, "contribution_st"),

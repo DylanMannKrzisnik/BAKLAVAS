@@ -1,8 +1,14 @@
 #!/usr/bin/env Rscript
 # Export aligned se.multi.list to Matrix Market + metadata for Python/MuData.
 #
-# Usage:
+# Usage (murine samples, default):
 #   Rscript export_se_multi_to_mtx.R
+#
+# Usage (human V11T17-102 sections from nearest_neighbors CSVs):
+#   Rscript export_se_multi_to_mtx.R \
+#     --input-rds hPDStr.multi.list \
+#     --from-neighbors-csv "/path/to/results/tables/V11T17-102_*_nearest_neighbors.csv"
+#
 #   /Users/dmannk/cisformer/envs/torch_env_py39/bin/python build_mudata_from_mtx.py
 
 suppressPackageStartupMessages({
@@ -10,34 +16,108 @@ suppressPackageStartupMessages({
   library(Matrix)
 })
 
+parse_args <- function(args) {
+  opts <- list(
+    input_rds = "se.multi.list",
+    samples = NULL,
+    from_neighbors_csv = NULL,
+    knn_rds = "knn_spatial_df_filtered_list"
+  )
+  i <- 1L
+  while (i <= length(args)) {
+    key <- args[[i]]
+    if (key %in% c("--input-rds", "--samples", "--from-neighbors-csv", "--knn-rds")) {
+      if (i == length(args)) stop("Missing value for ", key)
+      value <- args[[i + 1L]]
+      switch(
+        key,
+        "--input-rds" = { opts$input_rds <- value },
+        "--samples" = { opts$samples <- strsplit(value, ",", fixed = TRUE)[[1]] },
+        "--from-neighbors-csv" = { opts$from_neighbors_csv <- value },
+        "--knn-rds" = { opts$knn_rds <- value }
+      )
+      i <- i + 2L
+    } else {
+      stop("Unknown argument: ", key)
+    }
+  }
+  opts
+}
+
+sample_id_from_neighbors_csv <- function(path) {
+  basename <- tools::file_path_sans_ext(basename(path))
+  sub("_nearest_neighbors$", "", basename)
+}
+
+load_alignment_from_neighbors_csv <- function(path) {
+  alignment <- read.csv(path, stringsAsFactors = FALSE)
+  required_cols <- c("from", "to", "distance", "x", "x_end", "y", "y_end")
+  missing_cols <- setdiff(required_cols, colnames(alignment))
+  if (length(missing_cols) > 0) {
+    stop(path, " is missing columns: ", paste(missing_cols, collapse = ", "))
+  }
+  alignment[, required_cols, drop = FALSE]
+}
+
 working.dir <- "/Users/dmannk/BAKLAVA_base/outputs/SMA"
 r_dir <- file.path(working.dir, "R_objects")
 out_dir <- file.path(working.dir, "h5mu_export")
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-se.multi.list <- readRDS(file.path(r_dir, "se.multi.list"))
-se.rna.list <- readRDS(file.path(r_dir, "se.RNA.list"))
-knn_path <- file.path(r_dir, "knn_spatial_df_filtered_list")
-knn_spatial_df_filtered_list <- if (file.exists(knn_path)) readRDS(knn_path) else NULL
+cli <- parse_args(commandArgs(trailingOnly = TRUE))
 
-if (is.null(names(se.multi.list)) || any(names(se.multi.list) == "")) {
-  if (length(se.multi.list) != length(se.rna.list)) {
-    stop("se.multi.list and se.RNA.list have different lengths; cannot assign sample names.")
+se.multi.list <- readRDS(file.path(r_dir, cli$input_rds))
+alignment_by_sample <- list()
+
+if (!is.null(cli$from_neighbors_csv)) {
+  neighbor_paths <- Sys.glob(cli$from_neighbors_csv)
+  if (length(neighbor_paths) == 0) {
+    stop("No files matched --from-neighbors-csv: ", cli$from_neighbors_csv)
   }
-  names(se.multi.list) <- names(se.rna.list)
+  for (path in neighbor_paths) {
+    sample_id <- sample_id_from_neighbors_csv(path)
+    alignment_by_sample[[sample_id]] <- load_alignment_from_neighbors_csv(path)
+  }
+  if (is.null(cli$samples)) {
+    cli$samples <- names(alignment_by_sample)
+  }
+} else {
+  knn_path <- file.path(r_dir, cli$knn_rds)
+  knn_spatial_df_filtered_list <- if (file.exists(knn_path)) readRDS(knn_path) else NULL
+
+  if (is.null(names(se.multi.list)) || any(names(se.multi.list) == "")) {
+    se.rna.list <- readRDS(file.path(r_dir, "se.RNA.list"))
+    if (length(se.multi.list) != length(se.rna.list)) {
+      stop("se.multi.list and se.RNA.list have different lengths; cannot assign sample names.")
+    }
+    names(se.multi.list) <- names(se.rna.list)
+  }
+
+  if (!is.null(knn_spatial_df_filtered_list)) {
+    if (is.null(names(knn_spatial_df_filtered_list)) || any(names(knn_spatial_df_filtered_list) == "")) {
+      if (length(knn_spatial_df_filtered_list) != length(se.multi.list)) {
+        stop("knn_spatial_df_filtered_list and se.multi.list have different lengths; cannot assign sample names.")
+      }
+      names(knn_spatial_df_filtered_list) <- names(se.multi.list)
+    }
+    alignment_by_sample <- knn_spatial_df_filtered_list
+  }
 }
 
-if (!is.null(knn_spatial_df_filtered_list)) {
-  if (is.null(names(knn_spatial_df_filtered_list)) || any(names(knn_spatial_df_filtered_list) == "")) {
-    if (length(knn_spatial_df_filtered_list) != length(se.multi.list)) {
-      stop("knn_spatial_df_filtered_list and se.multi.list have different lengths; cannot assign sample names.")
-    }
-    names(knn_spatial_df_filtered_list) <- names(se.multi.list)
-  }
+if (is.null(names(se.multi.list)) || any(names(se.multi.list) == "")) {
+  stop("Sample names are missing from ", cli$input_rds, "; pass --samples explicitly.")
+}
 
-  missing_samples <- setdiff(names(se.multi.list), names(knn_spatial_df_filtered_list))
-  if (length(missing_samples) > 0) {
-    stop("Missing alignment metadata for samples: ", paste(missing_samples, collapse = ", "))
+sample_ids <- if (is.null(cli$samples)) names(se.multi.list) else cli$samples
+missing_samples <- setdiff(sample_ids, names(se.multi.list))
+if (length(missing_samples) > 0) {
+  stop("Samples not found in ", cli$input_rds, ": ", paste(missing_samples, collapse = ", "))
+}
+
+if (length(alignment_by_sample) > 0) {
+  missing_alignment <- setdiff(sample_ids, names(alignment_by_sample))
+  if (length(missing_alignment) > 0) {
+    stop("Missing alignment metadata for samples: ", paste(missing_alignment, collapse = ", "))
   }
 }
 
@@ -117,9 +197,9 @@ export_one <- function(se, sample_id, out_dir, alignment = NULL) {
   message("Wrote ", sample_dir, " (", ncol(se), " paired spots)")
 }
 
-for (sample_id in names(se.multi.list)) {
-  alignment <- if (!is.null(knn_spatial_df_filtered_list)) {
-    knn_spatial_df_filtered_list[[sample_id]]
+for (sample_id in sample_ids) {
+  alignment <- if (length(alignment_by_sample) > 0) {
+    alignment_by_sample[[sample_id]]
   } else {
     NULL
   }

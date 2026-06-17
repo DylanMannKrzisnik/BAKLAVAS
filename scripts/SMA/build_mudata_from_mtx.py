@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import warnings
 from pathlib import Path
-
-import anndata as ad
-import mudata as mu
-import numpy as np
-import pandas as pd
-from scipy.io import mmread
 
 
 EXPORT_DIR = Path("/Users/dmannk/BAKLAVA_base/outputs/SMA/h5mu_export")
@@ -19,10 +14,14 @@ DEFAULT_VISIUM_DATA_ROOT = BAKLAVA_BASE / "data" / "vicari_2023" / "data"
 
 
 def read_vector(path: Path) -> pd.Series:
+    import pandas as pd
+
     return pd.read_csv(path, header=None, dtype=str)[0].astype(str)
 
 
 def read_features(path: Path, modality: str) -> pd.DataFrame:
+    import pandas as pd
+
     feature_ids = read_vector(path)
     var = pd.DataFrame(index=pd.Index(feature_ids, name="feature_id"))
     var["feature_id"] = var.index.astype(str)
@@ -36,6 +35,8 @@ def read_features(path: Path, modality: str) -> pd.DataFrame:
 
 
 def read_obs(sample_dir: Path, barcodes: pd.Series) -> pd.DataFrame:
+    import pandas as pd
+
     sample_id = sample_dir.name
     obs = pd.read_csv(sample_dir / "obs.tsv", sep="\t")
     if "barcode" not in obs.columns:
@@ -62,6 +63,9 @@ def read_obs(sample_dir: Path, barcodes: pd.Series) -> pd.DataFrame:
 
 
 def build_anndata(matrix_path: Path, obs: pd.DataFrame, var: pd.DataFrame) -> ad.AnnData:
+    import anndata as ad
+    from scipy.io import mmread
+
     counts = mmread(matrix_path).tocsr()
     expected_shape = (obs.shape[0], var.shape[0])
     if counts.shape != expected_shape:
@@ -78,6 +82,9 @@ def build_anndata(matrix_path: Path, obs: pd.DataFrame, var: pd.DataFrame) -> ad
 
 
 def numeric_obsm(obs: pd.DataFrame, columns: list[str]) -> np.ndarray | None:
+    import numpy as np
+    import pandas as pd
+
     if not set(columns).issubset(obs.columns):
         return None
 
@@ -155,6 +162,8 @@ def add_spatial_metadata(rna: ad.AnnData, msi: ad.AnnData, obs: pd.DataFrame) ->
 
 
 def load_sample_from_mtx(sample_dir: Path) -> mu.MuData:
+    import mudata as mu
+
     barcodes = read_vector(sample_dir / "barcodes.tsv")
     obs = read_obs(sample_dir, barcodes)
 
@@ -168,8 +177,36 @@ def load_sample_from_mtx(sample_dir: Path) -> mu.MuData:
     return mdata
 
 
-def build_all(export_dir: Path = EXPORT_DIR) -> dict[str, mu.MuData]:
-    samples = sorted(p.name for p in export_dir.iterdir() if p.is_dir())
+def parse_sample_list(value: str) -> list[str]:
+    return [sample.strip() for sample in value.split(",") if sample.strip()]
+
+
+def discover_samples(export_dir: Path, sample_glob: str | None = None) -> list[str]:
+    if sample_glob:
+        candidates = export_dir.glob(sample_glob)
+    else:
+        candidates = export_dir.iterdir()
+    return sorted(p.name for p in candidates if p.is_dir())
+
+
+def build_all(
+    export_dir: Path = EXPORT_DIR,
+    samples: list[str] | None = None,
+    sample_glob: str | None = None,
+) -> dict[str, mu.MuData]:
+    if samples is None:
+        samples = discover_samples(export_dir, sample_glob)
+    else:
+        missing = [sample_id for sample_id in samples if not (export_dir / sample_id).is_dir()]
+        if missing:
+            raise FileNotFoundError(
+                "Missing exported sample directories: "
+                + ", ".join(str(export_dir / sample_id) for sample_id in missing)
+            )
+
+    if not samples:
+        raise FileNotFoundError(f"No exported sample directories found in {export_dir}")
+
     out: dict[str, mu.MuData] = {}
     for sample_id in samples:
         mdata = load_sample_from_mtx(export_dir / sample_id)
@@ -185,5 +222,26 @@ def build_all(export_dir: Path = EXPORT_DIR) -> dict[str, mu.MuData]:
     return out
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--export-dir",
+        type=Path,
+        default=EXPORT_DIR,
+        help=f"Directory containing per-sample MTX exports (default: {EXPORT_DIR})",
+    )
+    parser.add_argument(
+        "--samples",
+        type=parse_sample_list,
+        help="Comma-separated sample IDs to build, e.g. V11T17-102_A1,V11T17-102_B1",
+    )
+    parser.add_argument(
+        "--sample-glob",
+        help="Glob pattern for sample directories under --export-dir, e.g. 'V11T17-102*'",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    build_all()
+    args = parse_args()
+    build_all(export_dir=args.export_dir, samples=args.samples, sample_glob=args.sample_glob)

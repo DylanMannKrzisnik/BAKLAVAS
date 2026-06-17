@@ -6,25 +6,60 @@ Paths below are relative to the directory containing `BAKLAVA_base`.
 
 ## Inputs
 
+There are two alignment workflows, depending on sample type:
+
+### Murine samples (default)
+
 Run or reproduce the alignment workflow in:
 
 `BAKLAVA_base/sma/scripts/MSI_SRT_mPD_LL.Rmd`
 
-This must create these R objects:
+This creates:
 
-`BAKLAVA_base/outputs/SMA/R_objects/se.multi.list`
+- `BAKLAVA_base/outputs/SMA/R_objects/se.multi.list`
+- `BAKLAVA_base/outputs/SMA/R_objects/knn_spatial_df_filtered_list`
 
-`BAKLAVA_base/outputs/SMA/R_objects/knn_spatial_df_filtered_list`
+### Human samples (V11T17-102)
 
-`se.multi.list` contains paired RNA and MSI assays. `knn_spatial_df_filtered_list` contains the RNA-MSI alignment mapping.
+Run or reproduce the alignment workflow in:
+
+`BAKLAVA_base/sma/scripts/MSI_SRT_hPDStr_LLMV.Rmd`
+
+This creates:
+
+- `BAKLAVA_base/outputs/SMA/R_objects/hPDStr.multi.list`
+- `BAKLAVA_base/outputs/SMA/results/tables/<sample_id>_nearest_neighbors.csv` (one per section)
+
+`se.multi.list` / `hPDStr.multi.list` contain paired RNA and MSI assays. Alignment mapping is stored in `knn_spatial_df_filtered_list` (murine) or the `*_nearest_neighbors.csv` tables (human).
 
 ## Step 1: Export Seurat Objects
 
+### Murine samples
+
 ```bash
-Rscript BAKLAVA_base/outputs/SMA/scripts/export_se_multi_to_mtx.R
+Rscript BAKLAVA_base/BAKLAVAS/scripts/SMA/export_se_multi_to_mtx.R
 ```
 
-This writes per-sample Matrix Market files to:
+### Human V11T17-102 sections (A1, B1, C1, D1)
+
+Use `hPDStr.multi.list` and the nearest-neighbor CSVs written by `MSI_SRT_hPDStr_LLMV.Rmd`:
+
+```bash
+Rscript BAKLAVA_base/BAKLAVAS/scripts/SMA/export_se_multi_to_mtx.R \
+  --input-rds hPDStr.multi.list \
+  --from-neighbors-csv "BAKLAVA_base/outputs/SMA/results/tables/V11T17-102_*_nearest_neighbors.csv"
+```
+
+To export only specific sections, pass `--samples` explicitly:
+
+```bash
+Rscript BAKLAVA_base/BAKLAVAS/scripts/SMA/export_se_multi_to_mtx.R \
+  --input-rds hPDStr.multi.list \
+  --samples V11T17-102_A1,V11T17-102_B1,V11T17-102_C1,V11T17-102_D1 \
+  --from-neighbors-csv "BAKLAVA_base/outputs/SMA/results/tables/V11T17-102_*_nearest_neighbors.csv"
+```
+
+Both workflows write per-sample Matrix Market files to:
 
 `BAKLAVA_base/outputs/SMA/h5mu_export/<sample_id>/`
 
@@ -36,9 +71,27 @@ Each sample directory contains:
 
 ## Step 2: Build h5mu Files
 
+### Build all exported samples
+
 ```bash
 /Users/dmannk/cisformer/envs/torch_env_py39/bin/python \
-  BAKLAVA_base/outputs/SMA/scripts/build_mudata_from_mtx.py
+  BAKLAVA_base/BAKLAVAS/scripts/SMA/build_mudata_from_mtx.py
+```
+
+### Build only the human V11T17-102 sections
+
+```bash
+/Users/dmannk/cisformer/envs/torch_env_py39/bin/python \
+  BAKLAVA_base/BAKLAVAS/scripts/SMA/build_mudata_from_mtx.py \
+  --sample-glob 'V11T17-102*'
+```
+
+You can also list sections explicitly:
+
+```bash
+/Users/dmannk/cisformer/envs/torch_env_py39/bin/python \
+  BAKLAVA_base/BAKLAVAS/scripts/SMA/build_mudata_from_mtx.py \
+  --samples V11T17-102_A1,V11T17-102_B1,V11T17-102_C1,V11T17-102_D1
 ```
 
 This writes one `.h5mu` file per sample:

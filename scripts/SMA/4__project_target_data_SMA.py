@@ -31,14 +31,16 @@ from anndata import AnnData
 
 sys.path.insert(0, os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
 from spatialjepa_model import load_spatialjepa_model
+from gcs_data import read_h5ad, target_rna_path
+
+SAMPLE_ID = "V11L12-038_D1"  # SMA sample whose trained encoders we project with
+
+# Local default: mouse. For SEA-AD on GCS set TARGET_DATASET=human_sead_mtg in .env.
+TARGET_DATASET = os.getenv("TARGET_DATASET", "mouse_spatial_atac_rna_seq")
+TARGET_RNA_PATH = target_rna_path(TARGET_DATASET)
 
 OUTPUT_DIR = Path(os.getenv("OUTPATH"))
-SAMPLE_ID = "V11L12-038_D1"  # SMA sample whose trained encoders we project with
 MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / SAMPLE_ID
-TARGET_RNA_PATH = Path(
-    "/home/mcb/users/dmannk/BAKLAVA_base/data/Spatial_ATAC_RNA/mouse/"
-    "spatial_omics/spatial_atac_rna_seq_mouse_brain.h5ad"
-)
 PROJ_DIR = OUTPUT_DIR / "spatialjepa_projection" / SAMPLE_ID
 PROJ_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -47,7 +49,7 @@ RNA_PREFIX = "rna:"
 
 #%% Load the trained feature space (template) and the target RNA.
 
-template = sc.read_h5ad(MODEL_DIR / "joint_adata.h5ad")
+template = read_h5ad(MODEL_DIR / "joint_adata.h5ad")
 st_mask = (template.var["type"].values == "ST")
 sm_mask = (template.var["type"].values == "SM")
 st_cols = np.where(st_mask)[0]
@@ -59,7 +61,8 @@ sma_genes = pd.Index(
 print(f"[INFO] Template: {template.shape} "
       f"({int(st_mask.sum())} ST + {int(sm_mask.sum())} SM features)")
 
-target = sc.read_h5ad(TARGET_RNA_PATH)
+print(f"[INFO] Loading target RNA from {TARGET_RNA_PATH}")
+target = read_h5ad(TARGET_RNA_PATH)
 target.obsm['spatial'] = np.array([1, -1]) * target.obsm['spatial']
 target.var_names_make_unique()
 target_counts = target.layers["counts"] if "counts" in target.layers else target.X

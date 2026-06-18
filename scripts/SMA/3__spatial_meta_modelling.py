@@ -62,6 +62,14 @@ from spatialjepa_model import (
     save_spatialjepa_model,
     copy_decoder_weights,
 )
+from feature_panel import load_target_panel, restrict_st_to_target_panel
+
+# Optional target-aware ST panel restriction. When SMA_TARGET_PANEL points at a ranked
+# gene CSV (see Lipid_GP/build_target_gene_ranking.py), the model's ST features are
+# restricted to the top SMA_N_TARGET_TOP genes of that ranking before spatial-variability
+# selection, so the trained encoder only keeps genes the transfer target also measures.
+TARGET_PANEL_PATH = os.getenv("SMA_TARGET_PANEL")
+N_TARGET_TOP = int(os.getenv("SMA_N_TARGET_TOP", "2000"))
 
 class SpatialJEPA_trainer:
     """Train a full-graph teacher while distilling its batch embeddings to a student."""
@@ -334,6 +342,17 @@ smt.pp.normalize_total_joint_adata_sm_st(
 
 joint_adata.layers["normalized"] = joint_adata.X.copy()
 joint_adata.raw = joint_adata
+
+# Restrict ST features to a ranked target panel (if provided) before Moran's-I selection,
+# so the candidate ST pool only contains genes the transfer target measures. Whitelisted
+# target genes sit at the top of the ranking, so they are always in the candidate pool.
+if TARGET_PANEL_PATH:
+    joint_adata, panel_diag = restrict_st_to_target_panel(
+        joint_adata,
+        load_target_panel(TARGET_PANEL_PATH),
+        n_target_top=N_TARGET_TOP,
+    )
+    print(f"[panel] restricted ST to target panel: {panel_diag}")
 
 # When integrating multiple sections, the batch_key branch also removes features whose abundance differs strongly *between* sections (assumed technical batch effects). That
 # filter cannot tell a batch effect from genuine cross-section biology: e.g. Dopamine

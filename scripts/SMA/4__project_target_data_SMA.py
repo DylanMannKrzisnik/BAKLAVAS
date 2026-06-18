@@ -30,6 +30,7 @@ import spatialmeta as smt
 from anndata import AnnData
 
 sys.path.insert(0, os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
+sys.path.insert(0, os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "gcs_scripts"))
 from spatialjepa_model import load_spatialjepa_model
 from gcs_data import read_h5ad, target_rna_path
 

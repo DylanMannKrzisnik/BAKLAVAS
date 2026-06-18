@@ -488,7 +488,7 @@ spatialjepa_trainer = SpatialJEPA_trainer(
 )
 # train models; mode="multi" upweights the MMD loss for horizontal integration
 loss_dict = spatialjepa_trainer.fit_teacher(
-    max_epoch=250,
+    max_epoch=1000,
     lr=1e-5,
     mode="multi" if MULTI else "single",
 )
@@ -648,6 +648,13 @@ print("Plotting marker:", plot_marker)
 for domain in DOMAIN_MODELS:
     plot_domain_results(domain, plot_marker)
 
+if MULTI:
+    cluster_crosstab = pd.crosstab(joint_adata.obs['teacher_VAE_clusters_latent10'], joint_adata.obs['section'])
+    cluster_crosstab.plot(kind="bar", stacked=True, figsize=(10, 5))
+    plt.title("Cluster distribution by section")
+    plt.ylabel("Count")
+    plt.show()
+
 #%%
 OUTPUT_DIR = Path(os.getenv("OUTPATH"))
 MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / RUN_ID
@@ -658,3 +665,5 @@ save_spatialjepa_model(student_model, MODEL_DIR / "student.pt", full_graph=False
 
 # model.initialize_dataset() reads from adata.X at construction time
 joint_adata.write_h5ad(MODEL_DIR / "joint_adata.h5ad")
+
+# %%

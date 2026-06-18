@@ -7,11 +7,21 @@ single source of truth for how a ``ConditionalVAESTSM`` is turned into a
 spatial (teacher) or graph-free (student) SpatialJEPA model.
 """
 
+from copy import deepcopy
+from typing import Iterable, Optional, Union
+
 import numpy as np
+import scipy.sparse
 import torch
 import torch.nn as nn
+from torch import optim
+from torch.distributions import Normal
+from torch.distributions import kl_divergence as kld
 
 import spatialmeta as smt
+from spatialmeta.util.compat import Literal
+from spatialmeta.util.logger import get_tqdm
+from spatialmeta.util.loss import LossFunction
 
 
 def build_spatial_edge_index(
@@ -202,6 +212,289 @@ def patch_model_encode_for_gcn(model) -> None:
     model.encode = encode_with_gcn_indices
 
 
+class ConditionalVAESTSM_STtoSM(smt.model.ConditionalVAESTSM):
+    """``ConditionalVAESTSM`` with an added ST->SM cross-reconstruction objective.
+
+    The base model only decodes each modality from its own latent
+    (``decoder_st(z_st)``, ``decoder_sm(z_sm)``). For RNA-only transfer (e.g. SEA-AD)
+    we additionally want ``decoder_sm(z_st)`` -- reconstructing SM from the ST-only
+    expert latent ``H['st']['q_mu']`` -- to be *directly* supervised, since that is
+    exactly the path used at inference (see
+    ``embed_with_spatialmeta.get_st_latent_and_msi_decoding``). This reuses the
+    existing ``decoder_sm`` / ``px_sm_*`` modules and adds **no new parameters**, so
+    checkpoints remain interchangeable with the base class.
+    """
+
+    def _sm_cross_reconstruction_loss(self, X, H, batch_index, reduction):
+        z_st = H["st"]["q_mu"]
+        if batch_index is not None:
+            z_st = torch.hstack([z_st, batch_index])
+        px_sm_cross = self.decoder_sm(z_st.to(self.device))
+        px_sm_cross_scale = self.px_sm_scale_decoder(px_sm_cross)
+        px_sm_cross_rate = self.px_sm_rate_decoder(px_sm_cross)
+        px_sm_cross_dropout = self.px_sm_dropout_decoder(px_sm_cross)
+        X_SM = X[:, self._type == "SM"]
+        if self.reconstruction_method_sm == "zg":
+            return LossFunction.zi_gaussian_reconstruction_loss(
+                X_SM,
+                mean=px_sm_cross_scale,
+                variance=px_sm_cross_rate.exp(),
+                gate_logits=px_sm_cross_dropout,
+                reduction=reduction,
+            )
+        elif self.reconstruction_method_sm == "mse":
+            return nn.MSELoss()(px_sm_cross_scale, X_SM)
+        else:  # 'g'
+            return LossFunction.gaussian_reconstruction_loss(
+                X_SM,
+                mean=px_sm_cross_scale,
+                variance=px_sm_cross_rate.exp(),
+                reduction=reduction,
+            )
+
+    def forward(self, X, batch_index=None, reduction="sum"):
+        H, Rs, L = super().forward(X, batch_index=batch_index, reduction=reduction)
+        L["reconstruction_loss_sm_cross"] = self._sm_cross_reconstruction_loss(
+            X, H, batch_index, reduction
+        )
+        return H, Rs, L
+
+    def fit(
+        self,
+        max_epoch: int = 35,
+        n_per_batch: int = 128,
+        mode: Optional[Literal["single", "multi"]] = None,
+        **kwargs,
+    ):
+        """Same presets as the base class plus a default ST->SM cross weight."""
+        if mode == "single":
+            kwargs["reconstruction_st_weight"] = 5
+            kwargs["reconstruction_sm_weight"] = 1
+            kwargs["reconstruction_st_corr_weight"] = 5
+            kwargs["reconstruction_sm_corr_weight"] = 1
+            kwargs["reconstruction_sm_cross_weight"] = 1
+            kwargs["kl_weight"] = 0.5
+        elif mode == "multi":
+            kwargs["reconstruction_st_weight"] = 8
+            kwargs["reconstruction_sm_weight"] = 2
+            kwargs["reconstruction_st_corr_weight"] = 8
+            kwargs["reconstruction_sm_corr_weight"] = 2
+            kwargs["reconstruction_sm_cross_weight"] = 2
+            kwargs["kl_weight"] = 1
+            kwargs["mmd_weight"] = 10
+        return self.fit_core(max_epoch=max_epoch, n_per_batch=n_per_batch, **kwargs)
+
+    def fit_core(
+        self,
+        max_epoch: int = 35,
+        n_per_batch: int = 128,
+        reconstruction_reduction: str = "sum",
+        kl_weight: float = 1.0,
+        reconstruction_st_weight: float = 1.0,
+        reconstruction_sm_weight: float = 1.0,
+        reconstruction_st_corr_weight: float = 1.0,
+        reconstruction_sm_corr_weight: float = 1.0,
+        reconstruction_sm_cross_weight: float = 1.0,
+        n_epochs_kl_warmup: Union[int, None] = 400,
+        optimizer_parameters: Iterable = None,
+        weight_decay: float = 1e-6,
+        lr: bool = 5e-5,
+        random_seed: int = 12,
+        kl_loss_reduction: str = "mean",
+        mmd_weight: float = 1.0,
+    ):
+        """Copy of ``ConditionalVAESTSM.fit_core`` with the added ST->SM cross term."""
+        self.train()
+        if n_epochs_kl_warmup:
+            n_epochs_kl_warmup = min(max_epoch, n_epochs_kl_warmup)
+            kl_warmup_gradient = kl_weight / n_epochs_kl_warmup
+            kl_weight_max = kl_weight
+            kl_weight = 0.0
+
+        if optimizer_parameters is None:
+            optimizer = optim.AdamW(self.parameters(), lr, weight_decay=weight_decay)
+        else:
+            optimizer = optim.AdamW(optimizer_parameters, lr, weight_decay=weight_decay)
+        pbar = get_tqdm()(range(max_epoch), desc="Epoch", bar_format="{l_bar}{bar:10}{r_bar}{bar:-10b}")
+
+        epoch_reconstruction_loss_st_list = []
+        epoch_reconstruction_loss_sm_list = []
+        epoch_reconstruction_loss_st_corr_list = []
+        epoch_reconstruction_loss_sm_corr_list = []
+        epoch_reconstruction_loss_sm_cross_list = []
+        epoch_kldiv_loss_list = []
+        epoch_total_loss_list = []
+        epoch_mmd_loss_list = []
+
+        for epoch in range(1, max_epoch + 1):
+            self._trained = True
+            pbar.desc = "Epoch {}".format(epoch)
+            epoch_total_loss = 0
+            epoch_reconstruction_loss_sm = 0
+            epoch_reconstruction_loss_st = 0
+            epoch_reconstruction_loss_sm_corr = 0
+            epoch_reconstruction_loss_st_corr = 0
+            epoch_reconstruction_loss_sm_cross = 0
+            epoch_kldiv_loss = 0
+            epoch_mmd_loss = 0
+
+            X_train = self.as_dataloader(batch_size=n_per_batch, shuffle=True)
+            for batch_idx in X_train:
+                indices = batch_idx[0].cpu().numpy()
+                X_batch = []
+                for idx in indices:
+                    if scipy.sparse.issparse(self.X):
+                        x_row = self.X.getrow(idx).toarray().squeeze()
+                    else:
+                        x_row = self.X[idx]
+                    X_batch.append(x_row)
+                X_batch = torch.tensor(np.stack(X_batch), dtype=torch.float32).to(self.device)
+                if self.batch_codes is not None:
+                    batch_index = [
+                        torch.tensor(code[indices], dtype=torch.long).unsqueeze(1).to(self.device)
+                        for code in self.batch_codes
+                    ]
+                    batch_index = torch.hstack(batch_index)
+                else:
+                    batch_index = None
+
+                H, Rs, L = self.forward(
+                    X_batch,
+                    batch_index=batch_index,
+                    reduction=reconstruction_reduction,
+                )
+
+                reconstruction_loss_st = L["reconstruction_loss_st"]
+                reconstruction_loss_sm = L["reconstruction_loss_sm"]
+                reconstruction_loss_st_corr = L["reconstruction_loss_st_corr"]
+                reconstruction_loss_sm_corr = L["reconstruction_loss_sm_corr"]
+                reconstruction_loss_sm_cross = L["reconstruction_loss_sm_cross"]
+                kldiv_loss = L["kldiv_loss"]
+                mmd_loss = L["mmd_loss"]
+
+                avg_reconstruction_loss_st = reconstruction_loss_st.mean() / n_per_batch
+                avg_reconstruction_loss_sm = reconstruction_loss_sm.mean() / n_per_batch
+                avg_reconstruction_loss_st_corr = reconstruction_loss_st_corr.mean() / n_per_batch
+                avg_reconstruction_loss_sm_corr = reconstruction_loss_sm_corr.mean() / n_per_batch
+                avg_reconstruction_loss_sm_cross = reconstruction_loss_sm_cross.mean() / n_per_batch
+                avg_mmd_loss = mmd_loss.mean() / n_per_batch
+
+                if kl_loss_reduction == "mean":
+                    avg_kldiv_loss = kldiv_loss.mean() / n_per_batch
+                elif kl_loss_reduction == "sum":
+                    avg_kldiv_loss = kldiv_loss.sum() / n_per_batch
+
+                loss = (
+                    (avg_reconstruction_loss_sm * reconstruction_sm_weight)
+                    + (avg_reconstruction_loss_st * reconstruction_st_weight)
+                    + (avg_reconstruction_loss_sm_corr * reconstruction_sm_corr_weight)
+                    + (avg_reconstruction_loss_st_corr * reconstruction_st_corr_weight)
+                    + (avg_reconstruction_loss_sm_cross * reconstruction_sm_cross_weight)
+                    + (avg_kldiv_loss * kl_weight)
+                    + (avg_mmd_loss * mmd_weight)
+                )
+
+                epoch_reconstruction_loss_sm += avg_reconstruction_loss_sm.item()
+                epoch_reconstruction_loss_st += avg_reconstruction_loss_st.item()
+                epoch_reconstruction_loss_sm_corr += avg_reconstruction_loss_sm_corr.item()
+                epoch_reconstruction_loss_st_corr += avg_reconstruction_loss_st_corr.item()
+                epoch_reconstruction_loss_sm_cross += avg_reconstruction_loss_sm_cross.item()
+                epoch_mmd_loss += avg_mmd_loss.item()
+                epoch_kldiv_loss += avg_kldiv_loss.item()
+                epoch_total_loss += loss.item()
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            pbar.set_postfix(
+                {
+                    "reconst_sm": "{:.2e}".format(epoch_reconstruction_loss_sm),
+                    "reconst_st": "{:.2e}".format(epoch_reconstruction_loss_st),
+                    "reconst_sm_corr": "{:.2e}".format(epoch_reconstruction_loss_sm_corr),
+                    "reconst_st_corr": "{:.2e}".format(epoch_reconstruction_loss_st_corr),
+                    "reconst_sm_cross": "{:.2e}".format(epoch_reconstruction_loss_sm_cross),
+                    "kldiv": "{:.2e}".format(epoch_kldiv_loss),
+                    "total_loss": "{:.2e}".format(epoch_total_loss),
+                    "mmd_loss": "{:.2e}".format(epoch_mmd_loss),
+                }
+            )
+
+            pbar.update(1)
+            epoch_reconstruction_loss_sm_list.append(epoch_reconstruction_loss_sm)
+            epoch_reconstruction_loss_st_list.append(epoch_reconstruction_loss_st)
+            epoch_reconstruction_loss_sm_corr_list.append(epoch_reconstruction_loss_sm_corr)
+            epoch_reconstruction_loss_st_corr_list.append(epoch_reconstruction_loss_st_corr)
+            epoch_reconstruction_loss_sm_cross_list.append(epoch_reconstruction_loss_sm_cross)
+            epoch_kldiv_loss_list.append(epoch_kldiv_loss)
+            epoch_total_loss_list.append(epoch_total_loss)
+            epoch_mmd_loss_list.append(epoch_mmd_loss)
+
+            if n_epochs_kl_warmup:
+                kl_weight = min(kl_weight + kl_warmup_gradient, kl_weight_max)
+            random_seed += 1
+
+        pbar.close()
+        self.trained_state_dict = deepcopy(self.state_dict())
+
+        return dict(
+            epoch_reconstruction_loss_st_list=epoch_reconstruction_loss_st_list,
+            epoch_reconstruction_loss_sm_list=epoch_reconstruction_loss_sm_list,
+            epoch_reconstruction_loss_st_corr_list=epoch_reconstruction_loss_st_corr_list,
+            epoch_reconstruction_loss_sm_corr_list=epoch_reconstruction_loss_sm_corr_list,
+            epoch_reconstruction_loss_sm_cross_list=epoch_reconstruction_loss_sm_cross_list,
+            epoch_kldiv_loss_list=epoch_kldiv_loss_list,
+            epoch_total_loss_list=epoch_total_loss_list,
+            epoch_mmd_loss_list=epoch_mmd_loss_list,
+        )
+
+
+DECODER_MODULE_NAMES = (
+    "decoder_st",
+    "decoder_sm",
+    "px_rna_scale_decoder",
+    "px_rna_rate_decoder",
+    "px_rna_dropout_decoder",
+    "px_sm_scale_decoder",
+    "px_sm_rate_decoder",
+    "px_sm_dropout_decoder",
+)
+
+
+def _module_has_graph_op(module) -> bool:
+    """True if any submodule is a graph (message-passing) layer."""
+    from torch_geometric.nn import MessagePassing
+
+    return any(
+        isinstance(m, MessagePassing) or type(m).__name__ == "GCNEncoderLayer"
+        for m in module.modules()
+    )
+
+
+def copy_decoder_weights(teacher, student):
+    """Copy teacher decode-side weights into student, skipping any graph-op module.
+
+    The student's decoder is never trained by ``SpatialJEPA_trainer`` (distillation
+    only touches the encoder/latent heads), so without this its MSI decoding runs
+    through random-init weights. Decoder modules are plain ``FCLayer``/``nn.Linear``
+    today, so all of ``DECODER_MODULE_NAMES`` are copied; any module that grows a
+    graph op is skipped (returned in ``skipped``) since its weights are not a safe
+    drop-in for the graph-free student.
+    """
+    copied, skipped = [], []
+    for name in DECODER_MODULE_NAMES:
+        t = getattr(teacher, name, None)
+        s = getattr(student, name, None)
+        if t is None or s is None:
+            continue
+        if _module_has_graph_op(t) or _module_has_graph_op(s):
+            skipped.append(name)
+            continue
+        s.load_state_dict(t.state_dict())
+        copied.append(name)
+    return copied, skipped
+
+
 def spatialJEPA_model(
     joint_adata,
     graph_conv=True,
@@ -222,7 +515,7 @@ def spatialJEPA_model(
     teacher builds a block-diagonal spatial graph (no cross-section edges).
     """
 
-    model = smt.model.ConditionalVAESTSM(
+    model = ConditionalVAESTSM_STtoSM(
         joint_adata,
         device=device,
         reconstruction_method_sm='g',

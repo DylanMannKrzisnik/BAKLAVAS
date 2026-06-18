@@ -60,6 +60,7 @@ from spatialjepa_model import (
     patch_model_encode_for_gcn,
     spatialJEPA_model,
     save_spatialjepa_model,
+    copy_decoder_weights,
 )
 
 class SpatialJEPA_trainer:
@@ -500,7 +501,7 @@ epoch_student_distill_loss = spatialjepa_trainer.epoch_student_distill_loss
 
 # CAPTION: Training loss curves for SpatialMETA (ConditionalVAESTSM) over 200 epochs. Each panel shows one tracked loss term (ST/SM reconstruction, correlation branches, KL, MMD). Use to assess convergence and balance between transcriptomics and metabolomics objectives.
 
-fig,axes=plt.subplots(3,3,figsize=(20,10))
+fig,axes=plt.subplots(3,4,figsize=(26,10))
 axes=axes.flatten()
 for ax,(k,v) in zip(axes, loss_dict.items()):
     ax.plot(v)
@@ -659,6 +660,11 @@ if MULTI:
 OUTPUT_DIR = Path(os.getenv("OUTPATH"))
 MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / RUN_ID
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+# The student's decoder is never trained (distillation only touches the encoder/latent
+# heads), so copy the teacher's trained, graph-free decoder weights before saving.
+copied, skipped = copy_decoder_weights(teacher_model, student_model)
+print(f"[student] copied decoder weights: {copied}; skipped (graph): {skipped}")
 
 save_spatialjepa_model(teacher_model, MODEL_DIR / "teacher.pt", full_graph=True)
 save_spatialjepa_model(student_model, MODEL_DIR / "student.pt", full_graph=False)

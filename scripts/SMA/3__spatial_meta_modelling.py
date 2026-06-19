@@ -68,8 +68,40 @@ from feature_panel import load_target_panel, restrict_st_to_target_panel
 # gene CSV (see Lipid_GP/build_target_gene_ranking.py), the model's ST features are
 # restricted to the top SMA_N_TARGET_TOP genes of that ranking before spatial-variability
 # selection, so the trained encoder only keeps genes the transfer target also measures.
-TARGET_PANEL_PATH = os.getenv("SMA_TARGET_PANEL")
-N_TARGET_TOP = int(os.getenv("SMA_N_TARGET_TOP", "2000"))
+TARGET_PANEL_PATH = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/sea_ad_lipid_gps/target_gene_ranking.csv") #os.getenv("SMA_TARGET_PANEL")
+N_TARGET_TOP = 2000 #int(os.getenv("SMA_N_TARGET_TOP", "2000"))
+FIG_DIR = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/sea_ad_lipid_gps")
+FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _flatten_axes(plot_output):
+    if plot_output is None:
+        return []
+    if isinstance(plot_output, dict):
+        return [ax for item in plot_output.values() for ax in _flatten_axes(item)]
+    if isinstance(plot_output, np.ndarray):
+        return [ax for item in plot_output.flat for ax in _flatten_axes(item)]
+    if isinstance(plot_output, (list, tuple)):
+        return [ax for item in plot_output for ax in _flatten_axes(item)]
+    return [plot_output]
+
+
+def _save_plot(plot_output, filename: str) -> None:
+    axes = _flatten_axes(plot_output)
+    figures = []
+    for ax in axes:
+        fig = ax.figure
+        if fig not in figures:
+            figures.append(fig)
+    if not figures:
+        figures = [plt.gcf()]
+
+    path = FIG_DIR / filename
+    for i, fig in enumerate(figures):
+        fig_path = path if len(figures) == 1 else path.with_name(f"{path.stem}_{i + 1}{path.suffix}")
+        fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[INFO] wrote {fig_path}")
 
 class SpatialJEPA_trainer:
     """Train a full-graph teacher while distilling its batch embeddings to a student."""
@@ -240,8 +272,8 @@ class SpatialJEPA_trainer:
 # sample_ids may be a single sample ID (str) for vertical-only integration, or a
 # list of sample IDs that share a prefix (e.g. all "V11T17-102_*") to additionally
 # enable horizontal (multi-section) integration of the same sample/donor.
-sample_ids = "V11T17-102_D1"
-# e.g. sample_ids = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]
+#sample_ids = "V11T17-102_D1"
+sample_ids = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]
 
 SAMPLE_IDS = [sample_ids] if isinstance(sample_ids, str) else list(sample_ids)
 SECTION_KEY = "section"
@@ -408,6 +440,7 @@ if species == "human":
     for s in SAMPLE_IDS:
         m = (joint_adata.obs[SECTION_KEY] == s).to_numpy()
         plt.figure(figsize=[3,2]); plt.hist(x_dopamine[m], bins=50); plt.axvline(thresh_dopamine[s], color='r'); plt.xlabel(f'Dopamine ({s})')
+        _save_plot(None, f"{s}_dopamine_threshold.png")
 
     joint_adata.obs['lesion'] = pd.Series(x_dopamine < thresh_vec, index=joint_adata.obs_names).map({True: 'lesioned', False: 'intact'})
     striatum_adata = joint_adata.copy()
@@ -426,8 +459,14 @@ sc.tl.rank_genes_groups(
     striatum_adata, groupby="lesion", reference="lesioned", method="wilcoxon", key_added="intact_vs_lesioned"
 )
 
-sc.pl.rank_genes_groups(striatum_adata, key="lesioned_vs_intact", n_genes=10)
-sc.pl.rank_genes_groups(striatum_adata, key="intact_vs_lesioned", n_genes=10)
+_save_plot(
+    sc.pl.rank_genes_groups(striatum_adata, key="lesioned_vs_intact", n_genes=10, show=False),
+    f"{RUN_ID}_rank_genes_lesioned_vs_intact.png",
+)
+_save_plot(
+    sc.pl.rank_genes_groups(striatum_adata, key="intact_vs_lesioned", n_genes=10, show=False),
+    f"{RUN_ID}_rank_genes_intact_vs_lesioned.png",
+)
 
 #%% plot marker features
 
@@ -453,7 +492,7 @@ MARKER_FEATURES = \
     ["rna:" + g for g in MARKER_GENES if "rna:" + g in joint_adata.var_names] + \
     ["msi:" + m for m in MARKER_MSI if "msi:" + m in joint_adata.var_names]
 
-def spatial_plot(joint_adata, mask=None):
+def spatial_plot(joint_adata, mask=None, filename=None):
     name_mapper = {
         "msi:PI(12:0/22:2(13Z,16Z)), PI(14:1(9Z)/20:1(11Z)), PI(15:1(9Z)/19:1(9Z)), PI(17:2(9Z,12Z)/17:0), PI(20:1(11Z)/14:1(9Z)), PI(18:2(9Z,12Z)/16:0), PI(17:1(9Z)/17:1(9Z)), PI(16:1(9Z)/18:1(9Z)), PI(14:0/20:2(11Z,14Z)), PI(17:0/17:2(9Z,12Z)), PI(19:1(9Z)/15:1(9Z)), PI(20:2(11Z,14Z)/14:0), PI(22:2(13Z,16Z)/12:0), PI(18:1(9Z)/16:1(9Z)), PI(16:0/18:2(9Z,12Z))":
         "msi:Phosphatidylinositols (PI)",
@@ -476,22 +515,22 @@ def spatial_plot(joint_adata, mask=None):
         title = ax.get_title()
         if title in name_mapper:
             ax.set_title(name_mapper[title])
+    if filename is not None:
+        _save_plot(spatial_axes, filename)
 
 for sample_id in SAMPLE_IDS:
     section_adata = joint_adata[joint_adata.obs[SECTION_KEY].eq(sample_id)].copy()
     # keep the {library_id: {...}} wrapper so sc.pl.spatial sees a single library
     section_adata.uns['spatial'] = {sample_id: section_adata.uns['spatial'][sample_id]}
-    spatial_plot(section_adata)
+    spatial_plot(section_adata, filename=f"{sample_id}_marker_spatial.png")
     if species == "mouse":
         section_striatum_mask = section_adata.obs["region"].eq("striatum")
-        spatial_plot(section_adata, section_striatum_mask)
+        spatial_plot(section_adata, section_striatum_mask, filename=f"{sample_id}_striatum_marker_spatial.png")
 
 # %%
 
 # instantiate models
-# For horizontal integration (MULTI) pass the section as a batch key: this enables
-# decoder batch conditioning + the MMD alignment loss, and a block-diagonal spatial
-# graph (no cross-section edges) for the full-graph teacher.
+# For horizontal integration (MULTI) pass the section as a batch key: this enables decoder batch conditioning + the MMD alignment loss, and a block-diagonal spatial graph (no cross-section edges) for the full-graph teacher.
 batch_keys = [SECTION_KEY] if MULTI else None
 section_key = SECTION_KEY if MULTI else None
 teacher_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=True, batch_keys=batch_keys, section_key=section_key)
@@ -525,6 +564,7 @@ axes=axes.flatten()
 for ax,(k,v) in zip(axes, loss_dict.items()):
     ax.plot(v)
     ax.set_title(k)
+_save_plot(fig.axes, f"{RUN_ID}_training_losses.png")
 
 # %%
 
@@ -581,16 +621,18 @@ def _spatial_by_section(adata, **kwargs):
     libs = list(adata.uns["spatial"].keys()) if "spatial" in adata.uns else []
     if len(libs) <= 1:
         return sc.pl.spatial(adata, **kwargs)
+    outputs = []
     for lib in libs:
         sub = adata[adata.obs[SECTION_KEY].eq(lib)].copy()
         sub.uns["spatial"] = {lib: adata.uns["spatial"][lib]}
-        sc.pl.spatial(sub, **kwargs)
+        outputs.append(sc.pl.spatial(sub, **kwargs))
+    return outputs
 
 
 def plot_domain_results(domain: str, plot_marker: str) -> None:
     cluster_col = domain_key(domain, "VAE_clusters_latent10")
 
-    sc.pl.embedding(
+    fig = sc.pl.embedding(
         joint_adata,
         color=[cluster_col, "lesion", plot_marker] + (["region"] if species == "mouse" else []),
         ncols=2 if species == "mouse" else 3,
@@ -598,38 +640,50 @@ def plot_domain_results(domain: str, plot_marker: str) -> None:
         wspace=0.3,
         color_map="Reds",
         basis=domain_key(domain, "umap"),
-    )
-    _spatial_by_section(
-        joint_adata,
-        img_key="hires" if species == "mouse" else None,
-        color=[cluster_col, "lesion", plot_marker] + (["region"] if species == "mouse" else []),
-        size=0.125 if species == "human" else 0.075,
         show=False,
-        ncols=2 if species == "mouse" else 3,
+        return_fig=True,
     )
-    _spatial_by_section(
-        joint_adata,
-        img_key="hires" if species == "mouse" else None,
-        color_map="vlag",
-        color=MARKER_FEATURES,
-        layer=domain_key(domain, "reconstruction"),
-        size=0.125 if species == "human" else 0.075,
-        wspace=0.005,
-        show=False,
+    _save_plot(fig.axes, f"{RUN_ID}_{domain}_umap.png")
+    _save_plot(
+        _spatial_by_section(
+            joint_adata,
+            img_key="hires" if species == "mouse" else None,
+            color=[cluster_col, "lesion", plot_marker] + (["region"] if species == "mouse" else []),
+            size=0.125 if species == "human" else 0.075,
+            show=False,
+            ncols=2 if species == "mouse" else 3,
+        ),
+        f"{RUN_ID}_{domain}_spatial_clusters.png",
     )
-    _spatial_by_section(
-        joint_adata,
-        img_key="hires" if species == "mouse" else None,
-        color_map=CONTRIBUTION_CMAP,
-        color=[
-            domain_key(domain, "contribution_st"),
-            domain_key(domain, "contribution_sm"),
-        ],
-        layer="normalized",
-        wspace=0.005,
-        show=False,
-        alpha_img=0.1,
-        size=0.125 if species == "human" else 0.075,
+    _save_plot(
+        _spatial_by_section(
+            joint_adata,
+            img_key="hires" if species == "mouse" else None,
+            color_map="vlag",
+            color=MARKER_FEATURES,
+            layer=domain_key(domain, "reconstruction"),
+            size=0.125 if species == "human" else 0.075,
+            wspace=0.005,
+            show=False,
+        ),
+        f"{RUN_ID}_{domain}_spatial_reconstruction.png",
+    )
+    _save_plot(
+        _spatial_by_section(
+            joint_adata,
+            img_key="hires" if species == "mouse" else None,
+            color_map=CONTRIBUTION_CMAP,
+            color=[
+                domain_key(domain, "contribution_st"),
+                domain_key(domain, "contribution_sm"),
+            ],
+            layer="normalized",
+            wspace=0.005,
+            show=False,
+            alpha_img=0.1,
+            size=0.125 if species == "human" else 0.075,
+        ),
+        f"{RUN_ID}_{domain}_spatial_modality_contribution.png",
     )
 
     obs_filter_df = pd.concat([
@@ -654,7 +708,7 @@ def plot_domain_results(domain: str, plot_marker: str) -> None:
         cut=0,
     )
     plt.xticks(rotation=90)
-    plt.show()
+    _save_plot(ax, f"{RUN_ID}_{domain}_cluster_modality_contribution.png")
 
 
 for domain in DOMAIN_MODELS:
@@ -670,10 +724,10 @@ for domain in DOMAIN_MODELS:
 
 if MULTI:
     cluster_crosstab = pd.crosstab(joint_adata.obs['teacher_VAE_clusters_latent10'], joint_adata.obs['section'])
-    cluster_crosstab.plot(kind="bar", stacked=True, figsize=(10, 5))
+    ax = cluster_crosstab.plot(kind="bar", stacked=True, figsize=(10, 5))
     plt.title("Cluster distribution by section")
     plt.ylabel("Count")
-    plt.show()
+    _save_plot(ax, f"{RUN_ID}_teacher_cluster_distribution_by_section.png")
 
 #%%
 OUTPUT_DIR = Path(os.getenv("OUTPATH"))

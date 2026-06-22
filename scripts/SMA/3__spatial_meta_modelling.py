@@ -395,6 +395,9 @@ joint_adata.raw = joint_adata
 # Restrict ST features to a ranked target panel (if provided) before Moran's-I selection,
 # so the candidate ST pool only contains genes the transfer target measures. Whitelisted
 # target genes sit at the top of the ranking, so they are always in the candidate pool.
+joint_adata.uns["target_gene_panel_source"] = (
+    Path(TARGET_PANEL_PATH).name if TARGET_PANEL_PATH else "nan"
+)
 if TARGET_PANEL_PATH:
     joint_adata, panel_diag = restrict_st_to_target_panel(
         joint_adata,

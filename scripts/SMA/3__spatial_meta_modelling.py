@@ -86,6 +86,11 @@ def _flatten_axes(plot_output):
     return [plot_output]
 
 
+def _section_slug(section_id: str) -> str:
+    """V11T17-102_A1 -> A1 (short section label for figure filenames)."""
+    return section_id.rsplit("_", 1)[-1] if "_" in section_id else section_id
+
+
 def _save_plot(plot_output, filename: str) -> None:
     axes = _flatten_axes(plot_output)
     figures = []
@@ -99,6 +104,19 @@ def _save_plot(plot_output, filename: str) -> None:
     path = FIG_DIR / filename
     for i, fig in enumerate(figures):
         fig_path = path if len(figures) == 1 else path.with_name(f"{path.stem}_{i + 1}{path.suffix}")
+        fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[INFO] wrote {fig_path}")
+
+
+def _save_labeled_plots(labeled_outputs: list[tuple[str, object]], filename: str) -> None:
+    """Save one figure per (section_label, plot_output) pair, e.g. *_A1.png, *_C1.png."""
+    path = FIG_DIR / filename
+    stem, suffix = path.stem, path.suffix
+    for label, plot_output in labeled_outputs:
+        axes = _flatten_axes(plot_output)
+        fig = axes[0].figure if axes else plt.gcf()
+        fig_path = path.with_name(f"{stem}_{label}{suffix}")
         fig.savefig(fig_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"[INFO] wrote {fig_path}")
@@ -617,15 +635,19 @@ def _spatial_by_section(adata, **kwargs):
     """sc.pl.spatial once per section: with multiple sections, uns['spatial'] holds
     one library per section, so plotting the pooled object raises 'multiple libraries'.
     Subset to each section's spots and narrow uns to its single library. A single
-    library (single-section run) falls through to one plain call."""
+    library (single-section run) falls through to one plain call.
+
+    Returns a list of (section_label, plot_output) tuples for labeled figure saves.
+    """
     libs = list(adata.uns["spatial"].keys()) if "spatial" in adata.uns else []
     if len(libs) <= 1:
-        return sc.pl.spatial(adata, **kwargs)
+        lib = libs[0] if libs else (SAMPLE_IDS[0] if SAMPLE_IDS else "all")
+        return [(_section_slug(lib), sc.pl.spatial(adata, **kwargs))]
     outputs = []
     for lib in libs:
         sub = adata[adata.obs[SECTION_KEY].eq(lib)].copy()
         sub.uns["spatial"] = {lib: adata.uns["spatial"][lib]}
-        outputs.append(sc.pl.spatial(sub, **kwargs))
+        outputs.append((_section_slug(lib), sc.pl.spatial(sub, **kwargs)))
     return outputs
 
 
@@ -644,7 +666,7 @@ def plot_domain_results(domain: str, plot_marker: str) -> None:
         return_fig=True,
     )
     _save_plot(fig.axes, f"{RUN_ID}_{domain}_umap.png")
-    _save_plot(
+    _save_labeled_plots(
         _spatial_by_section(
             joint_adata,
             img_key="hires" if species == "mouse" else None,
@@ -655,7 +677,7 @@ def plot_domain_results(domain: str, plot_marker: str) -> None:
         ),
         f"{RUN_ID}_{domain}_spatial_clusters.png",
     )
-    _save_plot(
+    _save_labeled_plots(
         _spatial_by_section(
             joint_adata,
             img_key="hires" if species == "mouse" else None,
@@ -668,7 +690,7 @@ def plot_domain_results(domain: str, plot_marker: str) -> None:
         ),
         f"{RUN_ID}_{domain}_spatial_reconstruction.png",
     )
-    _save_plot(
+    _save_labeled_plots(
         _spatial_by_section(
             joint_adata,
             img_key="hires" if species == "mouse" else None,

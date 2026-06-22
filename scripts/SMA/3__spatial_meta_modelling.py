@@ -28,6 +28,15 @@ ZENODO_JOINT_RAW_URL = (
     "https://zenodo.org/records/14986870/files/adata_joint_Y7_T_raw.h5ad?download=1"
 )
 
+FIG_DIR = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/sea_ad_lipid_gps")
+FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Optional target-aware ST panel restriction. When SMA_TARGET_PANEL points at a ranked
+# gene CSV (see Lipid_GP/build_target_gene_ranking.py), the model's ST features are
+# restricted to the top SMA_N_TARGET_TOP genes of that ranking before spatial-variability
+# selection, so the trained encoder only keeps genes the transfer target also measures.
+TARGET_PANEL_PATH = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/target_gene_rankings/target_gene_ranking_CaH_Xenium_final.2026-01-07_protein_coding.csv")
+N_TARGET_TOP = 2000
 
 def load_joint_adata(path: Path = JOINT_RAW_PATH):
     if not path.exists():
@@ -63,16 +72,6 @@ from spatialjepa_model import (
     copy_decoder_weights,
 )
 from feature_panel import load_target_panel, restrict_st_to_target_panel
-
-# Optional target-aware ST panel restriction. When SMA_TARGET_PANEL points at a ranked
-# gene CSV (see Lipid_GP/build_target_gene_ranking.py), the model's ST features are
-# restricted to the top SMA_N_TARGET_TOP genes of that ranking before spatial-variability
-# selection, so the trained encoder only keeps genes the transfer target also measures.
-TARGET_PANEL_PATH = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/sea_ad_lipid_gps/target_gene_ranking.csv") #os.getenv("SMA_TARGET_PANEL")
-N_TARGET_TOP = 2000 #int(os.getenv("SMA_N_TARGET_TOP", "2000"))
-FIG_DIR = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/sea_ad_lipid_gps")
-FIG_DIR.mkdir(parents=True, exist_ok=True)
-
 
 def _flatten_axes(plot_output):
     if plot_output is None:

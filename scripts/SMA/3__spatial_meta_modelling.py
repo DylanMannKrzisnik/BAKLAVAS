@@ -743,6 +743,11 @@ for domain in DOMAIN_MODELS:
 
 from sklearn.cross_decomposition import PLSRegression
 import anndata as ad
+import joblib
+
+OUTPUT_DIR = Path(os.getenv("OUTPATH"))
+MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / RUN_ID
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 emb = joint_adata.obsm["student_X_emb"]
 sm_features = joint_adata.var_names[joint_adata.var['type'].eq('SM')]
@@ -761,6 +766,23 @@ plt.hist(sm[:,sm_features.isin(['msi:Dopamine'])]); plt.show()
 
 pls = PLSRegression(n_components=4)
 pls.fit(emb, sm)
+pls_decoder_path = MODEL_DIR / "student_pls_decoder.joblib"
+joblib.dump(
+    {
+        "model": pls,
+        "embedding_key": "student_X_emb",
+        "target_features": sm_features.astype(str).tolist(),
+        "target_transform": {
+            "log1p": True,
+            "scale_zero_center": True,
+            "scale_max_value": 10,
+            "output_space": "scaled_log1p_sm",
+        },
+        "run_id": RUN_ID,
+    },
+    pls_decoder_path,
+)
+print(f"[INFO] Saved student PLS decoder to {pls_decoder_path.resolve()}")
 T = pls.transform(emb)
 
 joint_pls_adata = ad.AnnData(
@@ -803,9 +825,6 @@ if MULTI:
     _save_plot(ax, f"{RUN_ID}_teacher_cluster_distribution_by_section.png")
 
 #%%
-OUTPUT_DIR = Path(os.getenv("OUTPATH"))
-MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / RUN_ID
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
 print(f"[INFO] Saving models to {MODEL_DIR.resolve()}")
 
 # The student's decoder is never trained (distillation only touches the encoder/latent

@@ -757,6 +757,7 @@ if MULTI:
 OUTPUT_DIR = Path(os.getenv("OUTPATH"))
 MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / RUN_ID
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
+print(f"[INFO] Saving models to {MODEL_DIR.resolve()}")
 
 # The student's decoder is never trained (distillation only touches the encoder/latent
 # heads), so copy the teacher's trained, graph-free decoder weights before saving.
@@ -768,5 +769,6 @@ save_spatialjepa_model(student_model, MODEL_DIR / "student.pt", full_graph=False
 
 # model.initialize_dataset() reads from adata.X at construction time
 joint_adata.write_h5ad(MODEL_DIR / "joint_adata.h5ad")
+print(f"[INFO] Saved teacher.pt, student.pt, joint_adata.h5ad under {MODEL_DIR.resolve()}")
 
 # %%

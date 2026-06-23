@@ -748,7 +748,18 @@ emb = joint_adata.obsm["student_X_emb"]
 sm_features = joint_adata.var_names[joint_adata.var['type'].eq('SM')]
 sm = joint_adata[:, sm_features].X.toarray()
 
-pls = PLSRegression(n_components=9)  
+## log transform and scale the SM features
+sm = np.log1p(sm)
+sm = sc.pp.scale(sm, zero_center=True, max_value=10)
+sm_keep_mask = np.logical_not(np.isnan(sm).all(0))
+sm = sm[:,sm_keep_mask]
+sm[sm < -np.nanmax(sm)] = -np.nanmax(sm)
+sm_features = sm_features[sm_keep_mask]
+
+plt.hist(sm.flatten(), bins=100); plt.show()
+plt.hist(sm[:,sm_features.isin(['msi:Dopamine'])]); plt.show()
+
+pls = PLSRegression(n_components=4)
 pls.fit(emb, sm)
 T = pls.transform(emb)
 
@@ -759,15 +770,22 @@ joint_pls_adata = ad.AnnData(
     obsm={"student_umap": joint_adata.obsm["student_umap"]}
     )
     
-joint_adata.obsm["student_X_emb_pls"] = T
-joint_adata.layers["student_X_pls"] = pls.transform(joint_adata.X)
+#joint_adata.obsm["student_X_emb_pls"] = T
+#joint_adata.layers["student_X_pls"] = pls.transform(joint_adata.X)
 
 pls_coef_df = pd.DataFrame(
-    pls.y_weights_.T,
+    pls.y_loadings_.T,
     index=[f'PLS_{i}' for i in range(pls.y_weights_.shape[1])],
     columns=sm_features
 )
 
+## check the coefficients for Dopamine
+pls_coef_df['msi:Dopamine'].plot(kind='bar')
+plt.show()
+
+sc.pl.embedding(joint_pls_adata, basis='student_umap', color=[f'PLS_{i}' for i in range(pls.y_weights_.shape[1])],
+    cmap='coolwarm_r') # set reverse colormap (_r) if weights are negative for dominant PLS components
+sc.pl.embedding(joint_adata, basis='student_umap', color=['msi:Dopamine'], cmap='Reds')
 
 # %%
 # CAPTION: UMAP of the joint ST+SM latent embedding (10-dim VAE, Leiden clusters). Colors: VAE clusters, tissue region, lesion status, and Dopamine (MSI). Shows how anatomy and pathology align with the integrated representation.

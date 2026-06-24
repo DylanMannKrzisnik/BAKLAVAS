@@ -55,7 +55,8 @@ W = joint_adata.obsp['spatial_connectivities']
 S0 = W.sum()
 n = joint_adata.n_obs
 
-x_visium = joint_adata[:,joint_adata.var['type'].eq('ST')].layers['normalized'].toarray()
+st_features = joint_adata.var_names[joint_adata.var['type'].eq('ST').to_numpy()]
+x_visium = joint_adata[:,st_features].layers['normalized'].toarray()
 x_dopamine = joint_adata[:, 'msi:Dopamine'].X.toarray().squeeze()
 zy = zscore(x_dopamine)                         # the "lagged" variable
 lag_y = W @ zy                                   # spatial lag of dopamine
@@ -117,3 +118,21 @@ embedding_fig.suptitle(
 )
 embedding_fig.tight_layout(rect=[0, 0, 1, 0.97])
 plt.show()
+# %% barplot of bivariate Moran's I
+bivariate_moran_I_df = pd.DataFrame(bivariate_moran_I, index=nmf_components).sort_values(0, ascending=True).rename(columns={0: 'bivariate_moran_I'})
+best_nmf_component = pd.Series(nmf.components_[best_bivariate_moran_idx], index=st_features)
+best_nmf_component.index = best_nmf_component.index.str.split(':').str[1]
+
+bivariate_moran_I_df.plot(kind='barh')
+plt.title('Bivariate Moran\'s I of NMF components against dopamine')
+plt.xlabel('Bivariate Moran\'s I')
+plt.ylabel('NMF component')
+plt.show()
+
+best_nmf_component.sort_values(ascending=True).tail(10).plot(kind='barh')
+plt.title('Highest gene loadings on dopamine-correlated NMF component')
+plt.xlabel('Gene loading')
+plt.ylabel('Gene')
+plt.show()
+
+# %%

@@ -547,7 +547,75 @@ for sample_id in SAMPLE_IDS:
         section_striatum_mask = section_adata.obs["region"].eq("striatum")
         spatial_plot(section_adata, section_striatum_mask, filename=f"{sample_id}_striatum_marker_spatial.png")
 
+#%% Run NMF on spatial Visium data
+
+from sklearn.decomposition import NMF
+from tqdm import tqdm
+
+def zscore(v):
+    v = np.asarray(v, dtype=float).ravel()
+    return (v - v.mean()) / v.std()
+
+sc.pp.neighbors(joint_adata, use_rep='spatial') # better: sq.gr.spatial_neighbors(), from squidpy
+W = joint_adata.obsp['connectivities']          # spatial weights from sc.pp.neighbors
+S0 = W.sum()
+n = joint_adata.n_obs
+
+x_visium = np.log1p(joint_adata[:,joint_adata.var['type'].eq('ST')].layers['normalized']).toarray()
+x_dopamine = joint_adata[:, 'msi:Dopamine'].X.toarray().squeeze()
+zy = zscore(x_dopamine)                         # the "lagged" variable
+lag_y = W @ zy                                   # spatial lag of dopamine
+
+sweep_n_components = np.arange(1, 30)
+max_bivariate_moran_Is = []
+for n_components in tqdm(sweep_n_components):
+
+    nmf = NMF(n_components=n_components)
+    x_visium_nmf = nmf.fit_transform(x_visium)
+    nmf_adata = sc.AnnData(X=x_visium_nmf, obsm={"spatial": joint_adata.obsm["spatial"]})
+
+    bivariate_moran_I = []
+    for k, comp in enumerate(nmf_adata.var_names):
+        zx = zscore(nmf_adata.X[:, k])
+        I_xy = (n / S0) * (zx @ lag_y) / (zx @ zx)
+        bivariate_moran_I.append(I_xy)
+        #print(f"{comp}: bivariate Moran's I (NMF→lag(dopamine)) = {I_xy:.3f}")
+
+    max_bivariate_moran_I = np.max(bivariate_moran_I)
+    max_bivariate_moran_Is.append(max_bivariate_moran_I)
+
+plt.figure(figsize=(10, 5))
+plt.plot(sweep_n_components, max_bivariate_moran_Is, marker='o')
+plt.xlabel("Number of NMF components")
+plt.ylabel("Max bivariate Moran's I")
+plt.title("Max bivariate Moran's I vs. Number of NMF components")
+
+best_n_components = sweep_n_components[np.argmax(max_bivariate_moran_Is)]
+print(f"Best number of NMF components: {best_n_components}")
+
+nmf = NMF(n_components=best_n_components, solver='kl')
+x_visium_nmf = nmf.fit_transform(x_visium)
+H = nmf.components_
+nmf_adata = sc.AnnData(X=x_visium_nmf, obsm={"spatial": joint_adata.obsm["spatial"]})
+
+bivariate_moran_I = []
+for k, comp in enumerate(nmf_adata.var_names):
+    zx = zscore(nmf_adata.X[:, k])
+    I_xy = (n / S0) * (zx @ lag_y) / (zx @ zx)
+    bivariate_moran_I.append(I_xy)
+
+# Plot NMF components as subfigures in the same Scanpy figure.
+nmf_components = list(nmf_adata.var_names)
+nmf_component_titles = [
+    f"{comp} (biv. I = {bivariate_moran_I[k]:.3f})"
+    for k, comp in enumerate(nmf_components)
+]
+sc.pl.embedding(nmf_adata, color=nmf_components, basis="spatial", title=nmf_component_titles)
+
+
 # %%
+
+#%% Run SpatialJEPA
 
 # instantiate models
 # For horizontal integration (MULTI) pass the section as a batch key: this enables decoder batch conditioning + the MMD alignment loss, and a block-diagonal spatial graph (no cross-section edges) for the full-graph teacher.

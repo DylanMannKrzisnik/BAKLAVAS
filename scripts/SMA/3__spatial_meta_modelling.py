@@ -289,8 +289,8 @@ class SpatialJEPA_trainer:
 # sample_ids may be a single sample ID (str) for vertical-only integration, or a
 # list of sample IDs that share a prefix (e.g. all "V11T17-102_*") to additionally
 # enable horizontal (multi-section) integration of the same sample/donor.
-#sample_ids = "V11T17-102_D1"
-sample_ids = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]
+sample_ids = "V11L12-109_B1"
+#sample_ids = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]
 
 SAMPLE_IDS = [sample_ids] if isinstance(sample_ids, str) else list(sample_ids)
 SECTION_KEY = "section"
@@ -546,97 +546,6 @@ for sample_id in SAMPLE_IDS:
     if species == "mouse":
         section_striatum_mask = section_adata.obs["region"].eq("striatum")
         spatial_plot(section_adata, section_striatum_mask, filename=f"{sample_id}_striatum_marker_spatial.png")
-
-#%% Run NMF on spatial Visium data
-
-from sklearn.decomposition import NMF
-from tqdm import tqdm
-
-def zscore(v):
-    v = np.asarray(v, dtype=float).ravel()
-    return (v - v.mean()) / v.std()
-
-def fit_nmf_spatial(x, n_components, spatial, **nmf_kwargs):
-    """Fit NMF and wrap the factor scores in a spatially-annotated AnnData."""
-    nmf = NMF(n_components=n_components, **nmf_kwargs)
-    x_nmf = nmf.fit_transform(x)
-    adata = sc.AnnData(X=x_nmf, obsm={"spatial": spatial})
-    return adata, nmf
-
-def bivariate_morans_i(X, lag_y, n, S0):
-    """Bivariate Moran's I of each column of X against a precomputed spatial lag."""
-    return [
-        (n / S0) * (zscore(X[:, k]) @ lag_y) / (zscore(X[:, k]) @ zscore(X[:, k]))
-        for k in range(X.shape[1])
-    ]
-
-sc.pp.neighbors(joint_adata, use_rep='spatial') # better: sq.gr.spatial_neighbors(), from squidpy
-W = joint_adata.obsp['connectivities']          # spatial weights from sc.pp.neighbors
-S0 = W.sum()
-n = joint_adata.n_obs
-
-x_visium = joint_adata[:,joint_adata.var['type'].eq('ST')].layers['normalized'].toarray()
-x_dopamine = joint_adata[:, 'msi:Dopamine'].X.toarray().squeeze()
-zy = zscore(x_dopamine)                         # the "lagged" variable
-lag_y = W @ zy                                   # spatial lag of dopamine
-
-# Poisson NMF with KL loss
-nmf_kwargs = dict(
-    init='nndsvda',
-    solver='mu',
-    beta_loss='kullback-leibler',
-    max_iter=1000,   # mu converges slower than cd's default 200
-    tol=1e-4,
-    random_state=0,
-)
-
-sweep_n_components = np.arange(1, 30)
-max_bivariate_moran_Is = []
-for n_components in tqdm(sweep_n_components):
-
-    nmf_adata, _ = fit_nmf_spatial(x_visium, n_components, joint_adata.obsm["spatial"], **nmf_kwargs)
-    bivariate_moran_I = bivariate_morans_i(nmf_adata.X, lag_y, n, S0)
-    max_bivariate_moran_Is.append(np.max(bivariate_moran_I))
-
-plt.figure(figsize=(10, 5))
-plt.plot(sweep_n_components, max_bivariate_moran_Is, marker='o')
-plt.xlabel("Number of NMF components")
-plt.ylabel("Max bivariate Moran's I")
-plt.title("Max bivariate Moran's I vs. Number of NMF components")
-
-best_n_components = sweep_n_components[np.argmax(max_bivariate_moran_Is)]
-print(f"Best number of NMF components: {best_n_components}")
-
-nmf_adata, nmf = fit_nmf_spatial(x_visium, best_n_components, joint_adata.obsm["spatial"], **nmf_kwargs)
-H = nmf.components_
-bivariate_moran_I = bivariate_morans_i(nmf_adata.X, lag_y, n, S0)
-
-# Plot NMF components as subfigures in the same Scanpy figure.
-nmf_components = list(nmf_adata.var_names)
-nmf_component_titles = [
-    f"{comp} (biv. I = {bivariate_moran_I[k]:.3f})"
-    for k, comp in enumerate(nmf_components)
-]
-best_bivariate_moran_idx = int(np.argmax(bivariate_moran_I))
-best_bivariate_moran_component = nmf_components[best_bivariate_moran_idx]
-best_bivariate_moran_score = bivariate_moran_I[best_bivariate_moran_idx]
-embedding_axes = sc.pl.embedding(
-    nmf_adata,
-    color=nmf_components,
-    basis="spatial",
-    title=nmf_component_titles,
-    show=False,
-)
-embedding_fig = np.ravel(embedding_axes)[0].figure
-embedding_fig.suptitle(
-    f"Highest bivariate Moran's I: {best_bivariate_moran_component} "
-    f"({best_bivariate_moran_score:.3f})",
-    fontsize=48,
-    fontweight="bold",
-    y=0.995,
-)
-embedding_fig.tight_layout(rect=[0, 0, 1, 0.97])
-plt.show()
 
 
 #%% Run SpatialJEPA

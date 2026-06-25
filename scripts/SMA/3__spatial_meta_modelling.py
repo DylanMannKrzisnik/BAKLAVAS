@@ -548,16 +548,24 @@ for sample_id in SAMPLE_IDS:
         spatial_plot(section_adata, section_striatum_mask, filename=f"{sample_id}_striatum_marker_spatial.png")
 
 
-#%% Run SpatialJEPA
+#%% Run SpatialJEPA and vanilla SpatialMETA baseline
 
 # instantiate models
 # For horizontal integration (MULTI) pass the section as a batch key: this enables decoder batch conditioning + the MMD alignment loss, and a block-diagonal spatial graph (no cross-section edges) for the full-graph teacher.
 batch_keys = [SECTION_KEY] if MULTI else None
 section_key = SECTION_KEY if MULTI else None
+max_epoch = 1000
+learning_rate = 1e-5
+train_mode = "multi" if MULTI else "single"
 teacher_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=True, batch_keys=batch_keys, section_key=section_key)
 student_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False, batch_keys=batch_keys, section_key=section_key)
-#nonspatial_model = spatialJEPA_model(joint_adata, graph_conv=False, full_graph=False)
-#nonspatial_model.fit(max_epoch=250, lr=1e-5, mode="single")
+nonspatial_model = smt.model.ConditionalVAESTSM(
+    joint_adata,
+    device="cuda:0",
+    reconstruction_method_sm="g",
+    reconstruction_method_st="zinb",
+    batch_keys=batch_keys,
+)
 
 # instantiate trainer for SpatialJEPA
 n_per_batch = 128
@@ -568,9 +576,15 @@ spatialjepa_trainer = SpatialJEPA_trainer(
 )
 # train models; mode="multi" upweights the MMD loss for horizontal integration
 loss_dict = spatialjepa_trainer.fit_teacher(
-    max_epoch=1000,
-    lr=1e-5,
-    mode="multi" if MULTI else "single",
+    max_epoch=max_epoch,
+    lr=learning_rate,
+    mode=train_mode,
+)
+nonspatial_loss_dict = nonspatial_model.fit(
+    max_epoch=max_epoch,
+    n_per_batch=n_per_batch,
+    lr=learning_rate,
+    mode=train_mode,
 )
 # extract outputs
 epoch_H = spatialjepa_trainer.epoch_H
@@ -578,20 +592,30 @@ batch_H = spatialjepa_trainer.batch_H
 student_distill_loss = spatialjepa_trainer.student_distill_loss
 epoch_student_distill_loss = spatialjepa_trainer.epoch_student_distill_loss
 
-# CAPTION: Training loss curves for SpatialMETA (ConditionalVAESTSM) over 200 epochs. Each panel shows one tracked loss term (ST/SM reconstruction, correlation branches, KL, MMD). Use to assess convergence and balance between transcriptomics and metabolomics objectives.
+# CAPTION: Training loss curves for SpatialMETA (ConditionalVAESTSM). Each panel shows one tracked loss term (ST/SM reconstruction, correlation branches, KL, MMD). Use to assess convergence and balance between transcriptomics and metabolomics objectives.
 
-fig,axes=plt.subplots(3,4,figsize=(26,10))
-axes=axes.flatten()
-for ax,(k,v) in zip(axes, loss_dict.items()):
-    ax.plot(v)
-    ax.set_title(k)
-_save_plot(fig.axes, f"{RUN_ID}_training_losses.png")
+def plot_training_losses(training_losses: dict, filename: str) -> None:
+    ncols = 4
+    nrows = int(np.ceil(len(training_losses) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6.5 * ncols, 3.3 * nrows))
+    axes = np.asarray(axes).flatten()
+    for ax, (k, v) in zip(axes, training_losses.items()):
+        ax.plot(v)
+        ax.set_title(k)
+    for ax in axes[len(training_losses):]:
+        ax.axis("off")
+    _save_plot(fig.axes, filename)
+
+
+plot_training_losses(loss_dict, f"{RUN_ID}_training_losses.png")
+plot_training_losses(nonspatial_loss_dict, f"{RUN_ID}_nonspatial_training_losses.png")
 
 # %%
 
 DOMAIN_MODELS = {
     "teacher": teacher_model,
     "student": student_model,
+    "nonspatial": nonspatial_model,
 }
 
 CONTRIBUTION_CMAP = smt.pl.make_colormap(["#2ec4b6", "#ffffff", "#ff9f1c"])
@@ -633,7 +657,7 @@ def process_latent_embedding(domain: str) -> None:
     # Joint latent (Z, == get_latent_embedding) plus the per-modality expert latents,
     # all from one mini-batched pass. The per-modality latents are persisted so
     # 6__benchmark_metrics.py can compute cross-modal FOSCTTM/iLISI directly from
-    # joint_adata.h5ad, without reloading the SpatialJEPA models (no spatialmeta dep).
+    # joint_adata.h5ad, without reloading the SpatialMETA models (no spatialmeta dep).
     Z, Z_st, Z_sm = get_joint_and_modality_latents(embedding_model)
     X = embedding_model.get_normalized_expression()
     C = embedding_model.get_modality_contribution()
@@ -867,11 +891,29 @@ print(f"[INFO] Saving models to {MODEL_DIR.resolve()}")
 copied, skipped = copy_decoder_weights(teacher_model, student_model)
 print(f"[student] copied decoder weights: {copied}; skipped (graph): {skipped}")
 
+def save_vanilla_spatialmeta_model(model, path: Path) -> None:
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "model_class": "spatialmeta.model.ConditionalVAESTSM",
+            "full_graph": False,
+            "graph_conv": False,
+            "reconstruction_method_sm": model.reconstruction_method_sm,
+            "reconstruction_method_st": model.reconstruction_method_st,
+            "hidden_stacks": model.hidden_stacks,
+            "n_latent": model.n_latent,
+            "batch_keys": getattr(model, "batch_keys", None),
+        },
+        path,
+    )
+
+
 save_spatialjepa_model(teacher_model, MODEL_DIR / "teacher.pt", full_graph=True)
 save_spatialjepa_model(student_model, MODEL_DIR / "student.pt", full_graph=False)
+save_vanilla_spatialmeta_model(nonspatial_model, MODEL_DIR / "nonspatial.pt")
 
 # model.initialize_dataset() reads from adata.X at construction time
 joint_adata.write_h5ad(MODEL_DIR / "joint_adata.h5ad")
-print(f"[INFO] Saved teacher.pt, student.pt, joint_adata.h5ad under {MODEL_DIR.resolve()}")
+print(f"[INFO] Saved teacher.pt, student.pt, nonspatial.pt, joint_adata.h5ad under {MODEL_DIR.resolve()}")
 
 # %%

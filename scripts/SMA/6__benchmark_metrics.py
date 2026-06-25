@@ -1,4 +1,4 @@
-#%% Benchmark SMA joint RNA+MSI embeddings: SpatialJEPA teacher/student vs Multigrate.
+#%% Benchmark SMA joint RNA+MSI embeddings: SpatialMETA teacher/student/nonspatial vs Multigrate.
 #
 # Loads joint (per-spot) embeddings of one SMA sample and scores them with a benchmark
 # modeled on the RNA-ATAC block in MultiGATE/scripts/multigate_co_embed.py:
@@ -12,7 +12,7 @@
 #                                 per-modality RNA-only / MSI-only latents.
 #
 # All latents come precomputed from disk (no model is reloaded):
-#   - SpatialJEPA teacher/student: joint_adata.obsm["{teacher,student}_X_emb{,_st,_sm}"],
+#   - SpatialMETA teacher/student/nonspatial: joint_adata.obsm["{teacher,student,nonspatial}_X_emb{,_st,_sm}"],
 #     written by 3__spatial_meta_modelling.py.
 #   - Multigrate: ${OUTPATH}/multigrate_mouse_sma/<sample>/multigrate_modality_latents.npz
 #     (joint/rna/msi), written by multigrate_mouse_sma.py. Multigrate exposes per-modality
@@ -66,6 +66,7 @@ MSI_LABEL_KEY = "MSI_clusters"
 PER_MODALITY_KEYS = {
     "teacher": ("teacher_X_emb_st", "teacher_X_emb_sm"),
     "student": ("student_X_emb_st", "student_X_emb_sm"),
+    "nonspatial": ("nonspatial_X_emb_st", "nonspatial_X_emb_sm"),
 }
 
 # Spatial-structure metric hyperparameters (match multigate_co_embed.py).
@@ -129,11 +130,16 @@ def load_inputs(sample_id):
     for key in ("teacher_X_emb", "student_X_emb", "spatial"):
         if key not in joint.obsm:
             raise KeyError(f"joint_adata missing obsm['{key}']")
+    if "nonspatial_X_emb" not in joint.obsm:
+        warnings.warn(
+            "joint_adata missing obsm['nonspatial_X_emb']; the vanilla SpatialMETA "
+            "baseline will be excluded. Re-run 3__spatial_meta_modelling.py to add it."
+        )
     for lab in (RNA_LABEL_KEY, MSI_LABEL_KEY):
         if lab not in joint.obs.columns:
             raise KeyError(f"joint_adata missing obs['{lab}']")
 
-    # Per-modality SpatialJEPA latents, precomputed by 3__spatial_meta_modelling.py.
+    # Per-modality SpatialMETA latents, precomputed by 3__spatial_meta_modelling.py.
     per_modality = {}
     for name, (st_key, sm_key) in PER_MODALITY_KEYS.items():
         if st_key in joint.obsm and sm_key in joint.obsm:
@@ -187,7 +193,7 @@ def bio_conservation(emb, labels_by_key):
     return rows
 
 
-# ── Metric C: cross-modal alignment (JEPA only) ──────────────────────────────
+# ── Metric C: cross-modal alignment ─────────────────────────────────────────
 def foscttm(x, y):
     """Mean Fraction Of Samples Closer Than the True Match (jax, evals_utils)."""
     return float(np.asarray(foscttm_moscot(_standardize(x), _standardize(y))).mean())
@@ -365,6 +371,8 @@ def main():
         "teacher": _standardize(joint.obsm["teacher_X_emb"]),
         "student": _standardize(joint.obsm["student_X_emb"]),
     }
+    if "nonspatial_X_emb" in joint.obsm:
+        lineup["nonspatial"] = _standardize(joint.obsm["nonspatial_X_emb"])
     if x_multigrate is not None:
         lineup["multigrate"] = _standardize(x_multigrate)
     lineup["pca"] = _standardize(pca_floor)
@@ -399,7 +407,7 @@ def main():
     print(spatial_summary[spatial_summary.setting == "coord_permuted"]
           .pivot(index="model", columns="metric", values="value").round(3).to_string())
 
-    # ── Metric C: cross-modal alignment (JEPA only) ─────────────────────────
+    # ── Metric C: cross-modal alignment ─────────────────────────────────────
     cross_rows = []
     for name, mods in per_modality.items():
         st, sm = mods["st"], mods["sm"]

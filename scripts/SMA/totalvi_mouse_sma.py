@@ -18,11 +18,56 @@ train TOTALVI, embed, and save.
 
 Env: ``conda activate scvi_env`` (scvi-tools 1.3.3).
 """
-import argparse
 import os
+import site
+import sys
+
+
+def _configure_python_runtime() -> None:
+    """Keep notebook kernels from importing packages out of ~/.local."""
+
+    os.environ.setdefault("PYTHONNOUSERSITE", "1")
+    os.environ.setdefault("TMPDIR", "/tmp")
+    os.environ.setdefault("PIP_CACHE_DIR", "/tmp/pip_cache")
+    os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_cache")
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    os.environ.setdefault("XDG_CACHE_HOME", "/tmp/xdg_cache")
+
+    user_site = site.getusersitepackages()
+    user_site_abs = os.path.abspath(user_site)
+    sys.path[:] = [
+        path for path in sys.path
+        if os.path.abspath(path or os.curdir) != user_site_abs
+    ]
+    site.ENABLE_USER_SITE = False
+
+    watched = {"anndata", "mudata", "muon", "scanpy", "scvi", "multigrate"}
+    loaded_from_user_site = {}
+    for name, module in sys.modules.items():
+        if name.partition(".")[0] not in watched:
+            continue
+        module_file = getattr(module, "__file__", None)
+        if module_file and os.path.abspath(module_file).startswith(user_site_abs):
+            loaded_from_user_site[name] = module_file
+
+    if loaded_from_user_site:
+        details = "\n".join(
+            f"  {name}: {path}" for name, path in sorted(loaded_from_user_site.items())
+        )
+        raise RuntimeError(
+            "User-site packages were already imported before runtime setup. "
+            "Restart the Jupyter kernel and run this script from the top.\n"
+            f"{details}"
+        )
+
+
+_configure_python_runtime()
+
+import argparse
 from pprint import pprint
 
-import scvi
+#import scvi
+import multigrate
 from dotenv import dotenv_values, load_dotenv
 
 import matplotlib

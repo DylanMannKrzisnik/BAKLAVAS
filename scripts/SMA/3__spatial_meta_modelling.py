@@ -599,15 +599,49 @@ CONTRIBUTION_CMAP = smt.pl.make_colormap(["#2ec4b6", "#ffffff", "#ff9f1c"])
 def domain_key(domain: str, suffix: str) -> str:
     return f"{domain}_{suffix}"
 
+
+@torch.no_grad()
+def get_joint_and_modality_latents(model, n_per_batch: int = 128):
+    """Mini-batched encode mirroring ConditionalVAESTSM.get_latent_embedding, but also
+    returning the per-modality expert latents (RNA-only H['st']['q_mu'], MSI-only
+    H['sm']['q_mu']) from the *same* batches. Using the identical mini-batched path
+    keeps all three latents mutually consistent -- for the full-graph teacher a full-batch
+    encode would use a different (whole-graph) message-passing regime than the n_per_batch
+    one used to produce the joint embedding (and to train the teacher)."""
+    import scipy.sparse
+
+    model.eval()
+    dataloader = model.as_dataloader(batch_size=n_per_batch, shuffle=False)
+    Zs, Zs_st, Zs_sm = [], [], []
+    for batch_idx in dataloader:
+        indices = batch_idx[0].cpu().numpy()
+        X_batch = np.stack([
+            model.X.getrow(i).toarray().squeeze() if scipy.sparse.issparse(model.X) else model.X[i]
+            for i in indices
+        ])
+        X_batch = torch.tensor(X_batch, dtype=torch.float32).to(model.device)
+        H = model.encode(X_batch)
+        Zs.append(H["q_mu"].detach().cpu().numpy())
+        Zs_st.append(H["st"]["q_mu"].detach().cpu().numpy())
+        Zs_sm.append(H["sm"]["q_mu"].detach().cpu().numpy())
+    return np.vstack(Zs), np.vstack(Zs_st), np.vstack(Zs_sm)
+
+
 def process_latent_embedding(domain: str) -> None:
     embedding_model = DOMAIN_MODELS[domain]
 
-    Z = embedding_model.get_latent_embedding()
+    # Joint latent (Z, == get_latent_embedding) plus the per-modality expert latents,
+    # all from one mini-batched pass. The per-modality latents are persisted so
+    # 6__benchmark_metrics.py can compute cross-modal FOSCTTM/iLISI directly from
+    # joint_adata.h5ad, without reloading the SpatialJEPA models (no spatialmeta dep).
+    Z, Z_st, Z_sm = get_joint_and_modality_latents(embedding_model)
     X = embedding_model.get_normalized_expression()
     C = embedding_model.get_modality_contribution()
 
     joint_adata.layers[domain_key(domain, "reconstruction")] = X
     joint_adata.obsm[domain_key(domain, "X_emb")] = Z
+    joint_adata.obsm[domain_key(domain, "X_emb_st")] = Z_st
+    joint_adata.obsm[domain_key(domain, "X_emb_sm")] = Z_sm
     joint_adata.obs[domain_key(domain, "contribution_st")] = C
     joint_adata.obs[domain_key(domain, "contribution_sm")] = 1 - C
 

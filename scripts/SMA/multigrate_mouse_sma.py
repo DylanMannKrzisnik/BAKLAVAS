@@ -322,12 +322,13 @@ def compute_umap_and_leiden(adata, color_keys, out_dir, sample_id, point_size=60
     fig = sc.pl.umap(adata, color=present, show=False, return_fig=True)
     fig.savefig(os.path.join(out_dir, f"{sample_id}_multigrate_umap.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
+    print(f"UMAP saved to {os.path.join(out_dir, f'{sample_id}_multigrate_umap.png')}")
 
     if "spatial" in adata.obsm:
         fig = sc.pl.embedding(adata, color=present, basis="spatial", s=point_size, show=False, return_fig=True)
         fig.savefig(os.path.join(out_dir, f"{sample_id}_multigrate_spatial.png"), dpi=150, bbox_inches="tight")
         plt.close(fig)
-
+        print(f"Spatial embedding saved to {os.path.join(out_dir, f'{sample_id}_multigrate_spatial.png')}")
 
 #%%
 def main():
@@ -391,9 +392,13 @@ def main():
     print(f"[INFO] latents: joint{joint_emb.shape} rna{rna_emb.shape} msi{msi_emb.shape}")
 
     # UMAP / Leiden / spatial visualization (on the joint latent)
+    colors = ["RNA_clusters", "MSI_clusters", "region", "lesion"]
+    for color in colors:
+        if color in mvi.obs.columns:
+            mvi.obs[color] = mvi.obs[color].astype(str)
     compute_umap_and_leiden(
         mvi,
-        color_keys=["RNA_clusters", "MSI_clusters", "region", "lesion"],
+        color_keys=colors,
         out_dir=model_dir,
         sample_id=args.sample_id,
     )

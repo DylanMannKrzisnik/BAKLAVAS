@@ -1,20 +1,22 @@
-#%% Benchmark SMA joint RNA+MSI embeddings: SpatialJEPA teacher/student vs TOTALVI.
+#%% Benchmark SMA joint RNA+MSI embeddings: SpatialJEPA teacher/student vs Multigrate.
 #
-# Loads three joint (per-spot) embeddings of one SMA sample and scores them with a
-# benchmark modeled on the RNA-ATAC block in MultiGATE/scripts/multigate_co_embed.py:
+# Loads joint (per-spot) embeddings of one SMA sample and scores them with a benchmark
+# modeled on the RNA-ATAC block in MultiGATE/scripts/multigate_co_embed.py:
 #
 #   A. Bio-conservation        -> scib silhouette_label + Leiden NMI/ARI vs
 #                                 RNA_clusters / MSI_clusters.
 #   B. Spatial structure       -> niche recovery, within-cluster coherence, and an
 #                                 (adapted) orthogonal-target recovery, all on the joint
 #                                 embedding with spatial-block CV.
-#   C. Cross-modal alignment   -> 1-FOSCTTM and iLISI modality mixing between the
-#                                 per-modality RNA-only / MSI-only latents. JEPA-ONLY:
-#                                 TOTALVI exposes no per-modality latent.
+#   C. Cross-modal alignment   -> 1-FOSCTTM and iLISI modality mixing between each model's
+#                                 per-modality RNA-only / MSI-only latents.
 #
-# The per-modality latents are precomputed and saved into joint_adata.h5ad by
-# 3__spatial_meta_modelling.py (obsm["{teacher,student}_X_emb_{st,sm}"]), so this script
-# loads them directly and never touches the SpatialJEPA models or the spatialmeta library.
+# All latents come precomputed from disk (no model is reloaded):
+#   - SpatialJEPA teacher/student: joint_adata.obsm["{teacher,student}_X_emb{,_st,_sm}"],
+#     written by 3__spatial_meta_modelling.py.
+#   - Multigrate: ${OUTPATH}/multigrate_mouse_sma/<sample>/multigrate_modality_latents.npz
+#     (joint/rna/msi), written by multigrate_mouse_sma.py. Multigrate exposes per-modality
+#     latents, so (unlike the old TOTALVI baseline) it also joins the cross-modal metric.
 #
 # Env: `conda activate nichecompass_liana` (has scib_metrics + jax). FOSCTTM uses the jax
 # evals_utils.foscttm_moscot; bio-conservation / iLISI use scib_metrics' functional API.
@@ -120,7 +122,7 @@ def _neighbors(X, k):
 # ── data loading ─────────────────────────────────────────────────────────────
 def load_inputs(sample_id):
     jepa_dir = OUTPATH / "spatialjepa_models" / sample_id
-    totalvi_path = OUTPATH / "totalvi_mouse_sma" / sample_id / "totalvi_mdata.h5mu"
+    mg_npz = OUTPATH / "multigrate_mouse_sma" / sample_id / "multigrate_modality_latents.npz"
 
     import scanpy as sc
     joint = sc.read_h5ad(jepa_dir / "joint_adata.h5ad")
@@ -131,17 +133,7 @@ def load_inputs(sample_id):
         if lab not in joint.obs.columns:
             raise KeyError(f"joint_adata missing obs['{lab}']")
 
-    import muon as mu
-    totalvi_mdata = mu.read_h5mu(totalvi_path)
-    if "X_totalvi" not in totalvi_mdata.obsm:
-        raise KeyError("totalvi_mdata missing obsm['X_totalvi']")
-    # Align TOTALVI rows to the joint_adata spot order.
-    pos = pd.Index(totalvi_mdata.obs_names).get_indexer(joint.obs_names)
-    if (pos < 0).any():
-        raise ValueError("TOTALVI mdata does not cover all joint_adata spots.")
-    x_totalvi = np.asarray(totalvi_mdata.obsm["X_totalvi"])[pos]
-
-    # Per-modality JEPA latents, precomputed by 3__spatial_meta_modelling.py.
+    # Per-modality SpatialJEPA latents, precomputed by 3__spatial_meta_modelling.py.
     per_modality = {}
     for name, (st_key, sm_key) in PER_MODALITY_KEYS.items():
         if st_key in joint.obsm and sm_key in joint.obsm:
@@ -152,11 +144,32 @@ def load_inputs(sample_id):
         else:
             warnings.warn(
                 f"per-modality latents for '{name}' ({st_key}/{sm_key}) not in "
-                f"joint_adata.obsm; cross-modal metrics will be skipped. Re-run "
+                f"joint_adata.obsm; its cross-modal metrics will be skipped. Re-run "
                 f"3__spatial_meta_modelling.py for sample '{sample_id}' to add them."
             )
 
-    return joint, x_totalvi, per_modality
+    # Multigrate joint + per-modality latents (multigrate_mouse_sma.py), aligned to the
+    # joint_adata spot order. Multigrate exposes per-modality latents, so it also joins the
+    # cross-modal metric (the old TOTALVI baseline could not).
+    x_multigrate = None
+    if mg_npz.exists():
+        d = np.load(mg_npz, allow_pickle=True)
+        mg_obs = pd.Index([str(x) for x in d["obs_names"]])
+        pos = mg_obs.get_indexer(joint.obs_names)
+        if (pos < 0).any():
+            raise ValueError("Multigrate latents do not cover all joint_adata spots.")
+        x_multigrate = np.asarray(d["joint"])[pos]
+        per_modality["multigrate"] = {
+            "st": np.asarray(d["rna"])[pos],
+            "sm": np.asarray(d["msi"])[pos],
+        }
+    else:
+        warnings.warn(
+            f"Multigrate latents not found at {mg_npz}; Multigrate will be excluded. "
+            f"Run multigrate_mouse_sma.py for sample '{sample_id}' first."
+        )
+
+    return joint, x_multigrate, per_modality
 
 
 # ── Metric A: bio-conservation (scib_metrics) ────────────────────────────────
@@ -332,7 +345,7 @@ def main():
     sample_id = args.sample_id
     print(f"[INFO] Benchmarking SMA sample {sample_id}")
 
-    joint, x_totalvi, per_modality = load_inputs(sample_id)
+    joint, x_multigrate, per_modality = load_inputs(sample_id)
     n_spots = joint.n_obs
     rna_labels = joint.obs[RNA_LABEL_KEY].to_numpy()
     msi_labels = joint.obs[MSI_LABEL_KEY].to_numpy()
@@ -351,9 +364,10 @@ def main():
     lineup = {
         "teacher": _standardize(joint.obsm["teacher_X_emb"]),
         "student": _standardize(joint.obsm["student_X_emb"]),
-        "totalvi": _standardize(x_totalvi),
-        "pca": _standardize(pca_floor),
     }
+    if x_multigrate is not None:
+        lineup["multigrate"] = _standardize(x_multigrate)
+    lineup["pca"] = _standardize(pca_floor)
 
     # ── Metric A: bio-conservation ──────────────────────────────────────────
     labels_by_key = {RNA_LABEL_KEY: rna_labels, MSI_LABEL_KEY: msi_labels}
@@ -397,7 +411,7 @@ def main():
         cross_rows.append({"model": name, "metric": "iLISI",
                            "value": ilisi_modality_mixing(st, sm, args.lisi_perplexity)})
     cross_df = pd.DataFrame(cross_rows)
-    print("\n[cross-modal alignment] (JEPA only):")
+    print("\n[cross-modal alignment]:")
     if not cross_df.empty:
         print(cross_df.pivot(index="model", columns="metric", values="value").round(3).to_string())
     else:
@@ -412,14 +426,16 @@ def main():
             "sma_benchmark_joint_metrics_barplot.pdf")
     if not cross_df.empty:
         barplot(cross_df, "value",
-                f"SMA {sample_id}: cross-modal alignment (JEPA)",
+                f"SMA {sample_id}: cross-modal alignment",
                 "sma_benchmark_crossmodal_barplot.pdf")
 
     all_metrics = pd.concat([
         joint_metrics_df.assign(family="joint"),
         cross_df.assign(family="crossmodal") if not cross_df.empty else cross_df,
     ], ignore_index=True)
-    out_csv = OUTPATH / "totalvi_mouse_sma" / sample_id / "benchmark_metrics.csv"
+    out_dir = OUTPATH / "multigrate_mouse_sma" / sample_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_csv = out_dir / "benchmark_metrics.csv"
     all_metrics.to_csv(out_csv, index=False)
     print(f"\n[INFO] wrote {out_csv}")
 

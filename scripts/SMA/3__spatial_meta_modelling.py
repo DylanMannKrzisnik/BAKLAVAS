@@ -265,7 +265,7 @@ class SpatialJEPA_trainer:
 
         indices = indices.detach().cpu().clone()
         H_teacher = self.detach_H(H)
-        distil_loss = self.jepa_distillation_step(H_teacher, indices, K=3)
+        distil_loss = self.jepa_distillation_step(H_teacher, indices, K=8)
 
         batch_record = dict(
             indices=indices,
@@ -577,7 +577,7 @@ for sample_id in SAMPLE_IDS:
 #%% Run SpatialJEPA and vanilla SpatialMETA baseline
 
 # instantiate models
-max_epoch = 500
+max_epoch = 1000
 learning_rate = 1e-3
 
 # For horizontal integration (MULTI) pass the section as a batch key: this enables decoder batch conditioning + the MMD alignment loss, and a block-diagonal spatial graph (no cross-section edges) for the full-graph teacher.

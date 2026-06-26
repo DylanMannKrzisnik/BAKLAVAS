@@ -326,7 +326,7 @@ class SpatialJEPA_trainer:
 
         indices = indices.detach().cpu().clone()
         H_teacher = self.detach_H(H)
-        distil_loss = self.jepa_distillation_step(H_teacher, indices, K=8)
+        distil_loss = self.jepa_distillation_step(H_teacher, indices, K=1)
 
         batch_record = dict(
             indices=indices,

@@ -781,7 +781,7 @@ def main():
             mdata.write_h5mu(mudata_path)
             print(f"Mudata saved to {mudata_path}")
 
-    compute_umap_and_leiden(mdata, 'multivi_mdata.h5mu')
+    compute_umap_and_leiden(mdata, mudata_fn='multivi_mdata.h5mu')
     compute_umap_and_leiden(target_mdata, rna_ct_key="arc_gex_graphclust_Cluster", atac_ct_key="arc_atac_graphclust_Cluster", mudata_fn='multivi_mdata_target.h5mu')
     compute_umap_and_leiden(target_mdata, rna_ct_key="arc_gex_graphclust_Cluster", atac_ct_key="arc_atac_graphclust_Cluster", mudata_fn='multivi_mdata_zero_shot.h5mu', zero_shot=True)
 

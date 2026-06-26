@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path="/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA/.env")
 
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 import os
 import numpy as np
@@ -129,6 +130,64 @@ def _save_labeled_plots(labeled_outputs: list[tuple[str, object]], filename: str
         plt.close(fig)
         print(f"[INFO] wrote {fig_path}")
 
+
+def _optimizer_lr(optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"])
+
+
+class _EpochStepLRState:
+    def __init__(self, label, optimizer, steps_per_epoch):
+        self.label = label
+        self.optimizer = optimizer
+        self.steps_per_epoch = steps_per_epoch
+        self.optimizer_step_count = 0
+        self.epoch_lr_list = []
+        self.scheduler = None
+
+
+@contextmanager
+def _scheduled_adamw_epochs(label: str, steps_per_epoch: int, step_size: int, gamma: float):
+    """Temporarily add epoch-level StepLR to AdamW optimizers created inside fit()."""
+    if steps_per_epoch <= 0:
+        raise ValueError("steps_per_epoch must be positive for LR scheduling")
+
+    original_adamw = optim.AdamW
+    states = []
+
+    def scheduled_adamw(*args, **kwargs):
+        optimizer = original_adamw(*args, **kwargs)
+        state = _EpochStepLRState(label=label, optimizer=optimizer, steps_per_epoch=steps_per_epoch)
+        state.scheduler = optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=step_size,
+            gamma=gamma,
+        )
+        scheduler_wrapped_step = optimizer.step
+
+        def step_with_epoch_scheduler(*step_args, **step_kwargs):
+            result = scheduler_wrapped_step(*step_args, **step_kwargs)
+            state.optimizer_step_count += 1
+            if state.optimizer_step_count % state.steps_per_epoch == 0:
+                state.epoch_lr_list.append(_optimizer_lr(optimizer))
+                state.scheduler.step()
+            return result
+
+        step_with_epoch_scheduler._with_counter = getattr(
+            scheduler_wrapped_step,
+            "_with_counter",
+            False,
+        )
+        optimizer.step = step_with_epoch_scheduler
+        states.append(state)
+        return optimizer
+
+    optim.AdamW = scheduled_adamw
+    try:
+        yield states
+    finally:
+        optim.AdamW = original_adamw
+
+
 class SpatialJEPA_trainer:
     """Train a full-graph teacher while distilling its batch embeddings to a student."""
 
@@ -157,6 +216,7 @@ class SpatialJEPA_trainer:
             lr=student_lr,
             weight_decay=student_weight_decay,
         )
+        self.student_lr_scheduler = None
 
         self.batches_per_epoch = len(
             self.teacher_model.as_dataloader(batch_size=n_per_batch, shuffle=True)
@@ -166,6 +226,7 @@ class SpatialJEPA_trainer:
         self.current_epoch_H = []
         self.student_distill_loss = []
         self.epoch_student_distill_loss = []
+        self.epoch_student_lr_list = []
 
     def get_expression_batch(self, model, indices):
         """Fetch a model input batch by original observation indices."""
@@ -284,6 +345,9 @@ class SpatialJEPA_trainer:
                     for record in self.current_epoch_H
                 ]))
             )
+            self.epoch_student_lr_list.append(_optimizer_lr(self.student_optimizer))
+            if self.student_lr_scheduler is not None:
+                self.student_lr_scheduler.step()
             self.current_epoch_H.clear()
 
     def fit_teacher(self, **fit_kwargs):
@@ -304,6 +368,7 @@ class SpatialJEPA_trainer:
             self.teacher_model.forward = teacher_forward
 
         loss_dict["epoch_student_distill_loss_list"] = self.epoch_student_distill_loss
+        loss_dict["epoch_student_lr_list"] = self.epoch_student_lr_list
         return loss_dict
 
 
@@ -579,6 +644,8 @@ for sample_id in SAMPLE_IDS:
 # instantiate models
 max_epoch = 1000
 learning_rate = 1e-3
+lr_scheduler_step_size = 200
+lr_scheduler_gamma = 0.1
 
 # For horizontal integration (MULTI) pass the section as a batch key: this enables decoder batch conditioning + the MMD alignment loss, and a block-diagonal spatial graph (no cross-section edges) for the full-graph teacher.
 batch_keys = [SECTION_KEY] if MULTI else None
@@ -601,17 +668,48 @@ spatialjepa_trainer = SpatialJEPA_trainer(
     student_model,
     n_per_batch=n_per_batch,
 )
-# train models; mode="multi" upweights the MMD loss for horizontal integration
-loss_dict = spatialjepa_trainer.fit_teacher(
-    max_epoch=max_epoch,
-    lr=learning_rate,
-    mode=train_mode,
+spatialjepa_trainer.student_lr_scheduler = optim.lr_scheduler.StepLR(
+    spatialjepa_trainer.student_optimizer,
+    step_size=lr_scheduler_step_size,
+    gamma=lr_scheduler_gamma,
 )
-nonspatial_loss_dict = nonspatial_model.fit(
-    max_epoch=max_epoch,
-    n_per_batch=n_per_batch,
-    lr=learning_rate,
-    mode=train_mode,
+print(
+    "[LR] StepLR enabled for teacher/student/nonspatial: "
+    f"step_size={lr_scheduler_step_size} epochs, gamma={lr_scheduler_gamma}"
+)
+# train models; mode="multi" upweights the MMD loss for horizontal integration
+with _scheduled_adamw_epochs(
+    label="teacher",
+    steps_per_epoch=spatialjepa_trainer.batches_per_epoch,
+    step_size=lr_scheduler_step_size,
+    gamma=lr_scheduler_gamma,
+) as teacher_lr_states:
+    loss_dict = spatialjepa_trainer.fit_teacher(
+        max_epoch=max_epoch,
+        lr=learning_rate,
+        mode=train_mode,
+    )
+loss_dict["epoch_teacher_lr_list"] = (
+    teacher_lr_states[0].epoch_lr_list if teacher_lr_states else []
+)
+
+nonspatial_batches_per_epoch = len(
+    nonspatial_model.as_dataloader(batch_size=n_per_batch, shuffle=True)
+)
+with _scheduled_adamw_epochs(
+    label="nonspatial",
+    steps_per_epoch=nonspatial_batches_per_epoch,
+    step_size=lr_scheduler_step_size,
+    gamma=lr_scheduler_gamma,
+) as nonspatial_lr_states:
+    nonspatial_loss_dict = nonspatial_model.fit(
+        max_epoch=max_epoch,
+        n_per_batch=n_per_batch,
+        lr=learning_rate,
+        mode=train_mode,
+    )
+nonspatial_loss_dict["epoch_lr_list"] = (
+    nonspatial_lr_states[0].epoch_lr_list if nonspatial_lr_states else []
 )
 # extract outputs
 epoch_H = spatialjepa_trainer.epoch_H

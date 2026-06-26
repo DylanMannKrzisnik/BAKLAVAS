@@ -364,16 +364,82 @@ def ensure_obs_labels_are_str(adata, label_keys):
             adata.obs[label_key] = adata.obs[label_key].astype(str)
 
 
+def _stack_modalities_for_ingest(joint_emb, st_emb, sm_emb):
+    joint_emb = np.asarray(joint_emb, dtype=float)
+    st_emb = np.asarray(st_emb, dtype=float)
+    sm_emb = np.asarray(sm_emb, dtype=float)
+    if not (joint_emb.shape[0] == st_emb.shape[0] == sm_emb.shape[0]):
+        warnings.warn(
+            "Cannot ingest-project modality embeddings: multimodal/ST/SM row "
+            f"counts are {joint_emb.shape[0]}/{st_emb.shape[0]}/{sm_emb.shape[0]}."
+        )
+        return None
+
+    joint_dim = joint_emb.shape[1]
+    st_dim = st_emb.shape[1]
+    sm_dim = sm_emb.shape[1]
+
+    if st_dim == joint_dim and sm_dim == joint_dim:
+        return np.vstack([st_emb, sm_emb])
+
+    if joint_dim == st_dim + sm_dim:
+        st_query = np.hstack([st_emb, np.zeros((st_emb.shape[0], sm_dim))])
+        sm_query = np.hstack([np.zeros((sm_emb.shape[0], st_dim)), sm_emb])
+        return np.vstack([st_query, sm_query])
+
+    warnings.warn(
+        "Cannot ingest-project modality embeddings: multimodal/ST/SM latent "
+        f"dims are {joint_dim}/{st_dim}/{sm_dim}."
+    )
+    return None
+
+
+def _set_fixed_knn_distances_for_ingest(adata_ref, neighbors_key, rep_key):
+    """Make ingest's pynndescent init robust to sparse zero-distance drops."""
+    n_obs = adata_ref.n_obs
+    n_neighbors = int(adata_ref.uns[neighbors_key]["params"]["n_neighbors"])
+    if n_obs <= 1:
+        return
+
+    k_graph = min(n_neighbors, n_obs)
+    k_search = min(k_graph + 1, n_obs)
+    rep = np.asarray(adata_ref.obsm[rep_key], dtype=float)
+    dist, idx = NearestNeighbors(n_neighbors=k_search).fit(rep).kneighbors(rep)
+
+    graph_width = k_graph - 1
+    graph_idx = np.empty((n_obs, graph_width), dtype=int)
+    graph_dist = np.empty((n_obs, graph_width), dtype=float)
+    for i in range(n_obs):
+        keep = idx[i] != i
+        row_idx = idx[i, keep][:graph_width]
+        row_dist = dist[i, keep][:graph_width]
+        if row_idx.size != graph_width:
+            raise ValueError(
+                f"Could not build fixed-width ingest KNN graph for row {i}: "
+                f"expected {graph_width} neighbors, got {row_idx.size}."
+            )
+        graph_idx[i] = row_idx
+        graph_dist[i] = row_dist
+
+    rows = np.repeat(np.arange(n_obs), graph_width)
+    data = graph_dist.ravel() + 1e-12
+    distances_key = adata_ref.uns[neighbors_key]["distances_key"]
+    adata_ref.obsp[distances_key] = sp.csr_matrix(
+        (data, (rows, graph_idx.ravel())),
+        shape=(n_obs, n_obs),
+    )
+
+
 def plot_umap_grid(adata, lineup, lineup_st, lineup_sm, sample_id, filename):
     """Compute and save one UMAP grid: model rows by embedding-family columns."""
     import scanpy as sc
 
-    column_specs = [
+    cluster_specs = [
         ("Multimodal", "multimodal", lineup, MM_LABEL_KEY),
         ("RNA / ST", "st", lineup_st, RNA_LABEL_KEY),
         ("SM / MSI", "sm", lineup_sm, MSI_LABEL_KEY),
     ]
-    missing = [label_key for _, _, _, label_key in column_specs
+    missing = [label_key for _, _, _, label_key in cluster_specs
                if label_key not in adata.obs.columns]
     if missing:
         warnings.warn(
@@ -382,7 +448,7 @@ def plot_umap_grid(adata, lineup, lineup_st, lineup_sm, sample_id, filename):
         return
 
     model_order = []
-    for _, _, embeddings, _ in column_specs:
+    for _, _, embeddings, _ in cluster_specs:
         model_order.extend([name for name in embeddings.keys() if name not in model_order])
     if not model_order:
         print("[INFO] no embeddings found; skipping UMAP plot")
@@ -398,13 +464,18 @@ def plot_umap_grid(adata, lineup, lineup_st, lineup_sm, sample_id, filename):
 
     fig, axes = plt.subplots(
         nrows=len(model_order),
-        ncols=len(column_specs),
-        figsize=(12.0, 3.2 * len(model_order)),
+        ncols=len(cluster_specs) + 1,
+        figsize=(16.0, 3.2 * len(model_order)),
         squeeze=False,
     )
 
     for row, name in enumerate(model_order):
-        for col, (column_title, rep_family, embeddings, color_key) in enumerate(column_specs):
+        ref_rep_key = None
+        ref_neighbors_key = None
+        ref_umap_key = None
+        joint_emb = None
+
+        for col, (column_title, rep_family, embeddings, color_key) in enumerate(cluster_specs):
             ax = axes[row, col]
             emb = embeddings.get(name)
             if emb is None:
@@ -446,6 +517,59 @@ def plot_umap_grid(adata, lineup, lineup_st, lineup_sm, sample_id, filename):
                 size=60,
                 title=f"{name} {column_title}: {color_key}",
             )
+
+            if rep_family == "multimodal":
+                ref_rep_key = rep_key
+                ref_neighbors_key = neighbors_key
+                ref_umap_key = umap_key
+                joint_emb = emb
+
+        ax = axes[row, len(cluster_specs)]
+        st_emb = lineup_st.get(name)
+        sm_emb = lineup_sm.get(name)
+        if joint_emb is None or st_emb is None or sm_emb is None:
+            ax.axis("off")
+            continue
+
+        query_rep = _stack_modalities_for_ingest(joint_emb, st_emb, sm_emb)
+        if query_rep is None:
+            ax.axis("off")
+            continue
+
+        query_obs_names = (
+            [f"{obs_name}_rna" for obs_name in adata.obs_names.astype(str)]
+            + [f"{obs_name}_msi" for obs_name in adata.obs_names.astype(str)]
+        )
+        query_adata = sc.AnnData(
+            X=np.zeros((query_rep.shape[0], 1), dtype=np.float32),
+            obs=pd.DataFrame(
+                {
+                    "modality": np.repeat(["RNA / ST", "MSI / SM"], adata.n_obs),
+                },
+                index=query_obs_names,
+            ),
+        )
+        query_adata.obs["modality"] = query_adata.obs["modality"].astype(str)
+        query_adata.obsm[ref_rep_key] = query_rep
+        plot_adata.obsm["X_umap"] = plot_adata.obsm[ref_umap_key].copy()
+        _set_fixed_knn_distances_for_ingest(plot_adata, ref_neighbors_key, ref_rep_key)
+        sc.tl.ingest(
+            query_adata,
+            plot_adata,
+            embedding_method="umap",
+            neighbors_key=ref_neighbors_key,
+        )
+        ingest_umap_key = f"{name}_modalities_on_multimodal_umap"
+        query_adata.obsm[ingest_umap_key] = query_adata.obsm["X_umap"].copy()
+        sc.pl.embedding(
+            query_adata,
+            basis=ingest_umap_key,
+            color="modality",
+            ax=ax,
+            show=False,
+            size=30,
+            title=f"{name} RNA+MSI on multimodal UMAP",
+        )
 
     fig.suptitle(f"SMA {sample_id}: latent UMAPs", y=1.0)
     fig.tight_layout()

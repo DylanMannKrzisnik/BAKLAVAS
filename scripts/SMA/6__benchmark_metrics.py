@@ -108,7 +108,7 @@ def _dense(mat):
     return mat.toarray() if sp.issparse(mat) else np.asarray(mat)
 
 
-def _standardize(X, identity=False):
+def _standardize(X, identity=True):
     if identity:
         return np.asarray(X, dtype=float)
     return StandardScaler().fit_transform(np.asarray(X, dtype=float))
@@ -421,16 +421,29 @@ def plot_umap_grid(adata, lineup, lineup_st, lineup_sm, sample_id, filename):
                 continue
 
             rep_key = f"X_{rep_family}_{name}"
+            neighbors_key = f"{name}_{rep_family}_neighbors"
+            umap_key = f"{name}_{rep_family}_umap"
             plot_adata.obsm[rep_key] = emb
-            sc.pp.neighbors(plot_adata, use_rep=rep_key, n_neighbors=15)
-            sc.tl.umap(plot_adata, min_dist=0.3)
-            sc.pl.umap(
+            sc.pp.neighbors(
                 plot_adata,
+                use_rep=rep_key,
+                n_neighbors=15,
+                key_added=neighbors_key,
+            )
+            sc.tl.umap(
+                plot_adata,
+                min_dist=1,
+                spread=1,
+                neighbors_key=neighbors_key,
+            )
+            plot_adata.obsm[umap_key] = plot_adata.obsm["X_umap"].copy()
+            sc.pl.embedding(
+                plot_adata,
+                basis=umap_key,
                 color=color_key,
                 ax=ax,
                 show=False,
-                frameon=False,
-                s=12,
+                size=60,
                 title=f"{name} {column_title}: {color_key}",
             )
 
@@ -458,8 +471,9 @@ def main():
     st_mask = joint.var["type"].values == "ST"
     sm_mask = joint.var["type"].values == "SM"
     norm = joint.layers["normalized"]
-    pca_floor = np.concatenate([_to_pca(norm[:, st_mask], 30), _to_pca(norm[:, sm_mask], 30)], axis=1)
+    st_pca = _to_pca(norm[:, st_mask], 30)
     msi_pca = _to_pca(norm[:, sm_mask], 30)
+    pca_floor = np.concatenate([st_pca, msi_pca], axis=1)
 
     # lineup of joint embeddings (standardized so distances/ridge are comparable)
     lineup = {
@@ -480,15 +494,35 @@ def main():
     lineup_sm = {
         name: _standardize(mods["sm"]) for name, mods in per_modality.items()
     }
-    lineup_st["pca"] = _standardize(_to_pca(norm[:, st_mask], 30))
+    lineup_st["pca"] = _standardize(st_pca)
     lineup_sm["pca"] = _standardize(msi_pca)
+
+    # Match SpatialMETA training UMAPs as closely as possible: build neighbours on
+    # the raw latent arrays stored/exported by each model, not metric-standardized copies.
+    umap_lineup = {
+        "teacher": np.asarray(joint.obsm["teacher_X_emb"], dtype=float),
+        "student": np.asarray(joint.obsm["student_X_emb"], dtype=float),
+    }
+    if "nonspatial_X_emb" in joint.obsm:
+        umap_lineup["nonspatial"] = np.asarray(joint.obsm["nonspatial_X_emb"], dtype=float)
+    if x_multigrate is not None:
+        umap_lineup["multigrate"] = np.asarray(x_multigrate, dtype=float)
+    umap_lineup["pca"] = np.asarray(pca_floor, dtype=float)
+    umap_lineup_st = {
+        name: np.asarray(mods["st"], dtype=float) for name, mods in per_modality.items()
+    }
+    umap_lineup_sm = {
+        name: np.asarray(mods["sm"], dtype=float) for name, mods in per_modality.items()
+    }
+    umap_lineup_st["pca"] = np.asarray(st_pca, dtype=float)
+    umap_lineup_sm["pca"] = np.asarray(msi_pca, dtype=float)
 
     # UMAPs: one row per model, with multimodal / RNA-ST / SM-MSI columns.
     plot_umap_grid(
         joint,
-        lineup,
-        lineup_st,
-        lineup_sm,
+        umap_lineup,
+        umap_lineup_st,
+        umap_lineup_sm,
         sample_id,
         filename="sma_benchmark_umap_grid.pdf",
     )

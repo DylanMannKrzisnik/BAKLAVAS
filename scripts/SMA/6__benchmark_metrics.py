@@ -26,6 +26,13 @@ import os
 import sys
 from pathlib import Path
 
+'''
+os.environ.setdefault(
+    "NUMBA_CACHE_DIR",
+    str(Path(os.environ.get("TMPDIR", "/tmp")) / "numba_cache"),
+)
+'''
+
 from dotenv import load_dotenv
 
 import matplotlib
@@ -59,6 +66,7 @@ from evals_utils import foscttm_moscot
 
 FIG_DIR = Path("/home/mcb/users/dmannk/THESIS_base/overleaf-cibb-2026/figures")
 
+MM_LABEL_KEY = "MM_clusters"
 RNA_LABEL_KEY = "RNA_clusters"
 MSI_LABEL_KEY = "MSI_clusters"
 
@@ -100,7 +108,9 @@ def _dense(mat):
     return mat.toarray() if sp.issparse(mat) else np.asarray(mat)
 
 
-def _standardize(X):
+def _standardize(X, identity=False):
+    if identity:
+        return np.asarray(X, dtype=float)
     return StandardScaler().fit_transform(np.asarray(X, dtype=float))
 
 
@@ -135,7 +145,7 @@ def load_inputs(sample_id):
             "joint_adata missing obsm['nonspatial_X_emb']; the vanilla SpatialMETA "
             "baseline will be excluded. Re-run 3__spatial_meta_modelling.py to add it."
         )
-    for lab in (RNA_LABEL_KEY, MSI_LABEL_KEY):
+    for lab in (MM_LABEL_KEY, RNA_LABEL_KEY, MSI_LABEL_KEY):
         if lab not in joint.obs.columns:
             raise KeyError(f"joint_adata missing obs['{lab}']")
 
@@ -336,13 +346,97 @@ def barplot(df, value_col, title, filename):
     g.set_titles("{col_name}")
     g.set(xlabel="", ylabel="")
     for ax in g.axes.flat:
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
+        ax.tick_params(axis='x', labelbottom=True, labelrotation=30)
+        for label in ax.get_xticklabels():
+            label.set_ha("right")
         ax.axhline(0.0, color="#999999", lw=0.8, ls="--")
         for patch in ax.patches:
             patch.set_edgecolor("#cccccc")
             patch.set_linewidth(1)
     g.fig.suptitle(title, y=1.02)
+    g.fig.tight_layout()
     save_figure(g.fig, filename)
+
+
+def ensure_obs_labels_are_str(adata, label_keys):
+    for label_key in label_keys:
+        if label_key in adata.obs.columns:
+            adata.obs[label_key] = adata.obs[label_key].astype(str)
+
+
+def plot_umap_grid(adata, lineup, lineup_st, lineup_sm, sample_id, filename):
+    """Compute and save one UMAP grid: model rows by embedding-family columns."""
+    import scanpy as sc
+
+    column_specs = [
+        ("Multimodal", "multimodal", lineup, MM_LABEL_KEY),
+        ("RNA / ST", "st", lineup_st, RNA_LABEL_KEY),
+        ("SM / MSI", "sm", lineup_sm, MSI_LABEL_KEY),
+    ]
+    missing = [label_key for _, _, _, label_key in column_specs
+               if label_key not in adata.obs.columns]
+    if missing:
+        warnings.warn(
+            f"Missing obs labels for UMAP plotting: {missing}; skipping plot."
+        )
+        return
+
+    model_order = []
+    for _, _, embeddings, _ in column_specs:
+        model_order.extend([name for name in embeddings.keys() if name not in model_order])
+    if not model_order:
+        print("[INFO] no embeddings found; skipping UMAP plot")
+        return
+
+    color_keys = [MM_LABEL_KEY, RNA_LABEL_KEY, MSI_LABEL_KEY]
+    plot_adata = sc.AnnData(
+        X=np.zeros((adata.n_obs, 1), dtype=np.float32),
+        obs=adata.obs[color_keys].copy(),
+    )
+    for color_key in color_keys:
+        plot_adata.obs[color_key] = plot_adata.obs[color_key].astype(str)
+
+    fig, axes = plt.subplots(
+        nrows=len(model_order),
+        ncols=len(column_specs),
+        figsize=(12.0, 3.2 * len(model_order)),
+        squeeze=False,
+    )
+
+    for row, name in enumerate(model_order):
+        for col, (column_title, rep_family, embeddings, color_key) in enumerate(column_specs):
+            ax = axes[row, col]
+            emb = embeddings.get(name)
+            if emb is None:
+                ax.axis("off")
+                continue
+
+            emb = np.asarray(emb, dtype=float)
+            if emb.ndim != 2 or emb.shape[0] != adata.n_obs:
+                warnings.warn(
+                    f"Skipping {rep_family}/{name}: expected ({adata.n_obs}, n_latent), "
+                    f"got {emb.shape}."
+                )
+                ax.axis("off")
+                continue
+
+            rep_key = f"X_{rep_family}_{name}"
+            plot_adata.obsm[rep_key] = emb
+            sc.pp.neighbors(plot_adata, use_rep=rep_key, n_neighbors=15)
+            sc.tl.umap(plot_adata, min_dist=0.3)
+            sc.pl.umap(
+                plot_adata,
+                color=color_key,
+                ax=ax,
+                show=False,
+                frameon=False,
+                s=12,
+                title=f"{name} {column_title}: {color_key}",
+            )
+
+    fig.suptitle(f"SMA {sample_id}: latent UMAPs", y=1.0)
+    fig.tight_layout()
+    save_figure(fig, filename)
 
 
 #%%
@@ -352,6 +446,7 @@ def main():
     print(f"[INFO] Benchmarking SMA sample {sample_id}")
 
     joint, x_multigrate, per_modality = load_inputs(sample_id)
+    ensure_obs_labels_are_str(joint, (MM_LABEL_KEY, RNA_LABEL_KEY, MSI_LABEL_KEY))
     n_spots = joint.n_obs
     rna_labels = joint.obs[RNA_LABEL_KEY].to_numpy()
     msi_labels = joint.obs[MSI_LABEL_KEY].to_numpy()
@@ -376,6 +471,27 @@ def main():
     if x_multigrate is not None:
         lineup["multigrate"] = _standardize(x_multigrate)
     lineup["pca"] = _standardize(pca_floor)
+
+    # Per-modality latents are available for SpatialMETA in joint_adata.obsm and for
+    # Multigrate in multigrate_modality_latents.npz; include PCA floors for context.
+    lineup_st = {
+        name: _standardize(mods["st"]) for name, mods in per_modality.items()
+    }
+    lineup_sm = {
+        name: _standardize(mods["sm"]) for name, mods in per_modality.items()
+    }
+    lineup_st["pca"] = _standardize(_to_pca(norm[:, st_mask], 30))
+    lineup_sm["pca"] = _standardize(msi_pca)
+
+    # UMAPs: one row per model, with multimodal / RNA-ST / SM-MSI columns.
+    plot_umap_grid(
+        joint,
+        lineup,
+        lineup_st,
+        lineup_sm,
+        sample_id,
+        filename="sma_benchmark_umap_grid.pdf",
+    )
 
     # ── Metric A: bio-conservation ──────────────────────────────────────────
     labels_by_key = {RNA_LABEL_KEY: rna_labels, MSI_LABEL_KEY: msi_labels}

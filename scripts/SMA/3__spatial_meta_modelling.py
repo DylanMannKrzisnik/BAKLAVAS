@@ -90,6 +90,15 @@ def _section_slug(section_id: str) -> str:
     return section_id.rsplit("_", 1)[-1] if "_" in section_id else section_id
 
 
+def _figure_path(filename: str) -> Path:
+    """Resolve plot output under the active sample id/common-root directory."""
+    path = Path(filename)
+    if not path.is_absolute():
+        path = FIG_DIR / RUN_ID / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _save_plot(plot_output, filename: str) -> None:
     axes = _flatten_axes(plot_output)
     figures = []
@@ -100,7 +109,7 @@ def _save_plot(plot_output, filename: str) -> None:
     if not figures:
         figures = [plt.gcf()]
 
-    path = FIG_DIR / filename
+    path = _figure_path(filename)
     for i, fig in enumerate(figures):
         fig_path = path if len(figures) == 1 else path.with_name(f"{path.stem}_{i + 1}{path.suffix}")
         fig.savefig(fig_path, dpi=150, bbox_inches="tight")
@@ -110,7 +119,7 @@ def _save_plot(plot_output, filename: str) -> None:
 
 def _save_labeled_plots(labeled_outputs: list[tuple[str, object]], filename: str) -> None:
     """Save one figure per (section_label, plot_output) pair, e.g. *_A1.png, *_C1.png."""
-    path = FIG_DIR / filename
+    path = _figure_path(filename)
     stem, suffix = path.stem, path.suffix
     for label, plot_output in labeled_outputs:
         axes = _flatten_axes(plot_output)
@@ -551,11 +560,12 @@ for sample_id in SAMPLE_IDS:
 #%% Run SpatialJEPA and vanilla SpatialMETA baseline
 
 # instantiate models
+max_epoch = 500
+learning_rate = 1e-3
+
 # For horizontal integration (MULTI) pass the section as a batch key: this enables decoder batch conditioning + the MMD alignment loss, and a block-diagonal spatial graph (no cross-section edges) for the full-graph teacher.
 batch_keys = [SECTION_KEY] if MULTI else None
 section_key = SECTION_KEY if MULTI else None
-max_epoch = 1000
-learning_rate = 1e-5
 train_mode = "multi" if MULTI else "single"
 teacher_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=True, batch_keys=batch_keys, section_key=section_key)
 student_model = spatialJEPA_model(joint_adata, graph_conv=True, full_graph=False, batch_keys=batch_keys, section_key=section_key)

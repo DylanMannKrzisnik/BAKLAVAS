@@ -219,23 +219,40 @@ class SpatialJEPA_trainer:
                 out[k] = detach_tensor(v)
         return out
 
-    def h_distillation_loss(self, H_student, H_teacher):
+    @staticmethod
+    def zscore(x, eps=1e-6):
+        mean = x.mean(dim=0, keepdim=True)
+        std = x.std(dim=0, keepdim=True, unbiased=False).clamp_min(eps)
+        return (x - mean) / std
+
+    def h_distillation_loss(self, H_student, H_teacher, normalize=True):
         loss = None
         for path, weight in self.distill_targets:
             student_value = self.get_nested(H_student, path)
             teacher_value = self.get_nested(H_teacher, path).to(student_value.device)
+
+            if normalize:
+                student_value = self.zscore(student_value)
+                teacher_value = self.zscore(teacher_value)
+
             term = weight * torch.nn.functional.mse_loss(student_value, teacher_value)
             loss = term if loss is None else loss + term
+
         return loss
 
-    def jepa_distillation_step(self, H_teacher, indices):
+    def jepa_distillation_step(self, H_teacher, indices, K=1):
         self.student_model.train()
-        H_student = self.encode_indices(self.student_model, indices)
-        distil_loss = self.h_distillation_loss(H_student, H_teacher)
-        self.student_optimizer.zero_grad(set_to_none=True)
-        distil_loss.backward()
-        self.student_optimizer.step()
-        return float(distil_loss.detach().cpu())
+        last_loss = None
+
+        for _ in range(K):
+            self.student_optimizer.zero_grad(set_to_none=True)
+            H_student = self.encode_indices(self.student_model, indices)
+            distil_loss = self.h_distillation_loss(H_student, H_teacher)
+            distil_loss.backward()
+            self.student_optimizer.step()
+            last_loss = distil_loss.detach()
+
+        return float(last_loss.cpu())
 
     def capture_teacher_outputs(self, outputs):
         H, Rs, L = outputs
@@ -248,7 +265,7 @@ class SpatialJEPA_trainer:
 
         indices = indices.detach().cpu().clone()
         H_teacher = self.detach_H(H)
-        distil_loss = self.jepa_distillation_step(H_teacher, indices)
+        distil_loss = self.jepa_distillation_step(H_teacher, indices, K=3)
 
         batch_record = dict(
             indices=indices,

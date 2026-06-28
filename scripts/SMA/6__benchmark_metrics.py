@@ -42,11 +42,12 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 import seaborn as sns
-from scipy.stats import spearmanr
+from scipy.stats import hypergeom, spearmanr
 from sklearn.cluster import KMeans
 from sklearn.decomposition import TruncatedSVD
 from sklearn.linear_model import Ridge
-from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics import roc_auc_score
+from sklearn.neighbors import KNeighborsRegressor, NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
 from scib_metrics import ilisi_knn, nmi_ari_cluster_labels_leiden, silhouette_label
@@ -81,6 +82,29 @@ PER_MODALITY_KEYS = {
 N_SPATIAL_BLOCKS = 10
 NICHE_K = 15
 SSM_RNG = np.random.default_rng(0)
+
+# ── Metric D: dopamine-representation hyperparameters ─────────────────────────
+# Quantify whether the SPATIAL models (teacher/student) arrange the dopamine input
+# feature into a latent structure that aligns with the intact-vs-lesioned striatal
+# axis better than the nonspatial baseline. Dopamine is an input to all three models,
+# so the claim is structural (Metrics 1-3), not "the latent can decode dopamine"
+# (the decodability control, Metric 4, is expected to be at parity across models).
+DOPA_MODELS = ("teacher", "student", "nonspatial")  # core lineup; others added if present
+DOPA_FEATURE = "msi:Dopamine"        # the clean intact-striatum-specific peak (vs the
+                                      # weaker, ~0.2-correlated "msi:Dopamine (single)").
+DOPA_LAYER = "normalized"            # the per-spot values the models were trained on; no
+                                      # extra transform (AUROC is rank-invariant; Moran's I
+                                      # is reported on these same values for all models).
+DOPA_K = 15                          # kNN graph degree on the 10-D latent (NOT the UMAP).
+DOPA_K_SWEEP = (10, 15, 30, 50)      # robustness sweep for the headline metrics.
+DOPA_TOP_Q = 0.90                    # "dopamine-high" latent region = top 10% smoothed score.
+DOPA_N_BOOT = 1000                   # block-bootstrap resamples for CIs.
+DOPA_N_BOOT_BLOCKS = 25              # spatial blocks resampled with replacement. Only ONE
+                                      # section is available, so this within-section spatial
+                                      # block bootstrap replaces the (impossible) by-section
+                                      # bootstrap; it respects spatial autocorrelation but is
+                                      # anti-conservative — see note in the printed output.
+DOPA_RNG = np.random.default_rng(0)
 
 
 def is_notebook() -> bool:
@@ -326,6 +350,342 @@ class SpatialScorer:
                     rows.append({"setting": tag, "model": name, "metric": metric,
                                  "fold": int(fold), "value": value})
         return pd.DataFrame(rows)
+
+
+# ── Metric D: dopamine representation across models ──────────────────────────
+# Implements the dopamine-representation plan: structural smoothness of dopamine on
+# each model's latent graph (Moran's I), the embedding's structural gain in register
+# with the lesion axis (ΔAUROC), intact-striatal specificity of the dopamine-high
+# latent region (enrichment), and a decodability control showing parity. All metrics
+# use the standardized 10-D latent, an identical k and euclidean metric across models,
+# and the same dopamine vector / transform for every model.
+def get_dopamine(joint, feature=DOPA_FEATURE, layer=DOPA_LAYER):
+    """The dopamine input feature for every spot (same vector for all models)."""
+    if feature not in joint.var_names:
+        raise KeyError(f"dopamine feature '{feature}' not in joint_adata.var_names")
+    col = joint.layers[layer][:, joint.var_names.get_loc(feature)]
+    return _dense(col).ravel().astype(float)
+
+
+def standardized_latents(joint, models=DOPA_MODELS):
+    """z-score (per dim) each model's 10-D joint latent, so kNN distances compare."""
+    out = {}
+    for m in models:
+        key = f"{m}_X_emb"
+        if key in joint.obsm:
+            out[m] = StandardScaler().fit_transform(np.asarray(joint.obsm[key], float))
+    return out
+
+
+def _knn_idx(Z, k):
+    """Neighbor index array (n, k) on the latent, self excluded."""
+    k_eff = min(k + 1, len(Z))
+    nn = NearestNeighbors(n_neighbors=k_eff).fit(Z)
+    return nn.kneighbors(Z, return_distance=False)[:, 1:]
+
+
+def _neigh_mean(values, idx):
+    """Neighborhood mean of `values` over the kNN graph, excluding self."""
+    return values[idx].mean(axis=1)
+
+
+def morans_I_knn(values, idx):
+    """Moran's I of `values` over a symmetric binary kNN weight matrix."""
+    n = len(values)
+    if n < 3:
+        return np.nan
+    z = values - values.mean()
+    rows = np.repeat(np.arange(n), idx.shape[1])
+    W = sp.csr_matrix((np.ones(rows.size), (rows, idx.ravel())), shape=(n, n))
+    W = W.maximum(W.T)  # symmetric binary adjacency
+    S0 = W.sum()
+    den = float((z * z).sum())
+    if den == 0 or S0 == 0:
+        return np.nan
+    return float((n / S0) * (z @ (W @ z)) / den)
+
+
+def delta_auroc(Z, dopa, y, k):
+    """ΔAUROC = AUROC(neighbor-smoothed dopamine) − AUROC(raw dopamine) for label y."""
+    if len(np.unique(y)) < 2:
+        return np.nan, np.nan, np.nan
+    idx = _knn_idx(Z, k)
+    smoothed = _neigh_mean(dopa, idx)
+    a_raw = roc_auc_score(y, dopa)
+    a_sm = roc_auc_score(y, smoothed)
+    return a_sm - a_raw, a_raw, a_sm
+
+
+def intact_enrichment(Z, dopa, intact_str_mask, k, q=DOPA_TOP_Q):
+    """Intact-striatal enrichment of the dopamine-high latent region (full graph)."""
+    idx = _knn_idx(Z, k)
+    smoothed = _neigh_mean(dopa, idx)
+    top = smoothed >= np.quantile(smoothed, q)
+    N, K, n_top = len(smoothed), int(intact_str_mask.sum()), int(top.sum())
+    hit = int((top & intact_str_mask).sum())
+    p = float(hypergeom.sf(hit - 1, N, K, n_top)) if n_top and K else np.nan
+    frac, base, eps = hit / max(n_top, 1), K / N, 1e-9
+    log_odds = float(np.log(((frac + eps) / (1 - frac + eps)) /
+                            ((base + eps) / (1 - base + eps))))
+    return {"frac_intact_striatal": frac, "base_rate": base,
+            "log_odds": log_odds, "hypergeom_p": p}
+
+
+def decodability_cv(Z_sub, dopa_sub, blocks_sub):
+    """Spatial-block CV regression latent→dopamine (ridge + kNN). Control for parity."""
+    rows = []
+    for b in np.unique(blocks_sub):
+        te, tr = blocks_sub == b, blocks_sub != b
+        if te.sum() < 5 or tr.sum() < 20:
+            continue
+        scaler = StandardScaler().fit(Z_sub[tr])
+        for lname, learner in (("ridge", Ridge(alpha=1.0)),
+                               ("knn", KNeighborsRegressor(n_neighbors=15))):
+            learner.fit(scaler.transform(Z_sub[tr]), dopa_sub[tr])
+            pred = learner.predict(scaler.transform(Z_sub[te]))
+            rho = spearmanr(dopa_sub[te], pred).correlation
+            ss_tot = float(((dopa_sub[te] - dopa_sub[te].mean()) ** 2).sum())
+            r2 = 1.0 - float(((dopa_sub[te] - pred) ** 2).sum()) / ss_tot if ss_tot > 0 else np.nan
+            rows.append({"learner": lname, "spearman": float(rho) if np.isfinite(rho) else np.nan,
+                         "r2": r2})
+    return rows
+
+
+def _striatal_metrics(Zs_dict, dopa, y, k):
+    """Point metrics on a (possibly resampled) striatal cell set, all models paired.
+
+    Zs_dict maps model -> latent for the SAME striatal cells; `y` is intact==1; the
+    intact / lesioned Moran's I rebuild the kNN graph on that group's own subset.
+    """
+    intact, lesioned = y == 1, y == 0
+    out = {}
+    for m, Z in Zs_dict.items():
+        d_auc = delta_auroc(Z, dopa, y, k)[0]
+        m_int = (morans_I_knn(dopa[intact], _knn_idx(Z[intact], k))
+                 if intact.sum() > k else np.nan)
+        m_les = (morans_I_knn(dopa[lesioned], _knn_idx(Z[lesioned], k))
+                 if lesioned.sum() > k else np.nan)
+        out[m] = {"delta_auroc": d_auc, "moran_intact": m_int, "moran_lesioned": m_les}
+    return out
+
+
+def dopamine_representation_analysis(joint, sample_id, k=DOPA_K, n_boot=DOPA_N_BOOT):
+    """Full dopamine-representation comparison: returns (results_long, comparison, decod,
+    ksweep) tidy DataFrames and writes the headline figures."""
+    dopa = get_dopamine(joint)
+    latents = standardized_latents(joint)
+    if not latents:
+        warnings.warn("No SpatialMETA latents found for dopamine analysis; skipping.")
+        return None
+    lesion = joint.obs["lesion"].astype(str).to_numpy()
+    region = joint.obs["region"].astype(str).to_numpy()
+    coords = np.asarray(joint.obsm["spatial"], float)
+    intact_all = lesion == "intact"
+    striatum = region == "striatum"
+    intact_str = intact_all & striatum
+    groups = {
+        "intact_striatum": intact_all & striatum,
+        "lesioned_striatum": (~intact_all) & striatum,
+        "intact_not_striatum": intact_all & (~striatum),
+        "lesioned_not_striatum": (~intact_all) & (~striatum),
+    }
+    print(f"\n[dopamine] feature='{DOPA_FEATURE}' layer='{DOPA_LAYER}', k={k}; "
+          f"models={list(latents)}")
+    print("[dopamine] group sizes: " +
+          ", ".join(f"{g}={int(m.sum())}" for g, m in groups.items()))
+    print("[dopamine] raw within-group dopamine variance: " +
+          ", ".join(f"{g}={dopa[m].var():.3f}" for g, m in groups.items()))
+
+    # ── point estimates ──────────────────────────────────────────────────────
+    rows = []
+    # Metric 1: Moran's I of dopamine per model × group (graph on each group's subset).
+    for m, Z in latents.items():
+        for g, mask in groups.items():
+            mi = morans_I_knn(dopa[mask], _knn_idx(Z[mask], k)) if mask.sum() > k else np.nan
+            rows.append({"model": m, "group": g, "metric": "morans_I", "value": mi})
+    # Metric 2/3: striatum-restricted ΔAUROC and full-graph intact enrichment.
+    s_idx = np.where(striatum)[0]
+    y_str = intact_all[s_idx].astype(int)
+    for m, Z in latents.items():
+        d_auc, a_raw, a_sm = delta_auroc(Z[s_idx], dopa[s_idx], y_str, k)
+        rows.append({"model": m, "group": "striatum", "metric": "delta_auroc", "value": d_auc})
+        rows.append({"model": m, "group": "striatum", "metric": "auroc_raw", "value": a_raw})
+        rows.append({"model": m, "group": "striatum", "metric": "auroc_smoothed", "value": a_sm})
+        enr = intact_enrichment(Z, dopa, intact_str, k)
+        rows.append({"model": m, "group": "all", "metric": "enrich_log_odds",
+                     "value": enr["log_odds"]})
+        rows.append({"model": m, "group": "all", "metric": "enrich_frac_intact_striatal",
+                     "value": enr["frac_intact_striatal"]})
+        rows.append({"model": m, "group": "all", "metric": "enrich_hypergeom_p",
+                     "value": enr["hypergeom_p"]})
+    results_long = pd.DataFrame(rows)
+
+    # ── spatial-block bootstrap CIs (paired across models) ───────────────────
+    Zs = {m: Z[s_idx] for m, Z in latents.items()}
+    dopa_s, coords_s = dopa[s_idx], coords[s_idx]
+    n_blk = min(DOPA_N_BOOT_BLOCKS, len(s_idx) // 10)
+    blocks = KMeans(n_clusters=n_blk, random_state=0, n_init=10).fit_predict(coords_s)
+    ublocks = np.unique(blocks)
+    block_cells = {b: np.where(blocks == b)[0] for b in ublocks}
+    boot = {m: {met: [] for met in ("delta_auroc", "moran_intact", "moran_lesioned")}
+            for m in latents}
+    boot_diff = {m: {met: [] for met in ("delta_auroc", "moran_intact")}
+                 for m in latents if m != "nonspatial"}
+    has_baseline = "nonspatial" in latents
+    for _ in range(n_boot):
+        chosen = DOPA_RNG.choice(ublocks, size=len(ublocks), replace=True)
+        cell = np.concatenate([block_cells[b] for b in chosen])
+        y_b = y_str[cell]
+        if len(np.unique(y_b)) < 2:
+            continue
+        per = _striatal_metrics({m: Z[cell] for m, Z in Zs.items()}, dopa_s[cell], y_b, k)
+        for m, vals in per.items():
+            for met, v in vals.items():
+                boot[m][met].append(v)
+        if has_baseline:
+            for m in boot_diff:
+                boot_diff[m]["delta_auroc"].append(per[m]["delta_auroc"] - per["nonspatial"]["delta_auroc"])
+                boot_diff[m]["moran_intact"].append(per[m]["moran_intact"] - per["nonspatial"]["moran_intact"])
+
+    def _ci(vals):
+        v = np.asarray([x for x in vals if np.isfinite(x)])
+        return (np.nanpercentile(v, 2.5), np.nanpercentile(v, 97.5)) if v.size else (np.nan, np.nan)
+
+    # attach CIs to the bootstrapped striatal metrics
+    results_long["ci_low"], results_long["ci_high"] = np.nan, np.nan
+    boot_metric_group = {("delta_auroc", "striatum"): "delta_auroc",
+                         ("morans_I", "intact_striatum"): "moran_intact",
+                         ("morans_I", "lesioned_striatum"): "moran_lesioned"}
+    for i, r in results_long.iterrows():
+        bkey = boot_metric_group.get((r["metric"], r["group"]))
+        if bkey is not None and r["model"] in boot:
+            lo, hi = _ci(boot[r["model"]][bkey])
+            results_long.at[i, "ci_low"], results_long.at[i, "ci_high"] = lo, hi
+
+    # ── model-comparison table (spatial vs nonspatial, paired diffs) ─────────
+    comp_rows = []
+    if has_baseline:
+        for m in boot_diff:
+            for met, label in (("delta_auroc", "delta_auroc"),
+                               ("moran_intact", "morans_I_intact_striatum")):
+                diffs = np.asarray([x for x in boot_diff[m][met] if np.isfinite(x)])
+                lo, hi = _ci(diffs)
+                comp_rows.append({
+                    "comparison": f"{m} - nonspatial", "metric": label,
+                    "diff_mean": float(np.mean(diffs)) if diffs.size else np.nan,
+                    "ci_low": lo, "ci_high": hi,
+                    "win_fraction": float((diffs > 0).mean()) if diffs.size else np.nan,
+                })
+    comparison = pd.DataFrame(comp_rows)
+
+    # ── decodability control (parity expected) ───────────────────────────────
+    decod_rows = []
+    blocks_full = KMeans(n_clusters=N_SPATIAL_BLOCKS, random_state=0,
+                         n_init=10).fit_predict(coords_s)
+    for m, Z in Zs.items():
+        for d in decodability_cv(Z, dopa_s, blocks_full):
+            decod_rows.append({"model": m, **d})
+    decod = pd.DataFrame(decod_rows)
+    decod_summary = (decod.groupby(["model", "learner"])[["spearman", "r2"]].mean()
+                     .reset_index() if not decod.empty else decod)
+
+    # ── k-sensitivity sweep (point estimates only) ───────────────────────────
+    ksweep_rows = []
+    for kk in DOPA_K_SWEEP:
+        per = _striatal_metrics(Zs, dopa_s, y_str, kk)
+        for m, vals in per.items():
+            ksweep_rows.append({"model": m, "k": kk, "delta_auroc": vals["delta_auroc"],
+                                "moran_intact": vals["moran_intact"]})
+    ksweep = pd.DataFrame(ksweep_rows)
+
+    # ── console summary ──────────────────────────────────────────────────────
+    print("\n[dopamine] results (point estimate [95% block-bootstrap CI]):")
+    pe = results_long[results_long.metric.isin(
+        ["delta_auroc", "morans_I", "enrich_log_odds"])]
+    for met in ["delta_auroc", "morans_I", "enrich_log_odds"]:
+        sub = pe[pe.metric == met]
+        print(f"  {met}:")
+        for _, r in sub.iterrows():
+            ci = (f" [{r.ci_low:.3f}, {r.ci_high:.3f}]"
+                  if np.isfinite(r.ci_low) else "")
+            print(f"    {r.model:11s} {r.group:22s} {r.value:.3f}{ci}")
+    if not comparison.empty:
+        print("\n[dopamine] spatial vs nonspatial (paired block bootstrap):")
+        print(comparison.round(3).to_string(index=False))
+    if not decod_summary.empty:
+        print("\n[dopamine] decodability control (spatial-block CV, parity expected):")
+        print(decod_summary.round(3).to_string(index=False))
+    print("\n[dopamine] NOTE: only one section is available, so CIs come from a within-"
+          "section spatial-block bootstrap (resampling whole spatial blocks). This "
+          "respects spatial autocorrelation but is anti-conservative relative to a "
+          "by-section bootstrap; treat CIs as indicative, not inferential.")
+
+    _dopamine_figures(results_long, comparison, decod, ksweep, latents, sample_id)
+    return results_long, comparison, decod, ksweep
+
+
+def _dopamine_figures(results_long, comparison, decod, ksweep, latents, sample_id):
+    order = [m for m in DOPA_MODELS if m in latents]
+
+    # 1. Headline: ΔAUROC per model with block-bootstrap CI.
+    d = results_long[(results_long.metric == "delta_auroc")].set_index("model").loc[order]
+    fig, ax = plt.subplots(figsize=(4.2, 3.4))
+    yerr = np.vstack([d.value - d.ci_low, d.ci_high - d.value])
+    ax.bar(order, d.value, yerr=yerr, capsize=4, color=sns.color_palette("Set2"),
+           edgecolor="#555", linewidth=1)
+    ax.axhline(0, color="#999", lw=0.8, ls="--")
+    ax.set_ylabel("ΔAUROC (smoothed − raw dopamine)")
+    ax.set_title(f"SMA {sample_id}: dopamine structural gain")
+    ax.tick_params(axis="x", labelrotation=20)
+    fig.tight_layout()
+    save_figure(fig, "sma_dopamine_delta_auroc.pdf")
+
+    # 2. Moran's I per model × group (intact/lesioned striatum get CIs).
+    mi = results_long[results_long.metric == "morans_I"]
+    fig, ax = plt.subplots(figsize=(7.0, 3.6))
+    grp_order = ["intact_striatum", "lesioned_striatum",
+                 "intact_not_striatum", "lesioned_not_striatum"]
+    x = np.arange(len(grp_order))
+    w = 0.8 / max(len(order), 1)
+    for i, m in enumerate(order):
+        sub = mi[mi.model == m].set_index("group").reindex(grp_order)
+        err = np.vstack([(sub.value - sub.ci_low).fillna(0),
+                         (sub.ci_high - sub.value).fillna(0)])
+        ax.bar(x + i * w, sub.value, width=w, yerr=err, capsize=3, label=m,
+               edgecolor="#555", linewidth=0.8)
+    ax.set_xticks(x + w * (len(order) - 1) / 2)
+    ax.set_xticklabels(grp_order, rotation=20, ha="right")
+    ax.set_ylabel("Moran's I of dopamine")
+    ax.set_title(f"SMA {sample_id}: dopamine latent-graph smoothness")
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    save_figure(fig, "sma_dopamine_morans_I.pdf")
+
+    # 3. Intact-striatal enrichment of the dopamine-high latent region (log-odds).
+    en = (results_long[results_long.metric == "enrich_log_odds"]
+          .set_index("model").reindex(order))
+    fig, ax = plt.subplots(figsize=(4.2, 3.4))
+    ax.bar(order, en.value, color=sns.color_palette("Set2"), edgecolor="#555", linewidth=1)
+    ax.axhline(0, color="#999", lw=0.8, ls="--")
+    ax.set_ylabel("log-odds (intact-striatal | dopamine-high)")
+    ax.set_title(f"SMA {sample_id}: intact-striatal specificity")
+    ax.tick_params(axis="x", labelrotation=20)
+    fig.tight_layout()
+    save_figure(fig, "sma_dopamine_enrichment.pdf")
+
+    # 4. k-sensitivity sweep of the headline metrics.
+    fig, axes = plt.subplots(1, 2, figsize=(8.0, 3.2))
+    for met, ax in zip(("delta_auroc", "moran_intact"), axes):
+        for m in order:
+            sub = ksweep[ksweep.model == m].sort_values("k")
+            ax.plot(sub.k, sub[met], marker="o", label=m)
+        ax.set_xlabel("k (kNN degree)")
+        ax.set_ylabel(met)
+        ax.set_title(met)
+    axes[0].legend(frameon=False, fontsize=8)
+    fig.suptitle(f"SMA {sample_id}: dopamine metric k-sensitivity", y=1.02)
+    fig.tight_layout()
+    save_figure(fig, "sma_dopamine_ksweep.pdf")
 
 
 # ── outputs ──────────────────────────────────────────────────────────────────
@@ -720,6 +1080,30 @@ def main():
     out_csv = out_dir / "benchmark_metrics.csv"
     all_metrics.to_csv(out_csv, index=False)
     print(f"\n[INFO] wrote {out_csv}")
+
+    # ── Metric D: dopamine representation across models ──────────────────────
+    if DOPA_FEATURE in joint.var_names and {"lesion", "region"} <= set(joint.obs.columns):
+        dopa_out = dopamine_representation_analysis(joint, sample_id)
+        if dopa_out is not None:
+            results_long, comparison, decod, ksweep = dopa_out
+            for df, fname in (
+                (results_long, "dopamine_metrics.csv"),
+                (comparison, "dopamine_model_comparison.csv"),
+                (decod, "dopamine_decodability.csv"),
+                (ksweep, "dopamine_ksweep.csv"),
+            ):
+                path = out_dir / fname
+                meta = {"sample_id": sample_id, "n_boot": DOPA_N_BOOT,
+                        "dopamine_feature": DOPA_FEATURE}
+                if "k" not in df.columns:  # ksweep already carries a per-row k
+                    meta["k"] = DOPA_K
+                df.assign(**meta).to_csv(path, index=False)
+                print(f"[INFO] wrote {path}")
+    else:
+        warnings.warn(
+            f"Skipping dopamine analysis for '{sample_id}': needs var['{DOPA_FEATURE}'] "
+            f"and obs['lesion']/obs['region'] (only V11L12-109_B1 has all three)."
+        )
 
 
 if __name__ == "__main__":

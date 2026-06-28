@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import os
 import numpy as np
+import scipy.sparse as sp
 import spatialmeta as smt
 import pandas as pd
 import scanpy as sc
@@ -405,12 +406,24 @@ H5MU_EXPORT_DIR = Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vica
 
 def assemble_section(sample_id):
     """Load one section and return a per-section ST+SM AnnData tagged with its section id."""
-    # Keep only observations/cells/spots shared across modalities
-    joint_mudata = load_sample(sample_id, export_dir=H5MU_EXPORT_DIR)
+    # Prefer SCT-transformed h5mu if available
+    sct_path = H5MU_EXPORT_DIR / f"{sample_id}_SCT.h5mu"
+    if sct_path.exists():
+        joint_mudata = mu.read_h5mu(sct_path)
+        print(f"[{sample_id}] Using SCT-transformed h5mu")
+    else:
+        joint_mudata = load_sample(sample_id, export_dir=H5MU_EXPORT_DIR)
     mu.pp.intersect_obs(joint_mudata)
 
-    rna = joint_mudata.mod["rna"].copy()   # change to your key, e.g. "ST"
-    msi = joint_mudata.mod["msi"].copy()   # change to your key, e.g. "SM"
+    rna = joint_mudata.mod["rna"].copy()
+    msi = joint_mudata.mod["msi"].copy()
+
+    # If SCT was applied, rna.X holds scale.data; stash it as a layer, then reset
+    # rna.X to raw counts for joint assembly.
+    if "SCT_data" in rna.layers:
+        rna.layers["SCT_scale"] = rna.X.copy()  # SCT scale.data (z-scored), ST-only
+    if "counts" in rna.layers:
+        rna.X = rna.layers["counts"].copy()
 
     # Make feature names unique and modality-prefixed
     annotations = msi.var["annotation"].astype("string")
@@ -448,6 +461,21 @@ def assemble_section(sample_id):
 
     adata.var = adata.var.merge(msi.var[['annotation']], left_on='feature_id', right_index=True, how='left')
     adata.obs[SECTION_KEY] = sample_id
+
+    # SCT layers only cover the RNA modality and are dropped by sc.concat(merge="same").
+    # Rebuild them as joint [ST | SM] matrices, keeping raw MSI counts in the SM columns.
+    # SCT_scale (z-scored scale.data) is ST-only; its SM columns are a raw-MSI placeholder.
+    msi_raw = msi.X
+    for sct_layer in ("SCT_counts", "SCT_data", "SCT_scale"):
+        if sct_layer in rna.layers:
+            rna_mat = rna.layers[sct_layer]
+            if sp.issparse(rna_mat) and sp.issparse(msi_raw):
+                adata.layers[sct_layer] = sp.hstack([rna_mat, msi_raw], format="csr")
+            else:
+                rna_arr = rna_mat.toarray() if sp.issparse(rna_mat) else np.asarray(rna_mat)
+                msi_arr = msi_raw.toarray() if sp.issparse(msi_raw) else np.asarray(msi_raw)
+                adata.layers[sct_layer] = np.hstack([rna_arr, msi_arr])
+
     return adata
 
 
@@ -472,13 +500,22 @@ if species == "human":
 else:
     joint_adata = smt.pp.removeHsp_mt_Rpl_Dnaj(joint_adata) # remove Hsp, mt, Rpl, Dnaj features in mouse
 
-joint_adata.layers["counts"] = joint_adata.X.copy()
+joint_adata.layers["counts"] = joint_adata.X.copy()  # raw counts (rna.X was reset above)
 
-smt.pp.normalize_total_joint_adata_sm_st(
-    joint_adata,
-    target_sum_SM=1e4,
-    target_sum_ST=1e4
-)
+if "SCT_data" in joint_adata.layers:
+    # SCT_data is already log-normalized; use it for ST and normalize SM from raw counts
+    joint_adata.X = joint_adata.layers["SCT_data"]
+    smt.pp.normalize_total_joint_adata_sm_st(
+        joint_adata,
+        target_sum_SM=1e4,
+        target_sum_ST=None,  # ST already log-normalized by SCT
+    )
+else:
+    smt.pp.normalize_total_joint_adata_sm_st(
+        joint_adata,
+        target_sum_SM=1e4,
+        target_sum_ST=1e4,
+    )
 
 joint_adata.layers["normalized"] = joint_adata.X.copy()
 joint_adata.raw = joint_adata
@@ -521,12 +558,16 @@ if n_empty_rna:
 #%%
 
 #joint_adata = sc.read_h5ad(JOINT_HVF_PATH)
-joint_adata.X = joint_adata.layers["counts"]
+if "SCT_counts" in joint_adata.layers:
+    # SCT corrected counts for ST; raw MSI counts in SM columns
+    joint_adata.X = joint_adata.layers["SCT_counts"]
+else:
+    joint_adata.X = joint_adata.layers["counts"]
 
 smt.pp.normalize_total_joint_adata_sm_st( # again, now on the spatially variable features
     joint_adata,
     target_sum_SM=1e3,
-    target_sum_ST=None
+    target_sum_ST=None,  # ZINB decoder uses lib_size = X_ST.sum(1) internally
 )
 
 sm_mask = joint_adata.var["type"].eq("SM").to_numpy()

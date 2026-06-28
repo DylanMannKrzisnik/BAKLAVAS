@@ -547,6 +547,30 @@ def dopamine_representation_analysis(joint, sample_id, k=DOPA_K, n_boot=DOPA_N_B
                 boot_diff[m]["delta_auroc"].append(per[m]["delta_auroc"] - per["nonspatial"]["delta_auroc"])
                 boot_diff[m]["moran_intact"].append(per[m]["moran_intact"] - per["nonspatial"]["moran_intact"])
 
+    # ── full-graph spatial-block bootstrap for enrichment log-odds ───────────
+    # Enrichment is computed on the FULL cell graph (not the striatal subset), so it
+    # needs its own bootstrap over spatial blocks spanning all cells. Paired across
+    # models on each resample, so the diffs vs nonspatial share sampling noise.
+    n_blk_all = min(DOPA_N_BOOT_BLOCKS, len(dopa) // 10)
+    blocks_all = KMeans(n_clusters=n_blk_all, random_state=0, n_init=10).fit_predict(coords)
+    ublocks_all = np.unique(blocks_all)
+    block_cells_all = {b: np.where(blocks_all == b)[0] for b in ublocks_all}
+    boot_enrich = {m: [] for m in latents}
+    boot_enrich_diff = {m: [] for m in latents if m != "nonspatial"}
+    for _ in range(n_boot):
+        chosen = DOPA_RNG.choice(ublocks_all, size=len(ublocks_all), replace=True)
+        cell = np.concatenate([block_cells_all[b] for b in chosen])
+        ism = intact_str[cell]
+        if ism.sum() == 0:
+            continue
+        vals = {m: intact_enrichment(Z[cell], dopa[cell], ism, k)["log_odds"]
+                for m, Z in latents.items()}
+        for m, v in vals.items():
+            boot_enrich[m].append(v)
+        if has_baseline:
+            for m in boot_enrich_diff:
+                boot_enrich_diff[m].append(vals[m] - vals["nonspatial"])
+
     def _ci(vals):
         v = np.asarray([x for x in vals if np.isfinite(x)])
         return (np.nanpercentile(v, 2.5), np.nanpercentile(v, 97.5)) if v.size else (np.nan, np.nan)
@@ -560,6 +584,9 @@ def dopamine_representation_analysis(joint, sample_id, k=DOPA_K, n_boot=DOPA_N_B
         bkey = boot_metric_group.get((r["metric"], r["group"]))
         if bkey is not None and r["model"] in boot:
             lo, hi = _ci(boot[r["model"]][bkey])
+            results_long.at[i, "ci_low"], results_long.at[i, "ci_high"] = lo, hi
+        elif r["metric"] == "enrich_log_odds" and r["model"] in boot_enrich:
+            lo, hi = _ci(boot_enrich[r["model"]])
             results_long.at[i, "ci_low"], results_long.at[i, "ci_high"] = lo, hi
 
     # ── model-comparison table (spatial vs nonspatial, paired diffs) ─────────
@@ -576,6 +603,15 @@ def dopamine_representation_analysis(joint, sample_id, k=DOPA_K, n_boot=DOPA_N_B
                     "ci_low": lo, "ci_high": hi,
                     "win_fraction": float((diffs > 0).mean()) if diffs.size else np.nan,
                 })
+        for m in boot_enrich_diff:
+            diffs = np.asarray([x for x in boot_enrich_diff[m] if np.isfinite(x)])
+            lo, hi = _ci(diffs)
+            comp_rows.append({
+                "comparison": f"{m} - nonspatial", "metric": "enrich_log_odds",
+                "diff_mean": float(np.mean(diffs)) if diffs.size else np.nan,
+                "ci_low": lo, "ci_high": hi,
+                "win_fraction": float((diffs > 0).mean()) if diffs.size else np.nan,
+            })
     comparison = pd.DataFrame(comp_rows)
 
     # ── decodability control (parity expected) ───────────────────────────────
@@ -665,7 +701,10 @@ def _dopamine_figures(results_long, comparison, decod, ksweep, latents, sample_i
     en = (results_long[results_long.metric == "enrich_log_odds"]
           .set_index("model").reindex(order))
     fig, ax = plt.subplots(figsize=(4.2, 3.4))
-    ax.bar(order, en.value, color=sns.color_palette("Set2"), edgecolor="#555", linewidth=1)
+    en_err = np.vstack([(en.value - en.ci_low).fillna(0),
+                        (en.ci_high - en.value).fillna(0)])
+    ax.bar(order, en.value, yerr=en_err, capsize=4,
+           color=sns.color_palette("Set2"), edgecolor="#555", linewidth=1)
     ax.axhline(0, color="#999", lw=0.8, ls="--")
     ax.set_ylabel("log-odds (intact-striatal | dopamine-high)")
     ax.set_title(f"SMA {sample_id}: intact-striatal specificity")

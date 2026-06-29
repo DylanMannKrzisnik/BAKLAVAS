@@ -493,8 +493,7 @@ sc.pl.embedding(teacher_msi_adata, basis="ST_teacher_umap", color='msi:Dopamine'
 ## spatial MSI plots
 
 # Define the thesis figures directory, resolved relative to this script
-THESIS_FIG_DIR = (Path(__file__).parent / "../../THESIS_base/overleaf-cibb-2026/figures").resolve()
-THESIS_FIG_DIR.mkdir(parents=True, exist_ok=True)
+THESIS_FIG_DIR = Path("/home/mcb/users/dmannk/THESIS_base/overleaf-cibb-2026/figures")
 
 # Student MSI spatial plot
 student_fig = sc.pl.embedding(

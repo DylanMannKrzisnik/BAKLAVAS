@@ -33,13 +33,6 @@ ZENODO_JOINT_RAW_URL = (
 FIG_DIR = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/sea_ad_lipid_gps")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
-# Optional target-aware ST panel restriction. When SMA_TARGET_PANEL points at a ranked
-# gene CSV (see Lipid_GP/build_target_gene_ranking.py), the model's ST features are
-# restricted to the top SMA_N_TARGET_TOP genes of that ranking before spatial-variability
-# selection, so the trained encoder only keeps genes the transfer target also measures.
-TARGET_PANEL_PATH = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/target_gene_rankings/target_gene_ranking_CaH_Xenium_final.2026-01-07_protein_coding.csv")
-N_TARGET_TOP = 2000
-
 def load_joint_adata(path: Path = JOINT_RAW_PATH):
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -462,6 +455,15 @@ def assemble_section(sample_id):
     adata.var = adata.var.merge(msi.var[['annotation']], left_on='feature_id', right_index=True, how='left')
     adata.obs[SECTION_KEY] = sample_id
 
+    # Per-modality concat with merge="same" drops any obs column whose dtype/values differ
+    # between modalities -- e.g. SCT rewrites the RNA cluster labels to int32 while the
+    # untouched MSI side stays int64, so the shared WNN labels get dropped. Carry the
+    # columns downstream scripts (3/6) need directly from the aligned rna.obs instead.
+    label_cols = ("RNA_clusters", "MSI_clusters", "MM_clusters", "lesion", "region")
+    for col in label_cols:
+        if col in rna.obs.columns:
+            adata.obs[col] = rna.obs[col].values
+
     # SCT layers only cover the RNA modality and are dropped by sc.concat(merge="same").
     # Rebuild them as joint [ST | SM] matrices, keeping raw MSI counts in the SM columns.
     # SCT_scale (z-scored scale.data) is ST-only; its SM columns are a raw-MSI placeholder.
@@ -523,16 +525,12 @@ joint_adata.raw = joint_adata
 # Restrict ST features to a ranked target panel (if provided) before Moran's-I selection,
 # so the candidate ST pool only contains genes the transfer target measures. Whitelisted
 # target genes sit at the top of the ranking, so they are always in the candidate pool.
-joint_adata.uns["target_gene_panel_source"] = (
-    Path(TARGET_PANEL_PATH).name if TARGET_PANEL_PATH else "nan"
-)
-if TARGET_PANEL_PATH:
-    joint_adata, panel_diag = restrict_st_to_target_panel(
-        joint_adata,
-        load_target_panel(TARGET_PANEL_PATH),
-        n_target_top=N_TARGET_TOP,
-    )
-    print(f"[panel] restricted ST to target panel: {panel_diag}")
+if species == "human":
+    TARGET_PANEL_PATH = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/target_gene_rankings/target_gene_ranking_CaH_Xenium_final.2026-01-07_protein_coding.csv")
+elif species == "mouse":
+    ## TBC: need to get the p22 mouse spatial ATAC-RNA target panel
+    TARGET_PANEL_PATH = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/target_gene_rankings/target_gene_ranking_CaM_Xenium_final.2026-01-07_protein_coding.csv")
+N_TARGET_TOP = 2000
 
 # When integrating multiple sections, the batch_key branch also removes features whose abundance differs strongly *between* sections (assumed technical batch effects). That
 # filter cannot tell a batch effect from genuine cross-section biology: e.g. Dopamine

@@ -22,12 +22,71 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path="/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA/.env")
+
+# Bare /lib entries in LD_LIBRARY_PATH (from .bashrc + CUDA repeats) make R extensions
+# such as spam.so resolve the system libstdc++, which lacks CXXABI_1.3.15.
+_SYSTEM_LD_PATHS = frozenset({
+    "/lib",
+    "/lib64",
+    "/lib/x86_64-linux-gnu",
+    "/usr/lib",
+    "/usr/lib/x86_64-linux-gnu",
+    "/usr/lib64",
+})
+
+
+def _running_ipython_kernel() -> bool:
+    """Detect notebook execution early, before importing IPython directly."""
+    return "ipykernel" in sys.modules or bool(os.environ.get("JPY_PARENT_PID"))
+
+
+def _configure_conda_runtime() -> None:
+    """Pin conda R and libstdc++ before Python loads native extensions."""
+    prefix = os.environ.get("CONDA_PREFIX")
+    if not prefix:
+        return
+    prefix_path = Path(prefix)
+    conda_lib = prefix_path / "lib"
+
+    r_home = prefix_path / "lib" / "R"
+    if r_home.is_dir():
+        os.environ["R_HOME"] = str(r_home)
+        os.environ["R_LIBS"] = str(r_home / "library")
+        os.environ.pop("R_LIBS_USER", None)
+
+    if conda_lib.is_dir():
+        cleaned = [
+            entry
+            for entry in os.environ.get("LD_LIBRARY_PATH", "").split(":")
+            if entry and entry not in _SYSTEM_LD_PATHS
+        ]
+        os.environ["LD_LIBRARY_PATH"] = ":".join([str(conda_lib), *cleaned])
+
+    libstdcxx = conda_lib / "libstdc++.so.6"
+    needs_reexec = (
+        libstdcxx.exists()
+        and os.environ.get("SMA_SCT_RUNTIME_REEXEC") != "1"
+        and str(libstdcxx) not in os.environ.get("LD_PRELOAD", "")
+        and not _running_ipython_kernel()
+    )
+    if needs_reexec:
+        env = os.environ.copy()
+        current_preload = env.get("LD_PRELOAD", "")
+        env["LD_PRELOAD"] = (
+            f"{libstdcxx}:{current_preload}" if current_preload else str(libstdcxx)
+        )
+        env["SMA_SCT_RUNTIME_REEXEC"] = "1"
+        os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+
+
+_configure_conda_runtime()
 
 import anndata as ad
 import anndata2ri
@@ -280,8 +339,13 @@ def run_sctransform(
     seurat_obs = ro.r("seurat_obs")
     seurat_obs.index = list(ro.r("seurat_obs_names"))
     seurat_obs = seurat_obs.reindex(out.obs_names)
+    # Only add columns SCTransform introduces (percent.mt, nCount_SCT, nFeature_SCT, ...).
+    # Re-assigning pre-existing columns would round-trip them through R and recast dtypes
+    # (e.g. int64 cluster labels -> int32), which later breaks a per-modality
+    # concat(merge="same") against the untouched MSI side and silently drops shared labels.
     for col in seurat_obs.columns:
-        out.obs[col] = seurat_obs[col].values
+        if col not in out.obs.columns:
+            out.obs[col] = seurat_obs[col].values
 
     if "pca" in list(ro.r("names(res@reductions)")):
         out.obsm["X_seurat_pca"] = np.asarray(ro.r("res@reductions$pca@cell.embeddings"))

@@ -12,6 +12,8 @@
 # log(X_ST + 1) internally. So the target ST block is raw counts reindexed to the SMA
 # gene set (zero-filled for genes absent from the target).
 
+from __future__ import annotations
+
 from dotenv import load_dotenv
 load_dotenv(dotenv_path="/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA/.env")
 
@@ -26,6 +28,14 @@ import pandas as pd
 import scanpy as sc
 import scipy.sparse as sp
 import torch
+try:
+    import mudata as mu
+except ImportError as exc:
+    raise ImportError(
+        "4__project_target_data_SMA.py requires the mudata package to write "
+        "trimodal .h5mu outputs. Run this script in the SMA environment with "
+        "mudata installed."
+    ) from exc
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -48,13 +58,35 @@ SAMPLE_IDS = [SAMPLE_ID] if isinstance(SAMPLE_ID, str) else list(SAMPLE_ID)
 PREFIX = SAMPLE_IDS[0].split("_")[0]
 
 species = "human" if PREFIX == "V11T17-102" else "mouse"
-target_rna_path_env = os.getenv("TARGET_RNA_PATH")
-if target_rna_path_env:
-    TARGET_RNA_PATH = Path(target_rna_path_env)
+ALIGNED_DATA_DIR = Path(os.getenv("DATAPATH")) / "aligned_data"
+
+
+def env_path(name: str, default: Path | str) -> Path:
+    value = os.getenv(name)
+    return Path(value) if value else Path(default)
+
+
+spatial_target_rna_path_env = os.getenv("SPATIAL_TARGET_RNA_PATH") or os.getenv("TARGET_RNA_PATH")
+if spatial_target_rna_path_env:
+    SPATIAL_TARGET_RNA_PATH = Path(spatial_target_rna_path_env)
 elif species == "mouse":
-    TARGET_RNA_PATH = Path(os.getenv("DATAPATH")) / "aligned_data" / "source_rna_aligned_SCT.h5ad"
+    SPATIAL_TARGET_RNA_PATH = ALIGNED_DATA_DIR / "source_rna_aligned_SCT.h5ad"
 else:
-    raise ValueError("Set TARGET_RNA_PATH for human target RNA projection.")
+    raise ValueError("Set SPATIAL_TARGET_RNA_PATH or TARGET_RNA_PATH for human target RNA projection.")
+
+TARGET_RNA_PATH = SPATIAL_TARGET_RNA_PATH  # Backwards-compatible metadata alias.
+SPATIAL_TARGET_ATAC_PATH = env_path(
+    "SPATIAL_TARGET_ATAC_PATH",
+    ALIGNED_DATA_DIR / "source_atac_aligned.h5ad",
+)
+MULTIOME_TARGET_RNA_PATH = env_path(
+    "MULTIOME_TARGET_RNA_PATH",
+    ALIGNED_DATA_DIR / "target_rna_aligned_SCT.h5ad",
+)
+MULTIOME_TARGET_ATAC_PATH = env_path(
+    "MULTIOME_TARGET_ATAC_PATH",
+    ALIGNED_DATA_DIR / "target_atac_aligned.h5ad",
+)
 
 OUTPUT_DIR = Path(os.getenv("OUTPATH"))
 MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / SAMPLE_ID
@@ -217,28 +249,32 @@ def attach_msi_output(
 
 def write_msi_cache(
     *,
+    target_label: str,
     obsm_key: str,
     msi_matrix: np.ndarray,
     msi_feature_names: list[str],
     dopamine_obs_key,
     decoder_metadata: dict,
+    obs_names: pd.Index,
+    target_rna_path: Path,
 ):
-    npz_path = PROJ_DIR / f"{obsm_key}_imputed.npz"
+    npz_path = PROJ_DIR / f"{target_label}_{obsm_key}_imputed.npz"
     np.savez_compressed(
         npz_path,
         **{
             obsm_key: msi_matrix,
             "msi_feature_names": np.asarray(msi_feature_names, dtype=str),
-            "obs_names": np.asarray(target_joint.obs_names.tolist(), dtype=str),
+            "obs_names": np.asarray(obs_names.tolist(), dtype=str),
         },
     )
 
-    json_path = PROJ_DIR / f"{obsm_key}_imputed.json"
+    json_path = PROJ_DIR / f"{target_label}_{obsm_key}_imputed.json"
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(
             {
                 "sample_id": SAMPLE_ID,
-                "target_rna_path": str(TARGET_RNA_PATH),
+                "target_label": target_label,
+                "target_rna_path": str(target_rna_path),
                 "msi_obsm_key": obsm_key,
                 "msi_feature_names": msi_feature_names,
                 "dopamine_feature": DOPAMINE_FEATURE,
@@ -250,7 +286,7 @@ def write_msi_cache(
         )
     print(f"[INFO] Wrote MSI cache to {npz_path} and {json_path}")
 
-#%% Load the trained feature space (template) and the target RNA.
+#%% Load the trained feature space (template) and define reusable target helpers.
 
 template = sc.read_h5ad(MODEL_DIR / "joint_adata.h5ad")
 st_mask = (template.var["type"].values == "ST")
@@ -259,179 +295,265 @@ st_cols = np.where(st_mask)[0]
 # SMA RNA gene symbols, in the exact column order encoder_ST expects.
 sma_genes = pd.Index([bare_feature_symbol(v) for v in template.var_names[st_mask]])
 sma_tokens = pd.Index([feature_token(v) for v in template.var_names[st_mask]])
-print(f"[INFO] Template: {template.shape} "
-      f"({int(st_mask.sum())} ST + {int(sm_mask.sum())} SM features)")
-
-target = sc.read_h5ad(TARGET_RNA_PATH)
-target.obsm['spatial'] = np.array([1, -1]) * target.obsm['spatial']
-target.var_names_make_unique()
-target_counts = target.layers["counts"] if "counts" in target.layers else target.X
-print(f"[INFO] Target RNA: {target.shape}")
-
-#%% Align RNA by case-insensitive bare gene symbol, reindex into SMA order, zero-fill missing.
-# We keep all SMA ST genes because the encoder has a fixed input dimension.
-
-target_token_to_idx = {}
-duplicate_target_tokens = set()
-for i, token in enumerate(feature_token(v) for v in target.var_names):
-    if token and token not in target_token_to_idx:
-        target_token_to_idx[token] = i
-    elif token:
-        duplicate_target_tokens.add(token)
-
-idx = np.asarray([target_token_to_idx.get(token, -1) for token in sma_tokens], dtype=int)
-present = idx >= 0
-n_overlap = int(present.sum())
-overlap_fraction = n_overlap / max(len(sma_genes), 1)
-print(f"[INFO] Gene overlap: {n_overlap}/{len(sma_genes)} SMA ST genes found in target "
-      f"({100 * overlap_fraction:.1f}%).")
-if duplicate_target_tokens:
-    print(f"[INFO] Duplicate target gene tokens ignored after first occurrence: "
-          f"{sorted(duplicate_target_tokens)[:10]}")
-missing_examples = list(sma_genes[~present][:10])
-print(f"[INFO] Example missing genes (zero-filled): {missing_examples}")
-if overlap_fraction < MIN_ST_OVERLAP_FRACTION:
-    raise ValueError(
-        f"Gene overlap {overlap_fraction:.3f} is below "
-        f"MIN_ST_OVERLAP_FRACTION={MIN_ST_OVERLAP_FRACTION:.3f}."
-    )
-
-gene_overlap = {
-    "n_overlap": n_overlap,
-    "n_reference_st": int(len(sma_genes)),
-    "overlap_fraction": float(overlap_fraction),
-    "min_overlap_fraction": float(MIN_ST_OVERLAP_FRACTION),
-    "missing_examples": [str(v) for v in missing_examples],
-    "duplicate_target_token_examples": sorted(duplicate_target_tokens)[:10],
-}
-
-n_obs = target.n_obs
-X_st = np.zeros((n_obs, len(sma_genes)), dtype=np.float32)
-src = target_counts[:, idx[present]]
-X_st[:, present] = src.toarray() if sp.issparse(src) else np.asarray(src)
-
-#%% Assemble the target joint AnnData matching the template var space exactly.
-
-X = np.zeros((n_obs, template.n_vars), dtype=np.float32)
-X[:, st_cols] = X_st                                   # SM columns stay zero
-
-target_joint = smt.util._classes.AnnDataJointSMST(
-    AnnData(X=X, obs=target.obs.copy(), var=template.var.copy())
+print(
+    f"[INFO] Template: {template.shape} "
+    f"({int(st_mask.sum())} ST + {int(sm_mask.sum())} SM features)"
 )
-target_joint.obsm["spatial"] = np.asarray(target.obsm["spatial"])  # teacher graph needs this
-target_joint.layers["counts"] = X.copy()
-print(f"[INFO] Target joint adata: {target_joint.shape}; "
-      f"batches: {target_joint.obs['batch'].value_counts().to_dict() if 'batch' in target_joint.obs else 'n/a'}")
-
-#%% Load the SMA-trained student, encode target RNA, and impute MSI with PLS.
 
 student_ckpt_path = MODEL_DIR / "student.pt"
+teacher_ckpt_path = MODEL_DIR / "teacher.pt"
 pls_decoder_path = MODEL_DIR / "student_pls_decoder.joblib"
 decoder_mode = choose_decoder_mode(DECODER_MODE, pls_decoder_path)
+THESIS_FIG_DIR = Path("/home/mcb/users/dmannk/THESIS_base/overleaf-cibb-2026/figures")
 
-student_model = load_spatialjepa_model(student_ckpt_path, target_joint, device=DEVICE)
-Z_joint, Z_st, neural_msi = encode_model(
-    student_model,
-    BATCH_SIZE,
-    decode_neural=(decoder_mode == "neural"),
-)
-assert not np.isnan(Z_joint).any(), "student: NaNs in joint embedding"
-assert not np.isnan(Z_st).any(), "student: NaNs in RNA-only embedding"
-target_joint.obsm["student_X_emb"] = Z_joint
-target_joint.obsm["student_X_emb_st"] = Z_st
-print(f"[INFO] student: joint embedding {Z_joint.shape}; RNA-only embedding {Z_st.shape}")
 
-if decoder_mode == "pls":
-    msi_matrix, msi_feature_names, decoder_metadata = decode_msi_pls(
-        target_joint.obsm["student_X_emb"],
-        pls_decoder_path,
+def load_paired_rna_atac(
+    *,
+    target_label: str,
+    rna_path: Path,
+    atac_path: Path,
+    spatial_target: bool,
+):
+    rna = sc.read_h5ad(rna_path)
+    atac = sc.read_h5ad(atac_path)
+    if not rna.obs_names.is_unique or not atac.obs_names.is_unique:
+        raise ValueError(f"{target_label}: RNA and ATAC obs_names must be unique.")
+
+    rna.var_names_make_unique()
+    atac.var_names_make_unique()
+
+    shared_obs = rna.obs_names[rna.obs_names.isin(atac.obs_names)]
+    if len(shared_obs) == 0:
+        raise ValueError(f"{target_label}: RNA and ATAC share zero observations.")
+    if len(shared_obs) != rna.n_obs or len(shared_obs) != atac.n_obs:
+        print(
+            f"[WARN] {target_label}: RNA/ATAC partial overlap; "
+            f"keeping {len(shared_obs)} shared observations "
+            f"(RNA={rna.n_obs}, ATAC={atac.n_obs})."
+        )
+
+    rna = rna[shared_obs].copy()
+    atac = atac[shared_obs].copy()
+    if not rna.obs_names.equals(atac.obs_names):
+        raise RuntimeError(f"{target_label}: failed to align ATAC obs_names to RNA order.")
+
+    if spatial_target:
+        if "spatial" not in rna.obsm:
+            raise KeyError(f"{target_label}: spatial target RNA is missing obsm['spatial'].")
+        spatial = np.asarray(rna.obsm["spatial"], dtype=np.float32) * np.asarray(
+            [1.0, -1.0],
+            dtype=np.float32,
+        )
+        rna.obsm["spatial"] = spatial
+        atac.obsm["spatial"] = spatial.copy()
+
+    print(
+        f"[INFO] {target_label}: RNA {rna.shape} from {rna_path.name}; "
+        f"ATAC {atac.shape} from {atac_path.name}"
     )
-else:
-    if neural_msi is None:
-        raise RuntimeError("Internal error: neural MSI decode was requested but not computed.")
-    msi_matrix = neural_msi
-    msi_feature_names = [str(v) for v in template.var_names[sm_mask]]
-    decoder_metadata = {
-        "mode": "neural",
-        "decoder_path": str(student_ckpt_path),
-        "embedding_key": "student_X_emb_st",
-        "target_transform": {"output_space": "student_neural_sm_scale"},
-        "run_id": SAMPLE_ID,
+    return rna, atac
+
+
+def build_projection_joint(target_label: str, target_rna: AnnData):
+    target_counts = target_rna.layers["counts"] if "counts" in target_rna.layers else target_rna.X
+
+    target_token_to_idx = {}
+    duplicate_target_tokens = set()
+    for i, token in enumerate(feature_token(v) for v in target_rna.var_names):
+        if token and token not in target_token_to_idx:
+            target_token_to_idx[token] = i
+        elif token:
+            duplicate_target_tokens.add(token)
+
+    idx = np.asarray([target_token_to_idx.get(token, -1) for token in sma_tokens], dtype=int)
+    present = idx >= 0
+    n_overlap = int(present.sum())
+    overlap_fraction = n_overlap / max(len(sma_genes), 1)
+    print(
+        f"[INFO] {target_label}: gene overlap {n_overlap}/{len(sma_genes)} "
+        f"SMA ST genes found ({100 * overlap_fraction:.1f}%)."
+    )
+    if duplicate_target_tokens:
+        print(
+            f"[INFO] {target_label}: duplicate target gene tokens ignored after first "
+            f"occurrence: {sorted(duplicate_target_tokens)[:10]}"
+        )
+    missing_examples = list(sma_genes[~present][:10])
+    print(f"[INFO] {target_label}: example missing genes (zero-filled): {missing_examples}")
+    if overlap_fraction < MIN_ST_OVERLAP_FRACTION:
+        raise ValueError(
+            f"{target_label}: gene overlap {overlap_fraction:.3f} is below "
+            f"MIN_ST_OVERLAP_FRACTION={MIN_ST_OVERLAP_FRACTION:.3f}."
+        )
+
+    gene_overlap = {
+        "n_overlap": n_overlap,
+        "n_reference_st": int(len(sma_genes)),
+        "overlap_fraction": float(overlap_fraction),
+        "min_overlap_fraction": float(MIN_ST_OVERLAP_FRACTION),
+        "missing_examples": [str(v) for v in missing_examples],
+        "duplicate_target_token_examples": sorted(duplicate_target_tokens)[:10],
     }
 
-student_dopamine_obs_key = attach_msi_output(
+    n_obs = target_rna.n_obs
+    X_st = np.zeros((n_obs, len(sma_genes)), dtype=np.float32)
+    src = target_counts[:, idx[present]]
+    X_st[:, present] = src.toarray() if sp.issparse(src) else np.asarray(src)
+
+    X = np.zeros((n_obs, template.n_vars), dtype=np.float32)
+    X[:, st_cols] = X_st
+
+    target_joint = smt.util._classes.AnnDataJointSMST(
+        AnnData(X=X, obs=target_rna.obs.copy(), var=template.var.copy())
+    )
+    if "spatial" in target_rna.obsm:
+        target_joint.obsm["spatial"] = np.asarray(target_rna.obsm["spatial"]).copy()
+    target_joint.layers["counts"] = X.copy()
+    target_joint.uns["target_label"] = target_label
+    print(
+        f"[INFO] {target_label}: projection joint adata {target_joint.shape}; "
+        f"batches: "
+        f"{target_joint.obs['batch'].value_counts().to_dict() if 'batch' in target_joint.obs else 'n/a'}"
+    )
+    return target_joint, gene_overlap
+
+
+def run_student_projection(
+    *,
+    target_label: str,
     target_joint,
-    obsm_key=MSI_OBSM_KEY,
-    msi_matrix=msi_matrix,
-    msi_feature_names=msi_feature_names,
-    decoder_metadata=decoder_metadata,
-    gene_overlap=gene_overlap,
-)
+    gene_overlap: dict,
+    target_rna_path: Path,
+):
+    student_model = load_spatialjepa_model(student_ckpt_path, target_joint, device=DEVICE)
+    Z_joint, Z_st, neural_msi = encode_model(
+        student_model,
+        BATCH_SIZE,
+        decode_neural=(decoder_mode == "neural"),
+    )
+    assert not np.isnan(Z_joint).any(), f"{target_label} student: NaNs in joint embedding"
+    assert not np.isnan(Z_st).any(), f"{target_label} student: NaNs in RNA-only embedding"
+    target_joint.obsm["student_X_emb"] = Z_joint
+    target_joint.obsm["student_X_emb_st"] = Z_st
+    print(
+        f"[INFO] {target_label} student: joint embedding {Z_joint.shape}; "
+        f"RNA-only embedding {Z_st.shape}"
+    )
 
-del student_model
-torch.cuda.empty_cache()
+    if decoder_mode == "pls":
+        msi_matrix, msi_feature_names, decoder_metadata = decode_msi_pls(
+            target_joint.obsm["student_X_emb"],
+            pls_decoder_path,
+        )
+    else:
+        if neural_msi is None:
+            raise RuntimeError("Internal error: neural MSI decode was requested but not computed.")
+        msi_matrix = neural_msi
+        msi_feature_names = [str(v) for v in template.var_names[sm_mask]]
+        decoder_metadata = {
+            "mode": "neural",
+            "decoder_path": str(student_ckpt_path),
+            "embedding_key": "student_X_emb_st",
+            "target_transform": {"output_space": "student_neural_sm_scale"},
+            "run_id": SAMPLE_ID,
+        }
 
-write_msi_cache(
-    obsm_key=MSI_OBSM_KEY,
-    msi_matrix=msi_matrix,
-    msi_feature_names=msi_feature_names,
-    dopamine_obs_key=student_dopamine_obs_key,
-    decoder_metadata=decoder_metadata,
-)
+    dopamine_obs_key = attach_msi_output(
+        target_joint,
+        obsm_key=MSI_OBSM_KEY,
+        msi_matrix=msi_matrix,
+        msi_feature_names=msi_feature_names,
+        decoder_metadata=decoder_metadata,
+        gene_overlap=gene_overlap,
+    )
 
-#%% Load the SMA-trained teacher, encode target RNA, and impute MSI with its neural decoder.
+    del student_model
+    torch.cuda.empty_cache()
 
-teacher_ckpt_path = MODEL_DIR / "teacher.pt"
-teacher_model = load_spatialjepa_model(teacher_ckpt_path, target_joint, device=DEVICE)
-Z_teacher_joint, Z_teacher_st, teacher_msi = encode_model(
-    teacher_model,
-    BATCH_SIZE,
-    decode_neural=True,
-)
-assert not np.isnan(Z_teacher_joint).any(), "teacher: NaNs in joint embedding"
-assert not np.isnan(Z_teacher_st).any(), "teacher: NaNs in RNA-only embedding"
-target_joint.obsm["teacher_X_emb"] = Z_teacher_joint
-target_joint.obsm["teacher_X_emb_st"] = Z_teacher_st
-print(
-    f"[INFO] teacher: joint embedding {Z_teacher_joint.shape}; "
-    f"RNA-only embedding {Z_teacher_st.shape}"
-)
+    write_msi_cache(
+        target_label=target_label,
+        obsm_key=MSI_OBSM_KEY,
+        msi_matrix=msi_matrix,
+        msi_feature_names=msi_feature_names,
+        dopamine_obs_key=dopamine_obs_key,
+        decoder_metadata=decoder_metadata,
+        obs_names=target_joint.obs_names,
+        target_rna_path=target_rna_path,
+    )
+    return {
+        "matrix": msi_matrix,
+        "feature_names": msi_feature_names,
+        "decoder_metadata": decoder_metadata,
+        "dopamine_obs_key": dopamine_obs_key,
+    }
 
-teacher_msi_feature_names = [str(v) for v in template.var_names[sm_mask]]
-teacher_decoder_metadata = {
-    "mode": "neural",
-    "decoder_path": str(teacher_ckpt_path),
-    "embedding_key": "teacher_X_emb_st",
-    "target_transform": {"output_space": "teacher_neural_sm_scale"},
-    "run_id": SAMPLE_ID,
-}
-teacher_dopamine_obs_key = attach_msi_output(
+
+def run_teacher_projection(
+    *,
+    target_label: str,
     target_joint,
-    obsm_key=TEACHER_MSI_OBSM_KEY,
-    msi_matrix=teacher_msi,
-    msi_feature_names=teacher_msi_feature_names,
-    decoder_metadata=teacher_decoder_metadata,
-    gene_overlap=gene_overlap,
-)
+    gene_overlap: dict,
+    target_rna_path: Path,
+):
+    teacher_model = load_spatialjepa_model(teacher_ckpt_path, target_joint, device=DEVICE)
+    Z_teacher_joint, Z_teacher_st, teacher_msi = encode_model(
+        teacher_model,
+        BATCH_SIZE,
+        decode_neural=True,
+    )
+    assert not np.isnan(Z_teacher_joint).any(), f"{target_label} teacher: NaNs in joint embedding"
+    assert not np.isnan(Z_teacher_st).any(), f"{target_label} teacher: NaNs in RNA-only embedding"
+    target_joint.obsm["teacher_X_emb"] = Z_teacher_joint
+    target_joint.obsm["teacher_X_emb_st"] = Z_teacher_st
+    print(
+        f"[INFO] {target_label} teacher: joint embedding {Z_teacher_joint.shape}; "
+        f"RNA-only embedding {Z_teacher_st.shape}"
+    )
 
-del teacher_model
-torch.cuda.empty_cache()
+    teacher_msi_feature_names = [str(v) for v in template.var_names[sm_mask]]
+    teacher_decoder_metadata = {
+        "mode": "neural",
+        "decoder_path": str(teacher_ckpt_path),
+        "embedding_key": "teacher_X_emb_st",
+        "target_transform": {"output_space": "teacher_neural_sm_scale"},
+        "run_id": SAMPLE_ID,
+    }
+    dopamine_obs_key = attach_msi_output(
+        target_joint,
+        obsm_key=TEACHER_MSI_OBSM_KEY,
+        msi_matrix=teacher_msi,
+        msi_feature_names=teacher_msi_feature_names,
+        decoder_metadata=teacher_decoder_metadata,
+        gene_overlap=gene_overlap,
+    )
 
-write_msi_cache(
-    obsm_key=TEACHER_MSI_OBSM_KEY,
-    msi_matrix=teacher_msi,
-    msi_feature_names=teacher_msi_feature_names,
-    dopamine_obs_key=teacher_dopamine_obs_key,
-    decoder_metadata=teacher_decoder_metadata,
-)
+    del teacher_model
+    torch.cuda.empty_cache()
 
-#%% Downstream UMAP / Leiden per model (sanity check that the SMA RNA encoder transfers).
+    write_msi_cache(
+        target_label=target_label,
+        obsm_key=TEACHER_MSI_OBSM_KEY,
+        msi_matrix=teacher_msi,
+        msi_feature_names=teacher_msi_feature_names,
+        dopamine_obs_key=dopamine_obs_key,
+        decoder_metadata=teacher_decoder_metadata,
+        obs_names=target_joint.obs_names,
+        target_rna_path=target_rna_path,
+    )
+    return {
+        "matrix": teacher_msi,
+        "feature_names": teacher_msi_feature_names,
+        "decoder_metadata": teacher_decoder_metadata,
+        "dopamine_obs_key": dopamine_obs_key,
+    }
 
-def embed_and_plot(name: str, dopamine_obs_key=None) -> None:
+
+def embed_and_plot(target_label: str, target_joint, name: str, dopamine_obs_key=None) -> None:
     emb_key = f"{name}_X_emb_st"
-    neigh_key = f"{name}_neighbors"
+    neigh_key = f"{target_label}_{name}_neighbors"
     umap_key = f"{name}_umap"
     cluster_key = f"{name}_leiden"
+    file_prefix = "" if target_label == "spatial_target" else f"{target_label}_"
 
     sc.pp.neighbors(target_joint, use_rep=emb_key, n_neighbors=15, key_added=neigh_key)
     sc.tl.umap(target_joint, min_dist=0.3, neighbors_key=neigh_key)
@@ -440,16 +562,24 @@ def embed_and_plot(name: str, dopamine_obs_key=None) -> None:
 
     color = [cluster_key]
     for c in ("RNA_clusters", "ATAC_clusters", "batch", dopamine_obs_key):
-        if c in target_joint.obs:
+        if c is not None and c in target_joint.obs:
             color.append(c)
     fig = sc.pl.embedding(
-        target_joint, basis=umap_key, color=color, ncols=2, wspace=0.3,
-        show=False, return_fig=True,
+        target_joint,
+        basis=umap_key,
+        color=color,
+        ncols=2,
+        wspace=0.3,
+        show=False,
+        return_fig=True,
     )
-    fig.savefig(PROJ_DIR / f"{name}_umap.png", dpi=150, bbox_inches="tight")
+    umap_path = PROJ_DIR / f"{file_prefix}{name}_umap.png"
+    fig.savefig(umap_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[INFO] {name}: wrote {PROJ_DIR / f'{name}_umap.png'}")
+    print(f"[INFO] {target_label} {name}: wrote {umap_path}")
 
+    if "spatial" not in target_joint.obsm:
+        return
     fig_spatial = sc.pl.embedding(
         target_joint,
         basis="spatial",
@@ -458,98 +588,237 @@ def embed_and_plot(name: str, dopamine_obs_key=None) -> None:
         return_fig=True,
         s=60,
     )
-    spatial_path = PROJ_DIR / f"{name}_spatial.png"
+    spatial_path = PROJ_DIR / f"{file_prefix}{name}_spatial.png"
     fig_spatial.savefig(spatial_path, dpi=150, bbox_inches="tight")
     plt.close(fig_spatial)
-    print(f"[INFO] {name}: wrote {spatial_path}")
+    print(f"[INFO] {target_label} {name}: wrote {spatial_path}")
 
-embed_and_plot("student", student_dopamine_obs_key)
-embed_and_plot("teacher", teacher_dopamine_obs_key)
 
-#%% Format MSI matrices as Anndata objects.
-student_msi_adata = AnnData(
-    X=msi_matrix,
-    obs=target_joint.obs.copy(),
-    var=pd.DataFrame(index=msi_feature_names),
-    obsm={
-        "ST_student_umap": np.asarray(target_joint.obsm["student_umap"]),
-        "spatial": np.asarray(target.obsm["spatial"])
-        }
-)
-teacher_msi_adata = AnnData(
-    X=teacher_msi,
-    obs=target_joint.obs.copy(),
-    var=pd.DataFrame(index=teacher_msi_feature_names),
-    obsm={
-        "ST_teacher_umap": np.asarray(target_joint.obsm["teacher_umap"]),
-        "spatial": np.asarray(target.obsm["spatial"])
+def make_msi_adata(
+    *,
+    target_joint,
+    msi_matrix: np.ndarray,
+    msi_feature_names: list[str],
+    decoder_metadata: dict,
+    projection_umap_key=None,
+    projection_obsm_key=None,
+):
+    obsm = {}
+    if projection_umap_key is not None and projection_umap_key in target_joint.obsm:
+        obsm[projection_obsm_key or projection_umap_key] = np.asarray(
+            target_joint.obsm[projection_umap_key]
+        )
+    if "spatial" in target_joint.obsm:
+        obsm["spatial"] = np.asarray(target_joint.obsm["spatial"])
+
+    msi_adata = AnnData(
+        X=np.asarray(msi_matrix, dtype=np.float32),
+        obs=target_joint.obs.copy(),
+        var=pd.DataFrame(index=pd.Index(msi_feature_names, dtype=str)),
+        obsm=obsm,
+    )
+    msi_adata.uns["decoder"] = decoder_metadata
+    return msi_adata
+
+
+def add_msi_umap(adata: AnnData, label: str) -> None:
+    n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
+    if n_comps < 2:
+        print(f"[WARN] {label}: skipping MSI UMAP because n_comps would be {n_comps}.")
+        return
+    sc.pp.pca(adata, n_comps=n_comps)
+    sc.pp.neighbors(adata)
+    sc.tl.umap(adata)
+
+
+def plot_spatial_msi_figure(adata: AnnData, label: str, filename: str) -> None:
+    if "spatial" not in adata.obsm:
+        return
+    color = []
+    if DOPAMINE_FEATURE in adata.var_names:
+        color.append(DOPAMINE_FEATURE)
+    for key in ("RNA_clusters", "ATAC_clusters"):
+        if key in adata.obs:
+            color.append(key)
+    if not color:
+        print(f"[WARN] {label}: no available colors for MSI spatial plot.")
+        return
+
+    fig = sc.pl.embedding(
+        adata,
+        basis="spatial",
+        color=color,
+        size=60,
+        ncols=len(color),
+        show=False,
+        return_fig=True,
+    )
+    fig_path = THESIS_FIG_DIR / filename
+    fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved {label} MSI spatial figure: {fig_path}")
+
+
+def write_trimodal_mudata(
+    *,
+    target_label: str,
+    rna: AnnData,
+    atac: AnnData,
+    student_msi: AnnData,
+    teacher_msi: AnnData = None,
+):
+    modalities = {
+        "rna": rna.copy(),
+        "atac": atac.copy(),
+        "msi_student": student_msi.copy(),
     }
+    if teacher_msi is not None:
+        modalities["msi_teacher"] = teacher_msi.copy()
+
+    canonical_obs = rna.obs_names
+    for mod_name, adata in modalities.items():
+        if not adata.obs_names.equals(canonical_obs):
+            raise ValueError(f"{target_label}: modality {mod_name!r} obs_names are not aligned.")
+
+    kwargs = {
+        "obs": rna.obs.copy(),
+        "uns": {
+            "sample_id": SAMPLE_ID,
+            "target_label": target_label,
+            "spatialjepa_model_dir": str(MODEL_DIR),
+        },
+    }
+    if "spatial" in rna.obsm:
+        kwargs["obsm"] = {"spatial": np.asarray(rna.obsm["spatial"]).copy()}
+
+    mdata = mu.MuData(modalities, **kwargs)
+    out_path = PROJ_DIR / f"{target_label}_rna_atac_msi.h5mu"
+    mdata.write_h5mu(out_path)
+    print(f"[INFO] Saved trimodal {target_label} MuData to {out_path}")
+    return out_path
+
+
+def project_target(
+    *,
+    target_label: str,
+    rna_path: Path,
+    atac_path: Path,
+    spatial_target: bool,
+    run_teacher: bool,
+    embedded_h5ad_path: Path,
+    write_spatial_figures: bool = False,
+):
+    rna, atac = load_paired_rna_atac(
+        target_label=target_label,
+        rna_path=rna_path,
+        atac_path=atac_path,
+        spatial_target=spatial_target,
+    )
+    target_joint, gene_overlap = build_projection_joint(target_label, rna)
+    target_joint.uns["target_rna_path"] = str(rna_path)
+    target_joint.uns["target_atac_path"] = str(atac_path)
+
+    student_result = run_student_projection(
+        target_label=target_label,
+        target_joint=target_joint,
+        gene_overlap=gene_overlap,
+        target_rna_path=rna_path,
+    )
+    if spatial_target:
+        embed_and_plot(target_label, target_joint, "student", student_result["dopamine_obs_key"])
+
+    teacher_result = None
+    if run_teacher:
+        teacher_result = run_teacher_projection(
+            target_label=target_label,
+            target_joint=target_joint,
+            gene_overlap=gene_overlap,
+            target_rna_path=rna_path,
+        )
+        embed_and_plot(target_label, target_joint, "teacher", teacher_result["dopamine_obs_key"])
+
+    student_msi_adata = make_msi_adata(
+        target_joint=target_joint,
+        msi_matrix=student_result["matrix"],
+        msi_feature_names=student_result["feature_names"],
+        decoder_metadata=student_result["decoder_metadata"],
+        projection_umap_key="student_umap",
+        projection_obsm_key="ST_student_umap",
+    )
+
+    teacher_msi_adata = None
+    if teacher_result is not None:
+        teacher_msi_adata = make_msi_adata(
+            target_joint=target_joint,
+            msi_matrix=teacher_result["matrix"],
+            msi_feature_names=teacher_result["feature_names"],
+            decoder_metadata=teacher_result["decoder_metadata"],
+            projection_umap_key="teacher_umap",
+            projection_obsm_key="ST_teacher_umap",
+        )
+
+    if write_spatial_figures:
+        add_msi_umap(student_msi_adata, f"{target_label} student MSI")
+        plot_spatial_msi_figure(
+            student_msi_adata,
+            f"{target_label} student",
+            "p22_student_imputed_msi_spatial.png",
+        )
+        if teacher_msi_adata is not None:
+            add_msi_umap(teacher_msi_adata, f"{target_label} teacher MSI")
+            plot_spatial_msi_figure(
+                teacher_msi_adata,
+                f"{target_label} teacher",
+                "p22_teacher_imputed_msi_spatial.png",
+            )
+
+    mudata_path = write_trimodal_mudata(
+        target_label=target_label,
+        rna=rna,
+        atac=atac,
+        student_msi=student_msi_adata,
+        teacher_msi=teacher_msi_adata,
+    )
+
+    if teacher_result is not None:
+        Zs, Zt = target_joint.obsm["student_X_emb_st"], target_joint.obsm["teacher_X_emb_st"]
+        per_dim_r = [float(np.corrcoef(Zs[:, d], Zt[:, d])[0, 1]) for d in range(Zs.shape[1])]
+        print(f"[INFO] {target_label}: student-vs-teacher per-latent-dim Pearson r:")
+        print("       " + ", ".join(f"{r:.3f}" for r in per_dim_r))
+        print(f"[INFO] {target_label}: mean |r| across dims: {np.nanmean(np.abs(per_dim_r)):.3f}")
+
+    target_joint.write_h5ad(embedded_h5ad_path)
+    print(f"[INFO] Saved embedded {target_label} target to {embedded_h5ad_path}")
+    return {
+        "rna": rna,
+        "atac": atac,
+        "target_joint": target_joint,
+        "mudata_path": mudata_path,
+        "embedded_h5ad_path": embedded_h5ad_path,
+    }
+
+
+#%% Project the spatial p22 target and write RNA+ATAC+student/teacher MSI.
+
+spatial_target_result = project_target(
+    target_label="spatial_target",
+    rna_path=SPATIAL_TARGET_RNA_PATH,
+    atac_path=SPATIAL_TARGET_ATAC_PATH,
+    spatial_target=True,
+    run_teacher=True,
+    embedded_h5ad_path=PROJ_DIR / "target_spatial_atac_rna_embedded.h5ad",
+    write_spatial_figures=True,
 )
 
-## UMAP of the MSI matrices, in ST coordiantes
-sc.pl.embedding(student_msi_adata, basis="ST_student_umap", color='msi:Dopamine')
-sc.pl.embedding(teacher_msi_adata, basis="ST_teacher_umap", color='msi:Dopamine')
+#%% Project the non-spatial multiome target and write RNA+ATAC+student MSI only.
 
-## spatial MSI plots
-
-# Define the thesis figures directory, resolved relative to this script
-THESIS_FIG_DIR = Path("/home/mcb/users/dmannk/THESIS_base/overleaf-cibb-2026/figures")
-
-# Student MSI spatial plot
-student_fig = sc.pl.embedding(
-    student_msi_adata,
-    basis="spatial",
-    color=['msi:Dopamine', 'RNA_clusters', 'ATAC_clusters'],
-    size=60,
-    ncols=3,
-    show=False,
-    return_fig=True
+multiome_target_result = project_target(
+    target_label="multiome_target",
+    rna_path=MULTIOME_TARGET_RNA_PATH,
+    atac_path=MULTIOME_TARGET_ATAC_PATH,
+    spatial_target=False,
+    run_teacher=False,
+    embedded_h5ad_path=PROJ_DIR / "multiome_target_rna_embedded.h5ad",
 )
-student_fig_path = THESIS_FIG_DIR / "p22_student_imputed_msi_spatial.png"
-student_fig.savefig(student_fig_path, dpi=150, bbox_inches="tight")
-plt.close(student_fig)
-print(f"[INFO] Saved student MSI spatial figure: {student_fig_path}")
-
-# Teacher MSI spatial plot
-teacher_fig = sc.pl.embedding(
-    teacher_msi_adata,
-    basis="spatial",
-    color=['msi:Dopamine', 'RNA_clusters', 'ATAC_clusters'],
-    size=60,
-    ncols=3,
-    show=False,
-    return_fig=True
-)
-teacher_fig_path = THESIS_FIG_DIR / "p22_teacher_imputed_msi_spatial.png"
-teacher_fig.savefig(teacher_fig_path, dpi=150, bbox_inches="tight")
-plt.close(teacher_fig)
-print(f"[INFO] Saved teacher MSI spatial figure: {teacher_fig_path}")
-
-## train UMAP on the MSI matrices
-sc.pp.pca(student_msi_adata, n_comps=50)
-sc.pp.neighbors(student_msi_adata)
-sc.tl.umap(student_msi_adata)
-
-sc.pp.pca(teacher_msi_adata, n_comps=50)
-sc.pp.neighbors(teacher_msi_adata)
-sc.tl.umap(teacher_msi_adata)
-
-## plot UMAP of the MSI matrices, in MSI coordinates
-sc.pl.umap(student_msi_adata, color='msi:Dopamine')
-sc.pl.umap(teacher_msi_adata, color='msi:Dopamine')
-
-#%% Student vs teacher agreement (distillation-transfer sanity check).
-
-Zs, Zt = target_joint.obsm["student_X_emb_st"], target_joint.obsm["teacher_X_emb_st"]
-per_dim_r = [float(np.corrcoef(Zs[:, d], Zt[:, d])[0, 1]) for d in range(Zs.shape[1])]
-print("[INFO] Student-vs-teacher per-latent-dim Pearson r:")
-print("       " + ", ".join(f"{r:.3f}" for r in per_dim_r))
-print(f"[INFO] Mean |r| across dims: {np.nanmean(np.abs(per_dim_r)):.3f}")
-
-#%% Save the embedded target with MSI imputation.
-
-out_path = PROJ_DIR / "target_spatial_atac_rna_embedded.h5ad"
-target_joint.write_h5ad(out_path)
-print(f"[INFO] Saved embedded target to {out_path}")
 
 # %%

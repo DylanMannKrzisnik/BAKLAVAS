@@ -524,10 +524,10 @@ def spatialJEPA_model(
     )
 
     if graph_conv:
-        if "spatial" not in joint_adata.obsm:
+        if full_graph and "spatial" not in joint_adata.obsm:
             raise ValueError(
-                "graph_conv=True requires joint_adata.obsm['spatial']; set it before "
-                "calling spatialJEPA_model()."
+                "full_graph=True requires joint_adata.obsm['spatial']; set it before "
+                "calling spatialJEPA_model() for teacher/full-graph models."
             )
 
         if full_graph:

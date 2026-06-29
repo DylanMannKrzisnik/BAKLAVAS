@@ -1063,7 +1063,7 @@ pls_coef_df['msi:Dopamine'].plot(kind='bar')
 plt.show()
 
 sc.pl.embedding(joint_pls_adata, basis='student_umap', color=[f'PLS_{i}' for i in range(pls.y_weights_.shape[1])],
-    cmap='coolwarm_r') # set reverse colormap (_r) if weights are negative for dominant PLS components
+    cmap='coolwarm') # set reverse colormap (_r) if weights are negative for dominant PLS components
 sc.pl.embedding(joint_adata, basis='student_umap', color=['msi:Dopamine'], cmap='Reds')
 
 # %%

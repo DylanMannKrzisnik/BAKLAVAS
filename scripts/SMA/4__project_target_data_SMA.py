@@ -466,6 +466,79 @@ def embed_and_plot(name: str, dopamine_obs_key=None) -> None:
 embed_and_plot("student", student_dopamine_obs_key)
 embed_and_plot("teacher", teacher_dopamine_obs_key)
 
+#%% Format MSI matrices as Anndata objects.
+student_msi_adata = AnnData(
+    X=msi_matrix,
+    obs=target_joint.obs.copy(),
+    var=pd.DataFrame(index=msi_feature_names),
+    obsm={
+        "ST_student_umap": np.asarray(target_joint.obsm["student_umap"]),
+        "spatial": np.asarray(target.obsm["spatial"])
+        }
+)
+teacher_msi_adata = AnnData(
+    X=teacher_msi,
+    obs=target_joint.obs.copy(),
+    var=pd.DataFrame(index=teacher_msi_feature_names),
+    obsm={
+        "ST_teacher_umap": np.asarray(target_joint.obsm["teacher_umap"]),
+        "spatial": np.asarray(target.obsm["spatial"])
+    }
+)
+
+## UMAP of the MSI matrices, in ST coordiantes
+sc.pl.embedding(student_msi_adata, basis="ST_student_umap", color='msi:Dopamine')
+sc.pl.embedding(teacher_msi_adata, basis="ST_teacher_umap", color='msi:Dopamine')
+
+## spatial MSI plots
+
+# Define the thesis figures directory, resolved relative to this script
+THESIS_FIG_DIR = (Path(__file__).parent / "../../THESIS_base/overleaf-cibb-2026/figures").resolve()
+THESIS_FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Student MSI spatial plot
+student_fig = sc.pl.embedding(
+    student_msi_adata,
+    basis="spatial",
+    color=['msi:Dopamine', 'RNA_clusters', 'ATAC_clusters'],
+    size=60,
+    ncols=3,
+    show=False,
+    return_fig=True
+)
+student_fig_path = THESIS_FIG_DIR / "p22_student_imputed_msi_spatial.png"
+student_fig.savefig(student_fig_path, dpi=150, bbox_inches="tight")
+plt.close(student_fig)
+print(f"[INFO] Saved student MSI spatial figure: {student_fig_path}")
+
+# Teacher MSI spatial plot
+teacher_fig = sc.pl.embedding(
+    teacher_msi_adata,
+    basis="spatial",
+    color=['msi:Dopamine', 'RNA_clusters', 'ATAC_clusters'],
+    size=60,
+    ncols=3,
+    show=False,
+    return_fig=True
+)
+teacher_fig_path = THESIS_FIG_DIR / "p22_teacher_imputed_msi_spatial.png"
+teacher_fig.savefig(teacher_fig_path, dpi=150, bbox_inches="tight")
+plt.close(teacher_fig)
+print(f"[INFO] Saved teacher MSI spatial figure: {teacher_fig_path}")
+
+## train UMAP on the MSI matrices
+sc.pp.pca(student_msi_adata, n_comps=50)
+sc.pp.neighbors(student_msi_adata)
+sc.tl.umap(student_msi_adata)
+
+sc.pp.pca(teacher_msi_adata, n_comps=50)
+sc.pp.neighbors(teacher_msi_adata)
+sc.tl.umap(teacher_msi_adata)
+
+## plot UMAP of the MSI matrices, in MSI coordinates
+sc.pl.umap(student_msi_adata, color='msi:Dopamine')
+sc.pl.umap(teacher_msi_adata, color='msi:Dopamine')
+
 #%% Student vs teacher agreement (distillation-transfer sanity check).
 
 Zs, Zt = target_joint.obsm["student_X_emb_st"], target_joint.obsm["teacher_X_emb_st"]

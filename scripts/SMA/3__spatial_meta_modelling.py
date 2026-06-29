@@ -66,7 +66,7 @@ from spatialjepa_model import (
     save_spatialjepa_model,
     copy_decoder_weights,
 )
-from feature_panel import load_target_panel, restrict_st_to_target_panel
+from feature_panel import load_target_panel, restrict_st_to_target_panel, save_target_panel
 
 def _flatten_axes(plot_output):
     if plot_output is None:
@@ -525,12 +525,46 @@ joint_adata.raw = joint_adata
 # Restrict ST features to a ranked target panel (if provided) before Moran's-I selection,
 # so the candidate ST pool only contains genes the transfer target measures. Whitelisted
 # target genes sit at the top of the ranking, so they are always in the candidate pool.
-if species == "human":
-    TARGET_PANEL_PATH = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/target_gene_rankings/target_gene_ranking_CaH_Xenium_final.2026-01-07_protein_coding.csv")
-elif species == "mouse":
-    ## TBC: need to get the p22 mouse spatial ATAC-RNA target panel
-    TARGET_PANEL_PATH = Path("/home/mcb/users/dmannk/BAKLAVA_base/outputs/target_gene_rankings/target_gene_ranking_CaM_Xenium_final.2026-01-07_protein_coding.csv")
 N_TARGET_TOP = 2000
+if species == "human":
+    TARGET_PANEL_PATH = Path(
+        "/home/mcb/users/dmannk/BAKLAVA_base/outputs/target_gene_rankings/"
+        "target_gene_ranking_CaH_Xenium_final.2026-01-07_protein_coding.csv"
+    )
+elif species == "mouse":
+    TARGET_PANEL_PATH = Path(
+        "/home/mcb/users/dmannk/BAKLAVA_base/outputs/target_gene_rankings/"
+        "target_gene_ranking_p22_mouse_spatial_atac_rna.csv"
+    )
+    if not TARGET_PANEL_PATH.exists():
+        p22_source = Path(os.getenv("DATAPATH")) / "aligned_data" / "source_rna_aligned_SCT.h5ad"
+        p22_mouse_rna = sc.read_h5ad(p22_source, backed="r")
+        hvg_var = p22_mouse_rna.var.loc[p22_mouse_rna.var["highly_variable"]].copy()
+        rank_col = "dispersions_norm" if "dispersions_norm" in hvg_var.columns else None
+        if rank_col is not None:
+            hvg_var = hvg_var.sort_values(rank_col, ascending=False)
+        target_panel_genes = hvg_var.index
+        print(f"[panel] mouse target panel: {len(target_panel_genes)} HVGs from {p22_source.name}"
+              + (f", ranked by {rank_col}" if rank_col else ""))
+        save_target_panel(
+            target_panel_genes,
+            TARGET_PANEL_PATH,
+            source=str(p22_source),
+        )
+        print(f"[panel] wrote mouse target panel to {TARGET_PANEL_PATH}")
+else:
+    TARGET_PANEL_PATH = None
+
+joint_adata.uns["target_gene_panel_source"] = (
+    TARGET_PANEL_PATH.name if TARGET_PANEL_PATH else "nan"
+)
+if TARGET_PANEL_PATH:
+    joint_adata, panel_diag = restrict_st_to_target_panel(
+        joint_adata,
+        load_target_panel(TARGET_PANEL_PATH),
+        n_target_top=N_TARGET_TOP,
+    )
+    print(f"[panel] restricted ST to target panel: {panel_diag}")
 
 # When integrating multiple sections, the batch_key branch also removes features whose abundance differs strongly *between* sections (assumed technical batch effects). That
 # filter cannot tell a batch effect from genuine cross-section biology: e.g. Dopamine

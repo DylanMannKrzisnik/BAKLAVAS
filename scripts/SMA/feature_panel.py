@@ -66,6 +66,25 @@ def load_target_panel(path) -> list[str]:
     return genes
 
 
+def save_target_panel(genes, path, *, source: str | None = None) -> Path:
+    """Write a ranked target gene panel CSV compatible with :func:`load_target_panel`.
+
+    Stores a ``gene`` column in priority order plus an integer ``rank``. Optional
+    ``source`` records where the panel was derived from (e.g. input h5ad path).
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gene_list = pd.Index(genes).astype(str).tolist()
+    if not gene_list:
+        raise ValueError("Cannot save an empty target gene panel.")
+
+    payload = pd.DataFrame({"gene": gene_list, "rank": range(len(gene_list))})
+    if source is not None:
+        payload["source"] = source
+    payload.to_csv(path, index=False)
+    return path
+
+
 def restrict_st_to_target_panel(
     joint_adata,
     ranked_genes: list[str],

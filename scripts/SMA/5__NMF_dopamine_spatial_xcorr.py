@@ -1,10 +1,13 @@
 #%% Load data
-# conda env: nichecompass_liana
-
-from dotenv import load_dotenv
-load_dotenv(dotenv_path="/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA/.env")
+# conda env: eclare_env
 
 import os
+for thread_env_var in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS"):
+    os.environ[thread_env_var] = "1"
+
+from dotenv import load_dotenv
+load_dotenv(dotenv_path="/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA/.env", override=True)
+
 import sys
 import numpy as np
 import pandas as pd
@@ -134,5 +137,87 @@ plt.title('Highest gene loadings on dopamine-correlated NMF component')
 plt.xlabel('Gene loading')
 plt.ylabel('Gene')
 plt.show()
+
+# %%
+import muon as mu
+import scipy.sparse as sp
+from threadpoolctl import threadpool_limits
+
+trimodal_mudata_path = os.path.join(
+    os.getenv("OUTPATH"),
+    "spatialjepa_projection",
+    "V11L12-109_B1",
+    "spatial_target_rna_atac_msi.h5mu",
+)
+trimodal_mudata = mu.read_h5mu(trimodal_mudata_path)
+
+
+def finite_variable_feature_mask(adata, initial_mask, label):
+    """Return a full-length mask keeping finite, non-constant selected features."""
+    initial_mask = np.asarray(initial_mask, dtype=bool)
+    selected_idx = np.flatnonzero(initial_mask)
+    X = adata[:, initial_mask].X
+
+    if sp.issparse(X):
+        X = X.tocsc(copy=True)
+        finite = np.ones(X.shape[1], dtype=bool)
+        if X.data.size:
+            bad_data = ~np.isfinite(X.data)
+            if np.any(bad_data):
+                bad_cols = np.repeat(np.arange(X.shape[1]), np.diff(X.indptr))[bad_data]
+                finite[np.unique(bad_cols)] = False
+                X.data[bad_data] = 0
+        mean = np.asarray(X.mean(axis=0)).ravel()
+        sq_mean = np.asarray(X.multiply(X).mean(axis=0)).ravel()
+        var = sq_mean - mean ** 2
+    else:
+        X = np.asarray(X)
+        finite = np.isfinite(X).all(axis=0)
+        var = np.nanvar(X, axis=0)
+
+    keep_selected = finite & (var > 0)
+    mask = np.zeros(adata.n_vars, dtype=bool)
+    mask[selected_idx[keep_selected]] = True
+    dropped = int(initial_mask.sum() - mask.sum())
+    if dropped:
+        print(f"MOFA {label}: dropped {dropped} selected features with non-finite or zero variance values.")
+    return mask
+
+
+mofa_feature_masks = {}
+for modality in trimodal_mudata.mod.keys():
+    if modality in {"rna", "atac"}:
+        initial_mask = (
+            trimodal_mudata.mod[modality].var["highly_variable"]
+            .fillna(False)
+            .to_numpy(dtype=bool)
+        )
+    else:
+        initial_mask = np.ones(trimodal_mudata.mod[modality].n_vars, dtype=bool)
+    mofa_feature_masks[modality] = finite_variable_feature_mask(
+        trimodal_mudata.mod[modality],
+        initial_mask,
+        modality,
+    )
+
+mofa_mudata = mu.MuData(
+    {modality: adata[:, mofa_feature_masks[modality]].copy()
+     for modality, adata in trimodal_mudata.mod.items()},
+    obs=trimodal_mudata.obs.copy(),
+    uns=trimodal_mudata.uns.copy(),
+)
+print(
+    "MOFA selected features: "
+    + ", ".join(
+        f"{modality}={int(mask.sum())}"
+        for modality, mask in mofa_feature_masks.items()
+    )
+)
+
+with threadpool_limits(limits=1):
+    mu.tl.mofa(mofa_mudata, use_var=None, gpu_mode=True)
+    
+trimodal_mudata.obsm["X_mofa"] = mofa_mudata.obsm["X_mofa"]
+trimodal_mudata.uns["mofa"] = mofa_mudata.uns["mofa"]
 
 # %%

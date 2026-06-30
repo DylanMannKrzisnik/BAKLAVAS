@@ -327,4 +327,27 @@ mfx.plot_factors_matrix(m, agg="mean",
                             vmax=10,
                             group_label="ATAC_clusters")
 
+# %% create mofa_X anndata object
+
+mofa_X = m.get_factors()
+mofa_adata = sc.AnnData(
+    X=mofa_X,
+    obs=trimodal_mudata.obs.copy(),
+    var=pd.DataFrame(index=["Factor " + str(i+1) for i in range(mofa_X.shape[1])])
+)
+mofa_adata.obsm["spatial"] = trimodal_mudata.obsm["spatial"]
+sc.pl.embedding(mofa_adata, basis="spatial", color=mofa_adata.var_names, ncols=4, s=80)
+
+C12_factor = "Factor 3" # factor with clear pattern for C12/A12 ATAC cluster
+ax = mfx.plot_weights(m, n_features=15, views=["rna"], factors=C12_factor)
+ax = mfx.plot_weights(m, n_features=15, views=["atac"], factors=C12_factor)
+ax = mfx.plot_weights(m, n_features=15, views=["msi_teacher"], factors=C12_factor)
+
+top_C12_features = m.get_top_features(factors=C12_factor, n_features=25, views=["rna", "atac", "msi_teacher"])
+assert np.isin('msi:Dopamine', top_C12_features).item()
+assert set(['Pde10a','Rgs9','Gng7']) <= set(top_C12_features) # the same gene triplet used in Fig. 2b (left side)
+
+chr17_features = top_C12_features[pd.Series(top_C12_features).str.contains('chr17')]
+print(list(chr17_features))
+
 # %%

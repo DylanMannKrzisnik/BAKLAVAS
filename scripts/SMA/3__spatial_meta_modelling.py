@@ -58,15 +58,15 @@ def _assert_identical(a, b, path="uns['spatial']"):
 import sys
 sys.path.insert(0, os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
 from spatialjepa_model import (
-    build_spatial_edge_index,
-    build_identity_edge_index,
-    replace_fc_encoder_with_gcn,
-    patch_model_encode_for_gcn,
     spatialJEPA_model,
     save_spatialjepa_model,
     copy_decoder_weights,
 )
-from feature_panel import load_target_panel, restrict_st_to_target_panel, save_target_panel
+from feature_panel import (
+    load_target_panel,
+    restrict_st_to_target_panel,
+    save_target_panel,
+)
 
 def _flatten_axes(plot_output):
     if plot_output is None:
@@ -374,8 +374,8 @@ class SpatialJEPA_trainer:
 # sample_ids may be a single sample ID (str) for vertical-only integration, or a
 # list of sample IDs that share a prefix (e.g. all "V11T17-102_*") to additionally
 # enable horizontal (multi-section) integration of the same sample/donor.
-sample_ids = "V11L12-109_B1"
-#sample_ids = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]
+#sample_ids = "V11L12-109_B1"
+sample_ids = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]
 
 SAMPLE_IDS = [sample_ids] if isinstance(sample_ids, str) else list(sample_ids)
 SECTION_KEY = "section"
@@ -717,7 +717,7 @@ for sample_id in SAMPLE_IDS:
 # instantiate models
 max_epoch = 1000
 learning_rate = 1e-3
-lr_scheduler_step_size = 200
+lr_scheduler_step_size = 200 if species == "mouse" else 100
 lr_scheduler_gamma = 0.1
 
 # For horizontal integration (MULTI) pass the section as a batch key: this enables decoder batch conditioning + the MMD alignment loss, and a block-diagonal spatial graph (no cross-section edges) for the full-graph teacher.

@@ -150,6 +150,15 @@ trimodal_mudata_path = os.path.join(
     "spatial_target_rna_atac_msi.h5mu",
 )
 trimodal_mudata = mu.read_h5mu(trimodal_mudata_path)
+MOFA_MODALITIES = ("rna", "atac", "msi_teacher")
+
+# Feed MOFA log-normalized RNA (SCT corrected data) instead of the SCT Pearson
+# residuals stored in .X. The residuals carry a heavy positive tail (max ~17.6)
+# that, under a gaussian likelihood, would let a few outlier spots dominate the
+# factors. Done before HVG/variance masking so the variance filter and MOFA both
+# operate on the same log-normalized matrix. ATAC (non-negative log-norm) and MSI
+# (continuous intensities) are left as-is.
+trimodal_mudata.mod["rna"].X = trimodal_mudata.mod["rna"].layers["SCT_data"]
 
 
 def finite_variable_feature_mask(adata, initial_mask, label):
@@ -185,7 +194,7 @@ def finite_variable_feature_mask(adata, initial_mask, label):
 
 
 mofa_feature_masks = {}
-for modality in trimodal_mudata.mod.keys():
+for modality in MOFA_MODALITIES:
     if modality in {"rna", "atac"}:
         initial_mask = (
             trimodal_mudata.mod[modality].var["highly_variable"]
@@ -202,7 +211,8 @@ for modality in trimodal_mudata.mod.keys():
 
 mofa_mudata = mu.MuData(
     {modality: adata[:, mofa_feature_masks[modality]].copy()
-     for modality, adata in trimodal_mudata.mod.items()},
+     for modality, adata in trimodal_mudata.mod.items()
+     if modality in MOFA_MODALITIES},
     obs=trimodal_mudata.obs.copy(),
     uns=trimodal_mudata.uns.copy(),
 )
@@ -214,9 +224,33 @@ print(
     )
 )
 
+mofa_outfile = os.path.join(
+    os.getenv("OUTPATH"),
+    "spatialjepa_projection",
+    "V11L12-109_B1",
+    "mofa_model.hdf5",
+)
+
 with threadpool_limits(limits=1):
-    mu.tl.mofa(mofa_mudata, use_var=None, gpu_mode=True)
-    
+    mu.tl.mofa(
+        mofa_mudata,
+        use_var=None,                       # features already masked upstream; do not re-filter
+        likelihoods=["gaussian"] * len(mofa_mudata.mod),  # all views continuous (negatives / non-integer) -> Poisson/Bernoulli invalid
+        n_factors=20,                       # generous; ARD prunes inactive factors
+        scale_views=True,                   # views differ ~20x in per-feature variance -> equalize contributions
+        center_groups=True,
+        ard_weights=True,                   # per-view-per-factor weight pruning
+        ard_factors=True,
+        spikeslab_weights=True,             # sparse, interpretable loadings (denoises sparse ATAC; readable for downstream Moran's I)
+        spikeslab_factors=False,            # keep factor scores dense -> smooth spatial gradients, not spot-level on/off
+        convergence_mode="slow",            # accurate factors for a final analysis run
+        n_iterations=1000,
+        gpu_mode=True,
+        use_float32=True,                   # pairs with GPU: less memory / faster for the large ATAC view
+        seed=42,
+        outfile=mofa_outfile,
+    )
+
 trimodal_mudata.obsm["X_mofa"] = mofa_mudata.obsm["X_mofa"]
 trimodal_mudata.uns["mofa"] = mofa_mudata.uns["mofa"]
 

@@ -254,4 +254,77 @@ with threadpool_limits(limits=1):
 trimodal_mudata.obsm["X_mofa"] = mofa_mudata.obsm["X_mofa"]
 trimodal_mudata.uns["mofa"] = mofa_mudata.uns["mofa"]
 
+# %% load model for downstream analysis
+# mofax crashes if any view's features_metadata group is empty (pd.concat on []).
+# Patch: write feature names as a placeholder dataset for views missing metadata.
+import gc, h5py, mofax as mfx
+
+# mofapy2 leaves a read-only h5py handle open on the output file after training; close it first
+for obj in gc.get_objects():
+    try:
+        if isinstance(obj, h5py.File) and obj.id.valid and obj.filename == mofa_outfile:
+            obj.close()
+    except Exception:
+        pass
+
+with h5py.File(mofa_outfile, "a") as f:
+    for view in f["features_metadata"].keys():
+        if len(f["features_metadata"][view].keys()) == 0:
+            names = f["features"][view][:].astype(str)
+            f["features_metadata"][view].create_dataset("feature_name", data=names.astype("S"))
+
+m = mfx.mofa_model(mofa_outfile)
+
+# %%
+
+assert np.isin('msi:Dopamine', m.get_top_features()).item()
+weights = m.get_weights()
+norm_weights = weights / np.max(np.abs(weights), axis=0)
+dopamine_index = m.get_features().loc[:,'feature'].eq('msi:Dopamine').idxmax()
+dopamine_weights = norm_weights[dopamine_index]
+max_dopamine_weight_index, max_dopamine_weight = dopamine_weights.argmax(), dopamine_weights.max()
+max_dopamine_weight_factor = max_dopamine_weight_index + 1
+pd.Series(dopamine_weights).plot(kind='barh')
+plt.title('Dopamine weights'); plt.xlabel('Weight'); plt.ylabel('Factor'); plt.axvline(0, color='k', linestyle='--'); plt.show()
+
+mfx.plot_weights_correlation(m)
+
+# plot_weights: accepts views= (list)
+ax = mfx.plot_weights(m, n_features=15, views=["rna"], factors=int(max_dopamine_weight_index))
+ax = mfx.plot_weights(m, n_features=15, views=["atac"], factors=int(max_dopamine_weight_index))
+ax = mfx.plot_weights(m, n_features=15, views=["msi_teacher"], factors=int(max_dopamine_weight_index))
+
+# plot_weights_ranked: accepts view= (single, by name or index)
+ax = mfx.plot_weights_ranked(m, factor=max_dopamine_weight_factor, n_features=15,
+                             view=["msi_teacher"],
+                             y_repel_coef=0.01, x_rank_offset=-150)
+ax = mfx.plot_weights_ranked(m, factor=max_dopamine_weight_factor, n_features=10,
+                             view=["rna"],
+                             y_repel_coef=0.01, x_rank_offset=-150)
+ax = mfx.plot_weights_ranked(m, factor=max_dopamine_weight_factor, n_features=10,
+                             view=["atac"],
+                             y_repel_coef=0.01, x_rank_offset=-150)
+
+# plot_weights_heatmap: accepts view= (single)
+mfx.plot_weights_heatmap(m, n_features=30,
+                         factors=[max_dopamine_weight_index],
+                         view="msi_teacher",
+                         xticklabels_size=6, w_abs=True,
+                         cmap="viridis", cluster_factors=False,
+                         figsize=(20, 4))
+
+
+mfx.plot_factors_scatter(m, color='ATAC_clusters')
+
+mfx.plot_r2_barplot(m, group_label="ATAC_clusters", factors=[int(max_dopamine_weight_index), int(max_dopamine_weight_factor)])
+
+mfx.plot_r2_barplot(m, factors=[int(max_dopamine_weight_index), int(max_dopamine_weight_factor)], x="Group", groupby="Factor",
+                    group_label="ATAC_clusters",
+                    palette="winter")
+
+mfx.plot_factors_matrix(m, agg="mean",
+                            linewidths=0.01, linecolor="#FFFFFF33",
+                            vmax=10,
+                            group_label="ATAC_clusters")
+
 # %%

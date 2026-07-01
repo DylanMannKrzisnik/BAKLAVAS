@@ -198,14 +198,54 @@ def mofa_outfile_from_mudata_path(trimodal_mudata_path):
     return str(path.with_name(path.stem.replace("_rna_atac_msi", "_mofa_model") + ".hdf5"))
 
 
+def peaks_to_bed_df(names):
+    """Parse 'chrN:start-end' peak/region names into a BED-style DataFrame.
+
+    Keeps the original name in a 'name' column so overlaps can be mapped back.
+    Rows that don't match the pattern (malformed coords) are dropped.
+    """
+    names = pd.Series(np.asarray(names), dtype=str)
+    coords = names.str.extract(r"^(?P<chrom>[^:]+):(?P<start>\d+)-(?P<end>\d+)$")
+    coords["name"] = names.to_numpy()
+    coords = coords.dropna(subset=["chrom", "start", "end"])
+    coords["start"] = coords["start"].astype(int)
+    coords["end"] = coords["end"].astype(int)
+    return coords[["chrom", "start", "end", "name"]]
+
+
+def atac_peaks_overlapping_regions(atac_var_names, regions):
+    """Return a boolean mask over atac_var_names for peaks overlapping any region.
+
+    ATAC peaks and cCRE regions are independently called, so their 'chrN:start-end'
+    strings never match exactly -- overlap must be computed on intervals. Peaks on
+    scaffolds absent from `regions` (e.g. GL456216.1) simply don't overlap.
+    """
+    import pybedtools
+
+    atac_var_names = pd.Index(atac_var_names)
+    peaks_bed = peaks_to_bed_df(atac_var_names)
+    regions_bed = peaks_to_bed_df(regions)
+    if len(peaks_bed) == 0 or len(regions_bed) == 0:
+        return np.zeros(len(atac_var_names), dtype=bool)
+
+    peaks_bt = pybedtools.BedTool.from_dataframe(peaks_bed).sort()
+    regions_bt = pybedtools.BedTool.from_dataframe(regions_bed[["chrom", "start", "end"]]).sort()
+    hits = peaks_bt.intersect(regions_bt, u=True)          # -u: each peak once if it overlaps any region
+    overlapping = {iv.name for iv in hits}
+    return np.asarray(atac_var_names.isin(overlapping))
+
+
 def run_trimodal_mofa(
     trimodal_mudata_path,
     *,
     modalities=DEFAULT_MOFA_MODALITIES,
     mofa_outfile=None,
     n_factors=20,
+    max_atac_features=5000,
+    atac_ccre_regions=None,
     gpu_mode=True,
     seed=42,
+    winsorize_percentile=0.5,
 ):
     """
     Run MOFA+ on a trimodal MuData object (RNA, ATAC, MSI).
@@ -238,6 +278,18 @@ def run_trimodal_mofa(
                 .fillna(False)
                 .to_numpy(dtype=bool)
             )
+            # Restrict ATAC to peaks overlapping the supplied cCRE regions (e.g. MXD
+            # cCREs marking ATAC cluster C12). Biology-driven selection focuses the
+            # view on the target signal instead of top global-dispersion peaks.
+            if modality == "atac" and atac_ccre_regions is not None:
+                overlap = atac_peaks_overlapping_regions(
+                    trimodal_mudata.mod["atac"].var_names, atac_ccre_regions
+                )
+                print(
+                    f"MOFA {target_label}: {int(overlap.sum())} ATAC peaks overlap "
+                    f"cCRE regions; {int((initial_mask & overlap).sum())} also highly_variable."
+                )
+                initial_mask = initial_mask & overlap
         else:
             initial_mask = np.ones(trimodal_mudata.mod[modality].n_vars, dtype=bool)
         mofa_feature_masks[modality] = finite_variable_feature_mask(
@@ -245,6 +297,24 @@ def run_trimodal_mofa(
             initial_mask,
             modality,
         )
+
+    # Cap ATAC to the top-N peaks by normalized dispersion. With ~20k HVG peaks
+    # the signal-to-noise per feature is too low for 20 factors to explain any
+    # meaningful ATAC variance (Tau stays at the 2.0 floor). Keeping only the most
+    # variable peaks improves conditioning without discarding informative signal.
+    if max_atac_features and "atac" in mofa_feature_masks:
+        atac = trimodal_mudata.mod["atac"]
+        selected = np.flatnonzero(mofa_feature_masks["atac"])
+        if len(selected) > max_atac_features:
+            disp = atac.var["dispersions_norm"].to_numpy()
+            top = selected[np.argsort(disp[selected])[::-1][:max_atac_features]]
+            new_mask = np.zeros(atac.n_vars, dtype=bool)
+            new_mask[top] = True
+            print(
+                f"MOFA: capped ATAC from {len(selected)} to {max_atac_features} "
+                f"features by normalized dispersion."
+            )
+            mofa_feature_masks["atac"] = new_mask
 
     mofa_mudata = mu.MuData(
         {
@@ -262,6 +332,26 @@ def run_trimodal_mofa(
         )
     )
 
+    # Winsorize per-feature outlier tails on the dense continuous MSI view(s).
+    # msi_student carries an extreme asymmetric left tail (min ~ -17.8 std) that,
+    # even in float64, lets a handful of spots dominate factors -- and under
+    # float32 it overflows the variational updates into all-NaN weights. RNA/ATAC
+    # are non-negative and bounded (~7-8), so they are left untouched.
+    if winsorize_percentile and winsorize_percentile > 0:
+        for modality in modalities:
+            if not modality.startswith("msi"):
+                continue
+            X = np.asarray(mofa_mudata.mod[modality].X, dtype=np.float64)
+            lo = np.percentile(X, winsorize_percentile, axis=0)
+            hi = np.percentile(X, 100.0 - winsorize_percentile, axis=0)
+            clipped = int((X < lo).sum() + (X > hi).sum())
+            mofa_mudata.mod[modality].X = np.clip(X, lo, hi)
+            print(
+                f"MOFA {target_label}: winsorized {modality} to "
+                f"[{winsorize_percentile}, {100.0 - winsorize_percentile}] "
+                f"percentile ({clipped} values clipped)."
+            )
+
     with threadpool_limits(limits=1):
         mu.tl.mofa(
             mofa_mudata,
@@ -277,9 +367,11 @@ def run_trimodal_mofa(
             convergence_mode="slow",            # accurate factors for a final analysis run
             n_iterations=1000,
             gpu_mode=gpu_mode,
-            use_float32=True,                   # pairs with GPU: less memory / faster for the large ATAC view
+            gpu_device=0,
+            use_float32=True,                  # float64 for numerical stability: float32 overflows the variational updates into all-NaN weights on this larger model / heavy-tailed MSI
             seed=seed,
             outfile=mofa_outfile,
+            verbose=True,
         )
 
     trimodal_mudata.obsm["X_mofa"] = mofa_mudata.obsm["X_mofa"]
@@ -287,15 +379,34 @@ def run_trimodal_mofa(
 
     return trimodal_mudata, mofa_outfile
 
+#%% extract cCREs related to MXD (ATAC cluster A12/C12)
+
+catlas_supp_tables_path = Path(os.getenv("DATAPATH")) / "CATlas" / "supplementary_tables"
+(cCREs_table_path,) = catlas_supp_tables_path.glob("Supplementary Table 8*.txt")
+
+cCREs_table = pd.read_csv(
+    cCREs_table_path,
+    sep=r"\t|\|",
+    engine="python",
+    names=["cCRE_region", "cCRE_id", "CellType"],
+    skiprows=1,
+)
+
+mxd_cCREs = cCREs_table[cCREs_table['CellType'].eq('MXD')]
+mxd_ccre_regions = mxd_cCREs['cCRE_region']   # 'chrN:start-end'; overlapped (not string-matched) with ATAC peaks
+
 #%% Run MOFA+ on targets
 
 trimodal_mudata, mofa_outfile = run_trimodal_mofa(
     spatial_target_trimodal_mudata_path,
     modalities=("rna", "atac", "msi_teacher"),
+    atac_ccre_regions=mxd_ccre_regions,
 )
 multiome_trimodal_mudata, multiome_mofa_outfile = run_trimodal_mofa(
     multiome_target_trimodal_mudata_path,
     modalities=("rna", "atac", "msi_student"),
+    atac_ccre_regions=mxd_ccre_regions,
+    max_atac_features=None,
 )
 
 # %% load model for downstream analysis

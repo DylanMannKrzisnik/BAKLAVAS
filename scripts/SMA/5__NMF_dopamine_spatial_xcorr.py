@@ -138,27 +138,26 @@ plt.xlabel('Gene loading')
 plt.ylabel('Gene')
 plt.show()
 
-# %%
+# %% MOFA+ analysis of spatial and multiome targets
 import muon as mu
 import scipy.sparse as sp
 from threadpoolctl import threadpool_limits
 
-trimodal_mudata_path = os.path.join(
+spatial_target_trimodal_mudata_path = os.path.join(
     os.getenv("OUTPATH"),
     "spatialjepa_projection",
     "V11L12-109_B1",
     "spatial_target_rna_atac_msi.h5mu",
 )
-trimodal_mudata = mu.read_h5mu(trimodal_mudata_path)
-MOFA_MODALITIES = ("rna", "atac", "msi_teacher")
 
-# Feed MOFA log-normalized RNA (SCT corrected data) instead of the SCT Pearson
-# residuals stored in .X. The residuals carry a heavy positive tail (max ~17.6)
-# that, under a gaussian likelihood, would let a few outlier spots dominate the
-# factors. Done before HVG/variance masking so the variance filter and MOFA both
-# operate on the same log-normalized matrix. ATAC (non-negative log-norm) and MSI
-# (continuous intensities) are left as-is.
-trimodal_mudata.mod["rna"].X = trimodal_mudata.mod["rna"].layers["SCT_data"]
+multiome_target_trimodal_mudata_path = os.path.join(
+    os.getenv("OUTPATH"),
+    "spatialjepa_projection",
+    "V11L12-109_B1",
+    "multiome_target_rna_atac_msi.h5mu",
+)
+
+DEFAULT_MOFA_MODALITIES = ("rna", "atac", "msi_student")
 
 
 def finite_variable_feature_mask(adata, initial_mask, label):
@@ -193,66 +192,111 @@ def finite_variable_feature_mask(adata, initial_mask, label):
     return mask
 
 
-mofa_feature_masks = {}
-for modality in MOFA_MODALITIES:
-    if modality in {"rna", "atac"}:
-        initial_mask = (
-            trimodal_mudata.mod[modality].var["highly_variable"]
-            .fillna(False)
-            .to_numpy(dtype=bool)
+def mofa_outfile_from_mudata_path(trimodal_mudata_path):
+    """Derive MOFA HDF5 path from a trimodal .h5mu path in the same directory."""
+    path = Path(trimodal_mudata_path)
+    return str(path.with_name(path.stem.replace("_rna_atac_msi", "_mofa_model") + ".hdf5"))
+
+
+def run_trimodal_mofa(
+    trimodal_mudata_path,
+    *,
+    modalities=DEFAULT_MOFA_MODALITIES,
+    mofa_outfile=None,
+    n_factors=20,
+    gpu_mode=True,
+    seed=42,
+):
+    """
+    Run MOFA+ on a trimodal MuData object (RNA, ATAC, MSI).
+
+    Returns (trimodal_mudata, mofa_outfile). Factors are written to
+    trimodal_mudata.obsm['X_mofa'] and trimodal_mudata.uns['mofa'].
+    """
+    trimodal_mudata_path = str(trimodal_mudata_path)
+    target_label = Path(trimodal_mudata_path).stem.replace("_rna_atac_msi", "")
+    if mofa_outfile is None:
+        mofa_outfile = mofa_outfile_from_mudata_path(trimodal_mudata_path)
+
+    trimodal_mudata = mu.read_h5mu(trimodal_mudata_path)
+
+    # Feed MOFA log-normalized RNA (SCT corrected data) instead of the SCT Pearson
+    # residuals stored in .X. The residuals carry a heavy positive tail (max ~17.6)
+    # that, under a gaussian likelihood, would let a few outlier spots dominate the
+    # factors. Done before HVG/variance masking so the variance filter and MOFA both
+    # operate on the same log-normalized matrix. ATAC (non-negative log-norm) and MSI
+    # (continuous intensities) are left as-is.
+    trimodal_mudata.mod["rna"].X = trimodal_mudata.mod["rna"].layers["SCT_data"]
+
+    mofa_feature_masks = {}
+    for modality in modalities:
+        if modality not in trimodal_mudata.mod:
+            raise KeyError(f"{target_label}: modality {modality!r} not in MuData.")
+        if modality in {"rna", "atac"}:
+            initial_mask = (
+                trimodal_mudata.mod[modality].var["highly_variable"]
+                .fillna(False)
+                .to_numpy(dtype=bool)
+            )
+        else:
+            initial_mask = np.ones(trimodal_mudata.mod[modality].n_vars, dtype=bool)
+        mofa_feature_masks[modality] = finite_variable_feature_mask(
+            trimodal_mudata.mod[modality],
+            initial_mask,
+            modality,
         )
-    else:
-        initial_mask = np.ones(trimodal_mudata.mod[modality].n_vars, dtype=bool)
-    mofa_feature_masks[modality] = finite_variable_feature_mask(
-        trimodal_mudata.mod[modality],
-        initial_mask,
-        modality,
+
+    mofa_mudata = mu.MuData(
+        {
+            modality: trimodal_mudata.mod[modality][:, mofa_feature_masks[modality]].copy()
+            for modality in modalities
+        },
+        obs=trimodal_mudata.obs.copy(),
+        uns=trimodal_mudata.uns.copy(),
+    )
+    print(
+        f"MOFA {target_label} selected features: "
+        + ", ".join(
+            f"{modality}={int(mask.sum())}"
+            for modality, mask in mofa_feature_masks.items()
+        )
     )
 
-mofa_mudata = mu.MuData(
-    {modality: adata[:, mofa_feature_masks[modality]].copy()
-     for modality, adata in trimodal_mudata.mod.items()
-     if modality in MOFA_MODALITIES},
-    obs=trimodal_mudata.obs.copy(),
-    uns=trimodal_mudata.uns.copy(),
-)
-print(
-    "MOFA selected features: "
-    + ", ".join(
-        f"{modality}={int(mask.sum())}"
-        for modality, mask in mofa_feature_masks.items()
-    )
-)
+    with threadpool_limits(limits=1):
+        mu.tl.mofa(
+            mofa_mudata,
+            use_var=None,                       # features already masked upstream; do not re-filter
+            likelihoods=["gaussian"] * len(mofa_mudata.mod),  # all views continuous (negatives / non-integer) -> Poisson/Bernoulli invalid
+            n_factors=n_factors,                # generous; ARD prunes inactive factors
+            scale_views=True,                   # views differ ~20x in per-feature variance -> equalize contributions
+            center_groups=True,
+            ard_weights=True,                   # per-view-per-factor weight pruning
+            ard_factors=True,
+            spikeslab_weights=True,             # sparse, interpretable loadings (denoises sparse ATAC; readable for downstream Moran's I)
+            spikeslab_factors=False,            # keep factor scores dense -> smooth spatial gradients, not spot-level on/off
+            convergence_mode="slow",            # accurate factors for a final analysis run
+            n_iterations=1000,
+            gpu_mode=gpu_mode,
+            use_float32=True,                   # pairs with GPU: less memory / faster for the large ATAC view
+            seed=seed,
+            outfile=mofa_outfile,
+        )
 
-mofa_outfile = os.path.join(
-    os.getenv("OUTPATH"),
-    "spatialjepa_projection",
-    "V11L12-109_B1",
-    "mofa_model.hdf5",
+    trimodal_mudata.obsm["X_mofa"] = mofa_mudata.obsm["X_mofa"]
+    trimodal_mudata.uns["mofa"] = mofa_mudata.uns["mofa"]
+
+    return trimodal_mudata, mofa_outfile
+
+#%% Run MOFA+ on targets
+
+trimodal_mudata, mofa_outfile = run_trimodal_mofa(
+    spatial_target_trimodal_mudata_path,
+    modalities=("rna", "atac", "msi_teacher"),
 )
-
-with threadpool_limits(limits=1):
-    mu.tl.mofa(
-        mofa_mudata,
-        use_var=None,                       # features already masked upstream; do not re-filter
-        likelihoods=["gaussian"] * len(mofa_mudata.mod),  # all views continuous (negatives / non-integer) -> Poisson/Bernoulli invalid
-        n_factors=20,                       # generous; ARD prunes inactive factors
-        scale_views=True,                   # views differ ~20x in per-feature variance -> equalize contributions
-        center_groups=True,
-        ard_weights=True,                   # per-view-per-factor weight pruning
-        ard_factors=True,
-        spikeslab_weights=True,             # sparse, interpretable loadings (denoises sparse ATAC; readable for downstream Moran's I)
-        spikeslab_factors=False,            # keep factor scores dense -> smooth spatial gradients, not spot-level on/off
-        convergence_mode="slow",            # accurate factors for a final analysis run
-        n_iterations=1000,
-        gpu_mode=True,
-        use_float32=True,                   # pairs with GPU: less memory / faster for the large ATAC view
-        seed=42,
-        outfile=mofa_outfile,
-    )
-
-trimodal_mudata.obsm["X_mofa"] = mofa_mudata.obsm["X_mofa"]
-trimodal_mudata.uns["mofa"] = mofa_mudata.uns["mofa"]
+multiome_trimodal_mudata, multiome_mofa_outfile = run_trimodal_mofa(
+    multiome_target_trimodal_mudata_path,
+    modalities=("rna", "atac", "msi_student"),
+)
 
 # %% load model for downstream analysis
 # mofax crashes if any view's features_metadata group is empty (pd.concat on []).
@@ -260,72 +304,127 @@ trimodal_mudata.uns["mofa"] = mofa_mudata.uns["mofa"]
 import gc, h5py, mofax as mfx
 
 # mofapy2 leaves a read-only h5py handle open on the output file after training; close it first
-for obj in gc.get_objects():
-    try:
-        if isinstance(obj, h5py.File) and obj.id.valid and obj.filename == mofa_outfile:
-            obj.close()
-    except Exception:
-        pass
+def patch_mofa_h5py_features_metadata(mofa_outfile):
+    """
+    Ensures that all views in features_metadata of a MOFA+ h5 file contain a feature_name dataset.
+    This is necessary for downstream mofax analysis to avoid errors due to missing metadata.
+    """
+    for obj in gc.get_objects():
+        try:
+            if isinstance(obj, h5py.File) and obj.id.valid and obj.filename == mofa_outfile:
+                obj.close()
+        except Exception:
+            pass
 
-with h5py.File(mofa_outfile, "a") as f:
-    for view in f["features_metadata"].keys():
-        if len(f["features_metadata"][view].keys()) == 0:
-            names = f["features"][view][:].astype(str)
-            f["features_metadata"][view].create_dataset("feature_name", data=names.astype("S"))
+    with h5py.File(mofa_outfile, "a") as f:
+        for view in f["features_metadata"].keys():
+            if len(f["features_metadata"][view].keys()) == 0:
+                names = f["features"][view][:].astype(str)
+                f["features_metadata"][view].create_dataset("feature_name", data=names.astype("S"))
 
-m = mfx.mofa_model(mofa_outfile)
+## load spatial target MOFA+ model
+patch_mofa_h5py_features_metadata(mofa_outfile)
+spatial_mofa = mfx.mofa_model(mofa_outfile)
+
+## load multiome target MOFA+ model
+patch_mofa_h5py_features_metadata(multiome_mofa_outfile)
+multiome_mofa = mfx.mofa_model(multiome_mofa_outfile)
+
+
+def explore_dopamine_mofa_model(m, *, msi_view, title_prefix=""):
+    """
+    Find the factor with strongest dopamine loading and plot MOFA diagnostics.
+
+    Returns max_dopamine_weight_index (0-based), max_dopamine_weight_factor (1-based),
+    and dopamine_weights.
+    """
+    title = f"{title_prefix}: " if title_prefix else ""
+
+    assert np.isin("msi:Dopamine", m.get_top_features()).item()
+    weights = m.get_weights()
+    norm_weights = weights / np.max(np.abs(weights), axis=0)
+    dopamine_index = m.get_features().loc[:, "feature"].eq("msi:Dopamine").idxmax()
+    dopamine_weights = norm_weights[dopamine_index]
+    max_dopamine_weight_index = int(dopamine_weights.argmax())
+    max_dopamine_weight = float(dopamine_weights.max())
+    max_dopamine_weight_factor = max_dopamine_weight_index + 1
+
+    pd.Series(dopamine_weights).plot(kind="barh")
+    plt.title(f"{title}Dopamine weights")
+    plt.xlabel("Weight")
+    plt.ylabel("Factor")
+    plt.axvline(0, color="k", linestyle="--")
+    plt.show()
+
+    mfx.plot_weights_correlation(m)
+
+    mfx.plot_weights(m, n_features=15, views=["rna"], factors=max_dopamine_weight_index)
+    mfx.plot_weights(m, n_features=15, views=["atac"], factors=max_dopamine_weight_index)
+    mfx.plot_weights(m, n_features=15, views=[msi_view], factors=max_dopamine_weight_index)
+
+    mfx.plot_weights_ranked(
+        m, factor=max_dopamine_weight_factor, n_features=15,
+        view=[msi_view], y_repel_coef=0.01, x_rank_offset=-150,
+    )
+    mfx.plot_weights_ranked(
+        m, factor=max_dopamine_weight_factor, n_features=10,
+        view=["rna"], y_repel_coef=0.01, x_rank_offset=-150,
+    )
+    mfx.plot_weights_ranked(
+        m, factor=max_dopamine_weight_factor, n_features=10,
+        view=["atac"], y_repel_coef=0.01, x_rank_offset=-150,
+    )
+
+    mfx.plot_weights_heatmap(
+        m, n_features=30,
+        factors=[max_dopamine_weight_index],
+        view=msi_view,
+        xticklabels_size=6, w_abs=True,
+        cmap="viridis", cluster_factors=False,
+        figsize=(20, 4),
+    )
+
+    mfx.plot_factors_scatter(m, color="ATAC_clusters")
+
+    mfx.plot_r2_barplot(
+        m, group_label="ATAC_clusters",
+        factors=[max_dopamine_weight_index, max_dopamine_weight_factor],
+    )
+    mfx.plot_r2_barplot(
+        m,
+        factors=[max_dopamine_weight_index, max_dopamine_weight_factor],
+        x="Group", groupby="Factor",
+        group_label="ATAC_clusters",
+        palette="winter",
+    )
+    mfx.plot_factors_matrix(
+        m, agg="mean",
+        linewidths=0.01, linecolor="#FFFFFF33",
+        vmax=10,
+        group_label="ATAC_clusters",
+    )
+
+    return max_dopamine_weight_index, max_dopamine_weight_factor, dopamine_weights
+
 
 # %%
 
-assert np.isin('msi:Dopamine', m.get_top_features()).item()
-weights = m.get_weights()
-norm_weights = weights / np.max(np.abs(weights), axis=0)
-dopamine_index = m.get_features().loc[:,'feature'].eq('msi:Dopamine').idxmax()
-dopamine_weights = norm_weights[dopamine_index]
-max_dopamine_weight_index, max_dopamine_weight = dopamine_weights.argmax(), dopamine_weights.max()
-max_dopamine_weight_factor = max_dopamine_weight_index + 1
-pd.Series(dopamine_weights).plot(kind='barh')
-plt.title('Dopamine weights'); plt.xlabel('Weight'); plt.ylabel('Factor'); plt.axvline(0, color='k', linestyle='--'); plt.show()
+spatial_dopamine_factor, spatial_dopamine_factor_n, spatial_dopamine_weights = explore_dopamine_mofa_model(
+    spatial_mofa,
+    msi_view="msi_teacher",
+    title_prefix="spatial target",
+)
+multiome_dopamine_factor, multiome_dopamine_factor_n, multiome_dopamine_weights = explore_dopamine_mofa_model(
+    multiome_mofa,
+    msi_view="msi_student",
+    title_prefix="multiome target",
+)
 
-mfx.plot_weights_correlation(m)
-
-# plot_weights: accepts views= (list)
-ax = mfx.plot_weights(m, n_features=15, views=["rna"], factors=int(max_dopamine_weight_index))
-ax = mfx.plot_weights(m, n_features=15, views=["atac"], factors=int(max_dopamine_weight_index))
-ax = mfx.plot_weights(m, n_features=15, views=["msi_teacher"], factors=int(max_dopamine_weight_index))
-
-# plot_weights_ranked: accepts view= (single, by name or index)
-ax = mfx.plot_weights_ranked(m, factor=max_dopamine_weight_factor, n_features=15,
-                             view=["msi_teacher"],
-                             y_repel_coef=0.01, x_rank_offset=-150)
-ax = mfx.plot_weights_ranked(m, factor=max_dopamine_weight_factor, n_features=10,
-                             view=["rna"],
-                             y_repel_coef=0.01, x_rank_offset=-150)
-ax = mfx.plot_weights_ranked(m, factor=max_dopamine_weight_factor, n_features=10,
-                             view=["atac"],
-                             y_repel_coef=0.01, x_rank_offset=-150)
-
-# plot_weights_heatmap: accepts view= (single)
-mfx.plot_weights_heatmap(m, n_features=30,
-                         factors=[max_dopamine_weight_index],
-                         view="msi_teacher",
-                         xticklabels_size=6, w_abs=True,
-                         cmap="viridis", cluster_factors=False,
-                         figsize=(20, 4))
-
-
-mfx.plot_factors_scatter(m, color='ATAC_clusters')
-
-mfx.plot_r2_barplot(m, group_label="ATAC_clusters", factors=[int(max_dopamine_weight_index), int(max_dopamine_weight_factor)])
-
-mfx.plot_r2_barplot(m, factors=[int(max_dopamine_weight_index), int(max_dopamine_weight_factor)], x="Group", groupby="Factor",
-                    group_label="ATAC_clusters",
-                    palette="winter")
-
-mfx.plot_factors_matrix(m, agg="mean",
-                            linewidths=0.01, linecolor="#FFFFFF33",
-                            vmax=10,
-                            group_label="ATAC_clusters")
+# downstream cells use spatial target MOFA model
+m = spatial_mofa
+max_dopamine_weight_index = spatial_dopamine_factor
+max_dopamine_weight_factor = spatial_dopamine_factor_n
+dopamine_weights = spatial_dopamine_weights
 
 # %% create mofa_X anndata object
 

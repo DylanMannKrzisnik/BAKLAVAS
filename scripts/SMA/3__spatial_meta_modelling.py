@@ -714,11 +714,11 @@ for sample_id in SAMPLE_IDS:
 
 #%% Run SpatialJEPA and vanilla SpatialMETA baseline
 
-# instantiate models
+# set training hyperparameters. disable LR scheduler for human (i.e. non-mouse)
 max_epoch = 1000
-learning_rate = 1e-3
-lr_scheduler_step_size = 200 if species == "mouse" else 100
-lr_scheduler_gamma = 0.1
+learning_rate           = 1e-3  if species == "mouse" else 1e-5
+lr_scheduler_step_size  = 200   if species == "mouse" else max_epoch
+lr_scheduler_gamma      = 0.1   if species == "mouse" else 1.0
 
 # For horizontal integration (MULTI) pass the section as a batch key: this enables decoder batch conditioning + the MMD alignment loss, and a block-diagonal spatial graph (no cross-section edges) for the full-graph teacher.
 batch_keys = [SECTION_KEY] if MULTI else None

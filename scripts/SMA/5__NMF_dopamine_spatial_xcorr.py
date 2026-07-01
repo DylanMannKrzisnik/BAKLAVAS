@@ -306,9 +306,12 @@ import gc, h5py, mofax as mfx
 # mofapy2 leaves a read-only h5py handle open on the output file after training; close it first
 def patch_mofa_h5py_features_metadata(mofa_outfile):
     """
-    Ensures that all views in features_metadata of a MOFA+ h5 file contain a feature_name dataset.
-    This is necessary for downstream mofax analysis to avoid errors due to missing metadata.
+    Ensure each MOFA+ view has minimal feature metadata for mofax.
+
+    Some mofapy2 runs omit features_metadata entirely, while others create empty
+    per-view groups. mofax can stumble on either form when building metadata.
     """
+    mofa_outfile = str(mofa_outfile)
     for obj in gc.get_objects():
         try:
             if isinstance(obj, h5py.File) and obj.id.valid and obj.filename == mofa_outfile:
@@ -317,10 +320,12 @@ def patch_mofa_h5py_features_metadata(mofa_outfile):
             pass
 
     with h5py.File(mofa_outfile, "a") as f:
-        for view in f["features_metadata"].keys():
-            if len(f["features_metadata"][view].keys()) == 0:
+        features_metadata = f.require_group("features_metadata")
+        for view in f["features"].keys():
+            view_metadata = features_metadata.require_group(view)
+            if "feature_name" not in view_metadata:
                 names = f["features"][view][:].astype(str)
-                f["features_metadata"][view].create_dataset("feature_name", data=names.astype("S"))
+                view_metadata.create_dataset("feature_name", data=names.astype("S"))
 
 ## load spatial target MOFA+ model
 patch_mofa_h5py_features_metadata(mofa_outfile)
@@ -330,7 +335,7 @@ spatial_mofa = mfx.mofa_model(mofa_outfile)
 patch_mofa_h5py_features_metadata(multiome_mofa_outfile)
 multiome_mofa = mfx.mofa_model(multiome_mofa_outfile)
 
-
+#%% explore dopamine MOFA model
 def explore_dopamine_mofa_model(m, *, msi_view, title_prefix=""):
     """
     Find the factor with strongest dopamine loading and plot MOFA diagnostics.
@@ -339,9 +344,11 @@ def explore_dopamine_mofa_model(m, *, msi_view, title_prefix=""):
     and dopamine_weights.
     """
     title = f"{title_prefix}: " if title_prefix else ""
-
-    assert np.isin("msi:Dopamine", m.get_top_features()).item()
     weights = m.get_weights()
+
+    assert m.get_features().loc[:,'feature'].eq('msi:Dopamine').any()
+    assert ~np.isnan(weights).any() # no missing weights
+
     norm_weights = weights / np.max(np.abs(weights), axis=0)
     dopamine_index = m.get_features().loc[:, "feature"].eq("msi:Dopamine").idxmax()
     dopamine_weights = norm_weights[dopamine_index]

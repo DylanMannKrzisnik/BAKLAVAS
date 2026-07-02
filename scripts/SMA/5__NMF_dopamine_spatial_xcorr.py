@@ -236,8 +236,9 @@ def atac_peaks_overlapping_regions(atac_var_names, regions):
 
 
 def run_trimodal_mofa(
-    trimodal_mudata_path,
+    trimodal_mudata,
     *,
+    mudata_source_path=None,
     modalities=DEFAULT_MOFA_MODALITIES,
     mofa_outfile=None,
     n_factors=20,
@@ -251,15 +252,27 @@ def run_trimodal_mofa(
     """
     Run MOFA+ on a trimodal MuData object (RNA, ATAC, MSI).
 
+    Parameters
+    ----------
+    trimodal_mudata : mu.MuData
+        Pre-loaded trimodal MuData (not modified in-place before MOFA prep).
+    mudata_source_path : str or Path, optional
+        Original .h5mu path; used to derive target_label and default mofa_outfile.
+
     Returns (trimodal_mudata, mofa_outfile). Factors are written to
     trimodal_mudata.obsm['X_mofa'] and trimodal_mudata.uns['mofa'].
     """
-    trimodal_mudata_path = str(trimodal_mudata_path)
-    target_label = Path(trimodal_mudata_path).stem.replace("_rna_atac_msi", "")
-    if mofa_outfile is None:
-        mofa_outfile = mofa_outfile_from_mudata_path(trimodal_mudata_path)
+    if mudata_source_path is not None:
+        mudata_source_path = str(mudata_source_path)
+        target_label = Path(mudata_source_path).stem.replace("_rna_atac_msi", "")
+        if mofa_outfile is None:
+            mofa_outfile = mofa_outfile_from_mudata_path(mudata_source_path)
+    else:
+        target_label = "trimodal"
+        if mofa_outfile is None:
+            raise ValueError("mofa_outfile is required when mudata_source_path is not provided.")
 
-    trimodal_mudata = mu.read_h5mu(trimodal_mudata_path)
+    trimodal_mudata = trimodal_mudata.copy()
 
     # Feed MOFA log-normalized RNA (SCT corrected data) instead of the SCT Pearson
     # residuals stored in .X. The residuals carry a heavy positive tail (max ~17.6)
@@ -418,15 +431,22 @@ cCREs_table = pd.read_csv(
 mxd_cCREs = cCREs_table[cCREs_table['CellType'].eq('MXD')]
 mxd_ccre_regions = mxd_cCREs['cCRE_region']   # 'chrN:start-end'; overlapped (not string-matched) with ATAC peaks
 
+#%% Load trimodal targets
+
+spatial_trimodal_mudata = mu.read_h5mu(spatial_target_trimodal_mudata_path)
+multiome_trimodal_mudata = mu.read_h5mu(multiome_target_trimodal_mudata_path)
+
 #%% Run MOFA+ on targets
 
 trimodal_mudata, spatial_mofa_outfile = run_trimodal_mofa(
-    spatial_target_trimodal_mudata_path,
+    spatial_trimodal_mudata,
+    mudata_source_path=spatial_target_trimodal_mudata_path,
     modalities=("rna", "atac", "msi_teacher"),
     atac_ccre_regions=mxd_ccre_regions,
 )
 multiome_trimodal_mudata, multiome_mofa_outfile = run_trimodal_mofa(
-    multiome_target_trimodal_mudata_path,
+    multiome_trimodal_mudata,
+    mudata_source_path=multiome_target_trimodal_mudata_path,
     modalities=("rna", "atac", "msi_student"),
     atac_ccre_regions=mxd_ccre_regions,
     max_atac_features=None,
@@ -527,24 +547,26 @@ def explore_dopamine_mofa_model(m, *, msi_view, title_prefix=""):
         figsize=(20, 4),
     )
 
-    mfx.plot_factors_scatter(m, color="ATAC_clusters")
+    cluster_label = "ATAC_clusters" if msi_view == "msi_teacher" else "REF_arc_gex_graphclust_Cluster"
+
+    mfx.plot_factors_scatter(m, color=cluster_label)
 
     mfx.plot_r2_barplot(
-        m, group_label="ATAC_clusters",
+        m, group_label=cluster_label,
         factors=[max_dopamine_weight_index, max_dopamine_weight_factor],
     )
     mfx.plot_r2_barplot(
         m,
         factors=[max_dopamine_weight_index, max_dopamine_weight_factor],
         x="Group", groupby="Factor",
-        group_label="ATAC_clusters",
+        group_label=cluster_label,
         palette="winter",
     )
     mfx.plot_factors_matrix(
         m, agg="mean",
         linewidths=0.01, linecolor="#FFFFFF33",
         vmax=10,
-        group_label="ATAC_clusters",
+        group_label=cluster_label,
     )
 
     return max_dopamine_weight_index, max_dopamine_weight_factor, dopamine_weights

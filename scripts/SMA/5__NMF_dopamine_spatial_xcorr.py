@@ -243,6 +243,7 @@ def run_trimodal_mofa(
     n_factors=20,
     max_atac_features=5000,
     atac_ccre_regions=None,
+    msi_noise_std=0.0,
     gpu_mode=True,
     seed=42,
     winsorize_percentile=0.5,
@@ -352,6 +353,28 @@ def run_trimodal_mofa(
                 f"percentile ({clipped} values clipped)."
             )
 
+    # Inject gaussian noise into the MSI view(s) to model imputation uncertainty.
+    # msi_student is a deterministic low-rank projected embedding, so MOFA fits it
+    # near-perfectly: its Tau runs away (-> thousands) and its precision-weighted
+    # pull (~Tau * n_features) dominates RNA/ATAC by orders of magnitude, starving
+    # them of factor influence. Adding noise bounds the MSI residual (Tau <~ 1/var),
+    # rebalancing the joint objective so all three views inform the shared factors.
+    # Noise std is in units of each feature's std (applied after scale_views centers
+    # to comparable scales). Tune so MSI Tau lands within ~10x of RNA/ATAC.
+    if msi_noise_std and msi_noise_std > 0:
+        rng = np.random.default_rng(seed)
+        for modality in modalities:
+            if not modality.startswith("msi"):
+                continue
+            X = np.asarray(mofa_mudata.mod[modality].X, dtype=np.float64)
+            feature_std = X.std(axis=0, keepdims=True)
+            X = X + rng.normal(0.0, msi_noise_std, size=X.shape) * feature_std
+            mofa_mudata.mod[modality].X = X
+            print(
+                f"MOFA {target_label}: added gaussian noise to {modality} "
+                f"(std={msi_noise_std} x per-feature std) to cap Tau runaway."
+            )
+
     with threadpool_limits(limits=1):
         mu.tl.mofa(
             mofa_mudata,
@@ -367,8 +390,8 @@ def run_trimodal_mofa(
             convergence_mode="slow",            # accurate factors for a final analysis run
             n_iterations=1000,
             gpu_mode=gpu_mode,
-            gpu_device=0,
-            use_float32=True,                  # float64 for numerical stability: float32 overflows the variational updates into all-NaN weights on this larger model / heavy-tailed MSI
+            gpu_device=2,
+            use_float32=False,                  # float64 for numerical stability: float32 overflows the variational updates into all-NaN weights on this larger model / heavy-tailed MSI
             seed=seed,
             outfile=mofa_outfile,
             verbose=True,
@@ -397,7 +420,7 @@ mxd_ccre_regions = mxd_cCREs['cCRE_region']   # 'chrN:start-end'; overlapped (no
 
 #%% Run MOFA+ on targets
 
-trimodal_mudata, mofa_outfile = run_trimodal_mofa(
+trimodal_mudata, spatial_mofa_outfile = run_trimodal_mofa(
     spatial_target_trimodal_mudata_path,
     modalities=("rna", "atac", "msi_teacher"),
     atac_ccre_regions=mxd_ccre_regions,
@@ -407,6 +430,8 @@ multiome_trimodal_mudata, multiome_mofa_outfile = run_trimodal_mofa(
     modalities=("rna", "atac", "msi_student"),
     atac_ccre_regions=mxd_ccre_regions,
     max_atac_features=None,
+    n_factors=20,
+    msi_noise_std=1,   # cap msi_student's Tau runaway; tune via Tau readouts
 )
 
 # %% load model for downstream analysis
@@ -439,8 +464,8 @@ def patch_mofa_h5py_features_metadata(mofa_outfile):
                 view_metadata.create_dataset("feature_name", data=names.astype("S"))
 
 ## load spatial target MOFA+ model
-patch_mofa_h5py_features_metadata(mofa_outfile)
-spatial_mofa = mfx.mofa_model(mofa_outfile)
+patch_mofa_h5py_features_metadata(spatial_mofa_outfile)
+spatial_mofa = mfx.mofa_model(spatial_mofa_outfile)
 
 ## load multiome target MOFA+ model
 patch_mofa_h5py_features_metadata(multiome_mofa_outfile)
@@ -539,7 +564,8 @@ multiome_dopamine_factor, multiome_dopamine_factor_n, multiome_dopamine_weights 
 )
 
 # downstream cells use spatial target MOFA model
-m = spatial_mofa
+#m = spatial_mofa
+m = multiome_mofa
 max_dopamine_weight_index = spatial_dopamine_factor
 max_dopamine_weight_factor = spatial_dopamine_factor_n
 dopamine_weights = spatial_dopamine_weights

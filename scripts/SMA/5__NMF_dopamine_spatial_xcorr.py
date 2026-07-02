@@ -492,25 +492,68 @@ patch_mofa_h5py_features_metadata(multiome_mofa_outfile)
 multiome_mofa = mfx.mofa_model(multiome_mofa_outfile)
 
 #%% explore dopamine MOFA model
-def explore_dopamine_mofa_model(m, *, msi_view, title_prefix=""):
+def factor_most_associated_with_group(m, group, cluster_label):
+    """Return (factor_name, factor_index_0based, per_factor_means) for the factor
+    whose mean value in `group` is largest in magnitude.
+
+    This matches exactly what mfx.plot_factors_matrix(agg='mean', group_label=...)
+    shows: value[factor, group] = mean factor score across cells in that group.
+    Selection is on |mean| (factor sign is arbitrary in MOFA); the signed mean is
+    printed so the loading direction is known.
+    """
+    Z = m.get_factors(df=True)                                  # samples x FactorN
+    groups = m.samples_metadata[cluster_label].astype(str)
+    group_means = Z.groupby(groups.values).mean()               # group x FactorN
+    group = str(group)
+    if group not in group_means.index:
+        raise KeyError(
+            f"group {group!r} not in {cluster_label!r} values: {list(group_means.index)}"
+        )
+    means = group_means.loc[group]                              # per-factor mean in group
+    factor_name = means.abs().idxmax()
+    factor_index = list(Z.columns).index(factor_name)
+    print(
+        f"Factor most associated with group {group}: {factor_name} "
+        f"(mean factor score = {means[factor_name]:.3f})"
+    )
+    return factor_name, factor_index, means
+
+
+def explore_dopamine_mofa_model(m, *, msi_view, dopamine_top_group=None, title_prefix="", cluster_label=None):
     """
     Find the factor with strongest dopamine loading and plot MOFA diagnostics.
 
     Returns max_dopamine_weight_index (0-based), max_dopamine_weight_factor (1-based),
     and dopamine_weights.
     """
+
+    mfx.plot_factors_matrix(
+        m, agg="mean",
+        linewidths=0.01, linecolor="#FFFFFF33",
+        vmax=10,
+        group_label=cluster_label,
+    )
+    plt.show()
+
     title = f"{title_prefix}: " if title_prefix else ""
     weights = m.get_weights()
 
     assert m.get_features().loc[:,'feature'].eq('msi:Dopamine').any()
     assert ~np.isnan(weights).any() # no missing weights
 
-    norm_weights = weights / np.max(np.abs(weights), axis=0)
-    dopamine_index = m.get_features().loc[:, "feature"].eq("msi:Dopamine").idxmax()
-    dopamine_weights = norm_weights[dopamine_index]
-    max_dopamine_weight_index = int(dopamine_weights.argmax())
-    max_dopamine_weight = float(dopamine_weights.max())
-    max_dopamine_weight_factor = max_dopamine_weight_index + 1
+    # Per-factor msi:Dopamine loading (diagnostic barplot below).
+    dopamine_weights = m.get_weights(views=[msi_view], df=True).loc["msi:Dopamine"]
+
+    # Select the factor to focus on. Primary: the factor most associated with the
+    # cluster where dopamine is the top hit (from find_dopamine_top_hit). Fallback
+    # (no group supplied): the factor with the strongest |dopamine loading|.
+    if dopamine_top_group is not None:
+        max_dopamine_weight_factor, max_dopamine_weight_index, _ = \
+            factor_most_associated_with_group(m, dopamine_top_group, cluster_label)
+    else:
+        max_dopamine_weight_factor = dopamine_weights.abs().idxmax()
+        max_dopamine_weight_index = list(m.get_factors(df=True).columns).index(max_dopamine_weight_factor)
+        print(f"Factor with strongest |dopamine loading|: {max_dopamine_weight_factor}")
 
     pd.Series(dopamine_weights).plot(kind="barh")
     plt.title(f"{title}Dopamine weights")
@@ -519,70 +562,90 @@ def explore_dopamine_mofa_model(m, *, msi_view, title_prefix=""):
     plt.axvline(0, color="k", linestyle="--")
     plt.show()
 
-    mfx.plot_weights_correlation(m)
+    mfx.plot_weights_correlation(m); plt.show()
 
-    mfx.plot_weights(m, n_features=15, views=["rna"], factors=max_dopamine_weight_index)
-    mfx.plot_weights(m, n_features=15, views=["atac"], factors=max_dopamine_weight_index)
-    mfx.plot_weights(m, n_features=15, views=[msi_view], factors=max_dopamine_weight_index)
+    mfx.plot_weights(m, n_features=15, views=["rna"], factors=max_dopamine_weight_factor); plt.show()
+    mfx.plot_weights(m, n_features=15, views=["atac"], factors=max_dopamine_weight_factor); plt.show()
+    mfx.plot_weights(m, n_features=15, views=[msi_view], factors=max_dopamine_weight_factor); plt.show()
 
     mfx.plot_weights_ranked(
         m, factor=max_dopamine_weight_factor, n_features=15,
         view=[msi_view], y_repel_coef=0.01, x_rank_offset=-150,
-    )
+    ); plt.show()
     mfx.plot_weights_ranked(
         m, factor=max_dopamine_weight_factor, n_features=10,
         view=["rna"], y_repel_coef=0.01, x_rank_offset=-150,
-    )
+    ); plt.show()
     mfx.plot_weights_ranked(
         m, factor=max_dopamine_weight_factor, n_features=10,
         view=["atac"], y_repel_coef=0.01, x_rank_offset=-150,
-    )
+    ); plt.show()
 
     mfx.plot_weights_heatmap(
         m, n_features=30,
-        factors=[max_dopamine_weight_index],
+        factors=[max_dopamine_weight_factor],
         view=msi_view,
         xticklabels_size=6, w_abs=True,
         cmap="viridis", cluster_factors=False,
         figsize=(20, 4),
-    )
+    ); plt.show()
 
-    cluster_label = "ATAC_clusters" if msi_view == "msi_teacher" else "REF_arc_gex_graphclust_Cluster"
-
-    mfx.plot_factors_scatter(m, color=cluster_label)
+    mfx.plot_factors_scatter(m, color=cluster_label); plt.show()
 
     mfx.plot_r2_barplot(
         m, group_label=cluster_label,
-        factors=[max_dopamine_weight_index, max_dopamine_weight_factor],
-    )
+        factors=[max_dopamine_weight_factor],
+    ); plt.show()
     mfx.plot_r2_barplot(
         m,
-        factors=[max_dopamine_weight_index, max_dopamine_weight_factor],
+        factors=[max_dopamine_weight_factor],
         x="Group", groupby="Factor",
         group_label=cluster_label,
         palette="winter",
-    )
-    mfx.plot_factors_matrix(
-        m, agg="mean",
-        linewidths=0.01, linecolor="#FFFFFF33",
-        vmax=10,
-        group_label=cluster_label,
-    )
+    ); plt.show()
 
     return max_dopamine_weight_index, max_dopamine_weight_factor, dopamine_weights
 
 
 # %%
 
+def find_dopamine_top_hit(trimodal_mudata):
+    msi_features_split = pd.Series(trimodal_mudata.mod['msi_student'].var_names.str.split(':').str[1])
+    is_mz_feature = msi_features_split.str.fullmatch(r'\d+(\.\d+)?').fillna(False)
+    is_mz_feature.sum(), (~is_mz_feature).sum()  # m/z peaks vs named metabolites (e.g. Dopamine)
+    named_msi_features = msi_features_split[~is_mz_feature]
+    named_msi_features = ('msi:' + named_msi_features).tolist()
+
+    sc.tl.rank_genes_groups(multiome_trimodal_mudata.mod['msi_student'], groupby='REF_arc_gex_graphclust_Cluster')
+    sc.pl.rank_genes_groups_dotplot(multiome_trimodal_mudata.mod['msi_student'], var_names=named_msi_features)
+
+    rank_genes_groups_df = sc.get.rank_genes_groups_df(multiome_trimodal_mudata.mod['msi_student'], group=None)
+    dopamine_top_hit = (
+        rank_genes_groups_df[rank_genes_groups_df['names'].eq('msi:Dopamine')]
+        .sort_values('scores', ascending=False)
+        .iloc[0]
+    )
+    print(f"msi:Dopamine top hit: cluster {dopamine_top_hit['group']} "
+        f"(score={dopamine_top_hit['scores']:.3f}, "
+        f"logFC={dopamine_top_hit['logfoldchanges']:.3f}, "
+        f"pval_adj={dopamine_top_hit['pvals_adj']:.3g})")
+    return dopamine_top_hit
+
+spatial_dopamine_top_hit = find_dopamine_top_hit(spatial_trimodal_mudata)
+multiome_dopamine_top_hit = find_dopamine_top_hit(multiome_trimodal_mudata)
+
 spatial_dopamine_factor, spatial_dopamine_factor_n, spatial_dopamine_weights = explore_dopamine_mofa_model(
     spatial_mofa,
     msi_view="msi_teacher",
     title_prefix="spatial target",
+    cluster_label="ATAC_clusters",
 )
 multiome_dopamine_factor, multiome_dopamine_factor_n, multiome_dopamine_weights = explore_dopamine_mofa_model(
     multiome_mofa,
+    dopamine_top_group=str(multiome_dopamine_top_hit['group']),
     msi_view="msi_student",
     title_prefix="multiome target",
+    cluster_label="REF_arc_gex_graphclust_Cluster",
 )
 
 # downstream cells use spatial target MOFA model

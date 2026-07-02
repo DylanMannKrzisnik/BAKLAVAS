@@ -436,9 +436,17 @@ mxd_ccre_regions = mxd_cCREs['cCRE_region']   # 'chrN:start-end'; overlapped (no
 spatial_trimodal_mudata = mu.read_h5mu(spatial_target_trimodal_mudata_path)
 multiome_trimodal_mudata = mu.read_h5mu(multiome_target_trimodal_mudata_path)
 
+## load multiome target RNA with spatial coordinates
+multiome_target_rna_with_spatial = sc.read_h5ad(os.path.join(os.getenv("DATAPATH"), "aligned_data", "target_rna_aligned_with_latents.h5ad"), backed='r')
+
+assert multiome_trimodal_mudata.obs_names.equals(multiome_target_rna_with_spatial.obs_names)
+multiome_trimodal_mudata.obsm['spatial'] = multiome_target_rna_with_spatial.obsm['spatial']
+multiome_trimodal_mudata.mod['msi_student'].obsm["spatial"] = multiome_trimodal_mudata.obsm["spatial"]
+sc.pl.embedding(multiome_trimodal_mudata.mod['msi_student'], basis="spatial", color=['msi:Dopamine', 'REF_arc_gex_graphclust_Cluster'], s=80)
+
 #%% Run MOFA+ on targets
 
-trimodal_mudata, spatial_mofa_outfile = run_trimodal_mofa(
+spatial_trimodal_mudata, spatial_mofa_outfile = run_trimodal_mofa(
     spatial_trimodal_mudata,
     mudata_source_path=spatial_target_trimodal_mudata_path,
     modalities=("rna", "atac", "msi_teacher"),
@@ -656,30 +664,24 @@ multiome_dopamine_factor, multiome_dopamine_factor_n, multiome_dopamine_weights 
     cluster_label="REF_arc_gex_graphclust_Cluster",
 )
 
-# downstream cells use spatial target MOFA model
-#m = spatial_mofa
-m = multiome_mofa
-max_dopamine_weight_index = spatial_dopamine_factor
-max_dopamine_weight_factor = spatial_dopamine_factor_n
-dopamine_weights = spatial_dopamine_weights
+# %% create mofa_X anndata object and plot spatial embedding
 
-# %% create mofa_X anndata object
+def create_mofa_adata(mofa, mudata):
+    mofa_X = mofa.get_factors()
+    mofa_adata = sc.AnnData(
+        X=mofa_X,
+        obs=mudata.obs.copy(),
+        var=pd.DataFrame(index=["Factor " + str(i+1) for i in range(mofa_X.shape[1])])
+    )
+    sc.pl.embedding(mofa_adata, basis="spatial", color=mofa_adata.var_names, ncols=4, s=80, vmax=5)
+    return multiome_mofa_adata
 
-mofa_X = m.get_factors()
-mofa_adata = sc.AnnData(
-    X=mofa_X,
-    obs=trimodal_mudata.obs.copy(),
-    var=pd.DataFrame(index=["Factor " + str(i+1) for i in range(mofa_X.shape[1])])
-)
-mofa_adata.obsm["spatial"] = trimodal_mudata.obsm["spatial"]
-sc.pl.embedding(mofa_adata, basis="spatial", color=mofa_adata.var_names, ncols=4, s=80)
+spatial_mofa_adata = create_mofa_adata(spatial_mofa, spatial_trimodal_mudata)
+multiome_mofa_adata = create_mofa_adata(multiome_mofa, multiome_trimodal_mudata)
 
+#%% find top features for C12/A12 ATAC cluster
 C12_factor = "Factor 3" # factor with clear pattern for C12/A12 ATAC cluster
-ax = mfx.plot_weights(m, n_features=15, views=["rna"], factors=C12_factor)
-ax = mfx.plot_weights(m, n_features=15, views=["atac"], factors=C12_factor)
-ax = mfx.plot_weights(m, n_features=15, views=["msi_teacher"], factors=C12_factor)
-
-top_C12_features = m.get_top_features(factors=C12_factor, n_features=25, views=["rna", "atac", "msi_teacher"])
+top_C12_features = multiome_mofa.get_top_features(factors=C12_factor, n_features=25, views=["rna", "atac", "msi_student"])
 assert np.isin('msi:Dopamine', top_C12_features).item()
 assert set(['Pde10a','Rgs9','Gng7']) <= set(top_C12_features) # the same gene triplet used in Fig. 2b (left side)
 

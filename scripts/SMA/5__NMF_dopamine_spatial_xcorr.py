@@ -604,6 +604,14 @@ def explore_dopamine_mofa_model(m, *, msi_view, dopamine_top_group=None, title_p
         palette="winter",
     ); plt.show()
 
+    '''
+    r2_df = m.get_r2(
+        group_label='REF_arc_gex_graphclust_Cluster',
+        per_factor=True,
+        views='atac'
+    )
+    r2_top_group = r2_df.query('Group == @dopamine_top_group')
+    '''
     return max_dopamine_weight_index, max_dopamine_weight_factor, dopamine_weights
 
 

@@ -86,7 +86,19 @@ S0 = W.sum()
 n = joint_adata.n_obs
 
 st_features = joint_adata.var_names[joint_adata.var['type'].eq('ST').to_numpy()]
-x_visium = as_dense(joint_adata[:, st_features].layers['normalized'])
+if USE_NO_PANEL_JOINT_ADATA:
+    # assemble_section() in 3__spatial_meta_modelling.py prefers SCT-transformed h5mu
+    # files when available, so for joint_adata_no_panel.h5ad the 'normalized' layer is
+    # SCT_data-derived (already log-normalized) rather than raw-count-derived. Use
+    # SCT_counts (SCT-corrected, non-negative counts) instead, since KL-NMF expects
+    # non-negative, non-log inputs.
+    # NOTE: the best-performing solution found so far (max bivariate Moran's I ~0.50)
+    # was still the raw-counts + total-counts-normalization feature ('normalized'),
+    # built before SCT was introduced into assemble_section(). SCT_counts is the closest
+    # available substitute now that 'normalized' is SCT-contaminated for this run.
+    x_visium = as_dense(joint_adata[:, st_features].layers['SCT_counts'])
+else:
+    x_visium = as_dense(joint_adata[:, st_features].layers['normalized'])
 x_dopamine = as_dense(joint_adata[:, 'msi:Dopamine'].X).squeeze()
 zy = zscore(x_dopamine)                         # the "lagged" variable
 lag_y = W @ zy                                   # spatial lag of dopamine

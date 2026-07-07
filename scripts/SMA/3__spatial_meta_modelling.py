@@ -374,8 +374,9 @@ class SpatialJEPA_trainer:
 # sample_ids may be a single sample ID (str) for vertical-only integration, or a
 # list of sample IDs that share a prefix (e.g. all "V11T17-102_*") to additionally
 # enable horizontal (multi-section) integration of the same sample/donor.
-#sample_ids = "V11L12-109_B1"
-sample_ids = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]
+
+sample_ids = "V11L12-109_B1"
+#sample_ids = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]
 
 SAMPLE_IDS = [sample_ids] if isinstance(sample_ids, str) else list(sample_ids)
 SECTION_KEY = "section"
@@ -629,6 +630,16 @@ def prepare_hvf_joint_adata(joint_adata, *, target_panel_path=None, variant_labe
 
 # Build a no-panel artifact from the same canonical pre-panel object used for training.
 # This replaces the self-contained rebuild previously kept in 5__NMF_dopamine_spatial_xcorr.py.
+#
+# NOTE on the 'normalized' layer carried into this artifact: when assemble_section()
+# above picks up an *_SCT.h5mu file (SCT preprocessing applied), 'normalized' is built
+# from SCT_data (already log-normalized), not from raw counts + total-count
+# normalization. The best-performing NMF/dopamine bivariate Moran's I run found so far
+# (max ~0.50) used raw-counts + total-counts normalization -> 'normalized', from before
+# SCT was introduced into assemble_section(). That exact feature is no longer
+# reproducible from this SCT-based artifact; 5__NMF_dopamine_spatial_xcorr.py uses
+# 'SCT_counts' (SCT-corrected, non-negative counts) as the closest available substitute
+# for the no-panel KL-NMF analysis.
 joint_adata_no_panel = prepare_hvf_joint_adata(
     joint_adata.copy(),
     target_panel_path=None,

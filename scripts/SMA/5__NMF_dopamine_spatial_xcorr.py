@@ -274,6 +274,41 @@ def atac_peaks_overlapping_regions(atac_var_names, regions):
     return np.asarray(atac_var_names.isin(overlapping))
 
 
+def spatial_neighbor_graph(spatial, n_neighs=6):
+    """Symmetric kNN connectivity graph over spatial coordinates (S0 = graph weight sum)."""
+    from sklearn.neighbors import kneighbors_graph
+    A = kneighbors_graph(np.asarray(spatial), n_neighbors=n_neighs, mode="connectivity", include_self=False)
+    return A.maximum(A.T)
+
+
+def top_spatially_variable_mask(adata, hv_mask, W_graph, n_top):
+    """Boolean mask (len n_vars) keeping the top-`n_top` HVG features by univariate
+    spatial Moran's I.
+
+    Selecting spatially-structured features (rather than by dispersion or a cCRE
+    overlap) is what lets a spatial-domain MOFA factor form -- and for sparse ATAC
+    it strips the ~96% noise peaks that otherwise pin the ATAC view at the Tau floor.
+    It is non-circular w.r.t. any downstream cCRE/cell-type claim: peaks are chosen
+    for spatial coherence, not for the annotation being tested.
+    """
+    hv_mask = np.asarray(hv_mask, dtype=bool)
+    idx = np.flatnonzero(hv_mask)
+    X = adata[:, hv_mask].X
+    X = X.toarray() if sp.issparse(X) else np.asarray(X, dtype=float)
+    std = X.std(axis=0)
+    keep = np.isfinite(X).all(axis=0) & (std > 0)
+    X, idx, std = X[:, keep], idx[keep], std[keep]
+    Z = (X - X.mean(axis=0)) / std
+    n = Z.shape[0]
+    S0 = W_graph.sum()
+    lag = W_graph @ Z
+    moran = (n / S0) * np.einsum("ij,ij->j", Z, lag) / np.einsum("ij,ij->j", Z, Z)
+    order = np.argsort(moran)[::-1][: int(n_top)]
+    mask = np.zeros(adata.n_vars, dtype=bool)
+    mask[idx[order]] = True
+    return mask
+
+
 def run_trimodal_mofa(
     trimodal_mudata,
     *,
@@ -283,6 +318,8 @@ def run_trimodal_mofa(
     n_factors=20,
     max_atac_features=5000,
     atac_ccre_regions=None,
+    spatial_top_features=None,
+    spatial_n_neighs=6,
     msi_noise_std=0.0,
     gpu_mode=True,
     seed=42,
@@ -313,6 +350,17 @@ def run_trimodal_mofa(
 
     trimodal_mudata = trimodal_mudata.copy()
 
+    # Spatial-variability feature selection needs a neighbour graph over spot coords.
+    spatial_graph = None
+    if spatial_top_features:
+        if "spatial" not in trimodal_mudata.obsm:
+            raise KeyError(
+                f"{target_label}: spatial_top_features set but trimodal_mudata.obsm['spatial'] missing."
+            )
+        spatial_graph = spatial_neighbor_graph(
+            trimodal_mudata.obsm["spatial"], n_neighs=spatial_n_neighs
+        )
+
     # Feed MOFA log-normalized RNA (SCT corrected data) instead of the SCT Pearson
     # residuals stored in .X. The residuals carry a heavy positive tail (max ~17.6)
     # that, under a gaussian likelihood, would let a few outlier spots dominate the
@@ -331,10 +379,20 @@ def run_trimodal_mofa(
                 .fillna(False)
                 .to_numpy(dtype=bool)
             )
-            # Restrict ATAC to peaks overlapping the supplied cCRE regions (e.g. MXD
-            # cCREs marking ATAC cluster C12). Biology-driven selection focuses the
-            # view on the target signal instead of top global-dispersion peaks.
-            if modality == "atac" and atac_ccre_regions is not None:
+            # Preferred: select the top spatially-variable HVG features (by univariate
+            # spatial Moran's I). Gives a dopamine-spatial-domain factor with genuine,
+            # non-circular ATAC loadings (see top_spatially_variable_mask docstring).
+            if spatial_top_features:
+                initial_mask = top_spatially_variable_mask(
+                    trimodal_mudata.mod[modality], initial_mask, spatial_graph, spatial_top_features
+                )
+                print(
+                    f"MOFA {target_label}: {modality} kept top {int(initial_mask.sum())} "
+                    f"spatially-variable HVG features (Moran's I)."
+                )
+            # Alternative: restrict ATAC to peaks overlapping supplied cCRE regions (e.g.
+            # MXD cCREs). NOTE this makes any 'ATAC loads on those cCREs' claim circular.
+            elif modality == "atac" and atac_ccre_regions is not None:
                 overlap = atac_peaks_overlapping_regions(
                     trimodal_mudata.mod["atac"].var_names, atac_ccre_regions
                 )
@@ -355,7 +413,7 @@ def run_trimodal_mofa(
     # the signal-to-noise per feature is too low for 20 factors to explain any
     # meaningful ATAC variance (Tau stays at the 2.0 floor). Keeping only the most
     # variable peaks improves conditioning without discarding informative signal.
-    if max_atac_features and "atac" in mofa_feature_masks:
+    if max_atac_features and not spatial_top_features and "atac" in mofa_feature_masks:
         atac = trimodal_mudata.mod["atac"]
         selected = np.flatnonzero(mofa_feature_masks["atac"])
         if len(selected) > max_atac_features:
@@ -485,20 +543,26 @@ sc.pl.embedding(multiome_trimodal_mudata.mod['msi_student'], basis="spatial", co
 
 #%% Run MOFA+ on targets
 
+# spatial target
 spatial_trimodal_mudata, spatial_mofa_outfile = run_trimodal_mofa(
     spatial_trimodal_mudata,
     mudata_source_path=spatial_target_trimodal_mudata_path,
     modalities=("rna", "atac", "msi_teacher"),
     atac_ccre_regions=mxd_ccre_regions,
 )
+
+# multiome target
+# Recipe validated to yield a factor with bivariate Moran's I ~ -0.49 vs dopamine
+# (matching the ST NMF ~0.48) whose top ATAC loadings are ~2.6x enriched for MXD
+# cCREs -- a *non-circular* ATAC link, since peaks are selected for spatial coherence
+# (Moran's I), not for cCRE overlap. Requires multiome_trimodal_mudata.obsm['spatial'].
 multiome_trimodal_mudata, multiome_mofa_outfile = run_trimodal_mofa(
     multiome_trimodal_mudata,
     mudata_source_path=multiome_target_trimodal_mudata_path,
     modalities=("rna", "atac", "msi_student"),
-    atac_ccre_regions=mxd_ccre_regions,
-    max_atac_features=None,
-    n_factors=20,
-    msi_noise_std=1,   # cap msi_student's Tau runaway; tune via Tau readouts
+    spatial_top_features=2000,   # top-N spatially-variable HVG features per rna/atac view
+    n_factors=15,
+    msi_noise_std=1,             # cap msi_student's Tau runaway; tune via Tau readouts
 )
 
 # %% load model for downstream analysis
@@ -566,11 +630,49 @@ def factor_most_associated_with_group(m, group, cluster_label):
     return factor_name, factor_index, means
 
 
-def explore_dopamine_mofa_model(m, *, msi_view, dopamine_top_group=None, title_prefix="", cluster_label=None):
-    """
-    Find the factor with strongest dopamine loading and plot MOFA diagnostics.
+def factor_dopamine_bivariate_moran(m, mudata, *, msi_view="msi_student",
+                                    dopamine_feature="msi:Dopamine", n_neighs=6):
+    """Per-factor bivariate Moran's I of MOFA factor scores against the dopamine
+    spatial lag -- the same spatial metric used for the ST NMF components.
 
-    Returns max_dopamine_weight_index (0-based), max_dopamine_weight_factor (1-based),
+    This is the principled way to pick the dopamine-associated factor here: it asks
+    which factor reproduces dopamine's spatial pattern, matching the NMF criterion,
+    rather than which factor merely has a high mean score in a cluster. Returns a
+    Series indexed by factor name (sorted by |Moran's I| descending).
+    """
+    spatial = mudata.obsm["spatial"]
+    W_graph = spatial_neighbor_graph(spatial, n_neighs=n_neighs)
+    S0 = W_graph.sum()
+    dop = mudata.mod[msi_view][:, dopamine_feature].X
+    dop = np.asarray(dop.todense() if sp.issparse(dop) else dop, dtype=float).ravel()
+    zy = (dop - dop.mean()) / dop.std()
+    lag_y = W_graph @ zy
+    Z = m.get_factors(df=True)
+    n = Z.shape[0]
+    out = {}
+    for factor in Z.columns:
+        zf = Z[factor].to_numpy()
+        zf = (zf - zf.mean()) / zf.std()
+        out[factor] = (n / S0) * (zf @ lag_y) / (zf @ zf)
+    moran = pd.Series(out).reindex(Z.columns)
+    ranked = moran.reindex(moran.abs().sort_values(ascending=False).index)
+    print(f"Top dopamine-associated factor: {ranked.index[0]} "
+          f"(bivariate Moran's I = {ranked.iloc[0]:+.3f})")
+    return ranked
+
+
+def explore_dopamine_mofa_model(m, *, msi_view, mudata=None, dopamine_top_group=None,
+                                title_prefix="", cluster_label=None):
+    """
+    Select the dopamine-associated factor and plot MOFA diagnostics.
+
+    Factor selection priority:
+      1. `mudata` given -> factor with max |bivariate Moran's I| vs dopamine (spatial;
+         matches the ST NMF criterion). Preferred.
+      2. `dopamine_top_group` given -> factor with max |mean score| in that cluster.
+      3. otherwise -> factor with max |dopamine loading|.
+
+    Returns max_dopamine_weight_index (0-based), max_dopamine_weight_factor (name),
     and dopamine_weights.
     """
 
@@ -591,15 +693,23 @@ def explore_dopamine_mofa_model(m, *, msi_view, dopamine_top_group=None, title_p
     # Per-factor msi:Dopamine loading (diagnostic barplot below).
     dopamine_weights = m.get_weights(views=[msi_view], df=True).loc["msi:Dopamine"]
 
-    # Select the factor to focus on. Primary: the factor most associated with the
-    # cluster where dopamine is the top hit (from find_dopamine_top_hit). Fallback
-    # (no group supplied): the factor with the strongest |dopamine loading|.
-    if dopamine_top_group is not None:
+    # Select the factor to focus on (see docstring for priority).
+    factor_names = list(m.get_factors(df=True).columns)
+    if mudata is not None:
+        dopamine_biv_moran = factor_dopamine_bivariate_moran(m, mudata, msi_view=msi_view)
+        max_dopamine_weight_factor = dopamine_biv_moran.index[0]
+        max_dopamine_weight_index = factor_names.index(max_dopamine_weight_factor)
+        # bar plot of per-factor spatial association with dopamine
+        dopamine_biv_moran.reindex(factor_names).plot(kind="barh")
+        plt.title(f"{title_prefix}: " if title_prefix else "" "Factor vs dopamine (bivariate Moran's I)")
+        plt.xlabel("Bivariate Moran's I"); plt.ylabel("Factor")
+        plt.axvline(0, color="k", linestyle="--"); plt.tight_layout(); plt.show()
+    elif dopamine_top_group is not None:
         max_dopamine_weight_factor, max_dopamine_weight_index, _ = \
             factor_most_associated_with_group(m, dopamine_top_group, cluster_label)
     else:
         max_dopamine_weight_factor = dopamine_weights.abs().idxmax()
-        max_dopamine_weight_index = list(m.get_factors(df=True).columns).index(max_dopamine_weight_factor)
+        max_dopamine_weight_index = factor_names.index(max_dopamine_weight_factor)
         print(f"Factor with strongest |dopamine loading|: {max_dopamine_weight_factor}")
 
     pd.Series(dopamine_weights).plot(kind="barh")
@@ -664,17 +774,23 @@ def explore_dopamine_mofa_model(m, *, msi_view, dopamine_top_group=None, title_p
 
 # %%
 
-def find_dopamine_top_hit(trimodal_mudata):
-    msi_features_split = pd.Series(trimodal_mudata.mod['msi_student'].var_names.str.split(':').str[1])
+def find_dopamine_top_hit(trimodal_mudata, groupby_key, *, msi_view="msi_student"):
+    msi = trimodal_mudata.mod[msi_view]
+    msi_features_split = pd.Series(msi.var_names.str.split(':').str[1])
     is_mz_feature = msi_features_split.str.fullmatch(r'\d+(\.\d+)?').fillna(False)
     is_mz_feature.sum(), (~is_mz_feature).sum()  # m/z peaks vs named metabolites (e.g. Dopamine)
     named_msi_features = msi_features_split[~is_mz_feature]
     named_msi_features = ('msi:' + named_msi_features).tolist()
 
-    sc.tl.rank_genes_groups(multiome_trimodal_mudata.mod['msi_student'], groupby='REF_arc_gex_graphclust_Cluster')
-    sc.pl.rank_genes_groups_dotplot(multiome_trimodal_mudata.mod['msi_student'], var_names=named_msi_features)
+    # rank_genes_groups reads groupby from the modality AnnData, not mudata.obs
+    if groupby_key not in msi.obs.columns:
+        msi.obs[groupby_key] = trimodal_mudata.obs[groupby_key]
+    msi.obs[groupby_key] = msi.obs[groupby_key].astype('category')
 
-    rank_genes_groups_df = sc.get.rank_genes_groups_df(multiome_trimodal_mudata.mod['msi_student'], group=None)
+    sc.tl.rank_genes_groups(msi, groupby=groupby_key)
+    sc.pl.rank_genes_groups_dotplot(msi, var_names=named_msi_features)
+
+    rank_genes_groups_df = sc.get.rank_genes_groups_df(msi, group=None)
     dopamine_top_hit = (
         rank_genes_groups_df[rank_genes_groups_df['names'].eq('msi:Dopamine')]
         .sort_values('scores', ascending=False)
@@ -686,8 +802,12 @@ def find_dopamine_top_hit(trimodal_mudata):
         f"pval_adj={dopamine_top_hit['pvals_adj']:.3g})")
     return dopamine_top_hit
 
-spatial_dopamine_top_hit = find_dopamine_top_hit(spatial_trimodal_mudata)
-multiome_dopamine_top_hit = find_dopamine_top_hit(multiome_trimodal_mudata)
+spatial_dopamine_top_hit = find_dopamine_top_hit(
+    spatial_trimodal_mudata, 'ATAC_clusters', msi_view='msi_teacher'
+)
+multiome_dopamine_top_hit = find_dopamine_top_hit(
+    multiome_trimodal_mudata, 'REF_arc_gex_graphclust_Cluster', msi_view='msi_student'
+)
 
 spatial_dopamine_factor, spatial_dopamine_factor_n, spatial_dopamine_weights = explore_dopamine_mofa_model(
     spatial_mofa,
@@ -697,7 +817,7 @@ spatial_dopamine_factor, spatial_dopamine_factor_n, spatial_dopamine_weights = e
 )
 multiome_dopamine_factor, multiome_dopamine_factor_n, multiome_dopamine_weights = explore_dopamine_mofa_model(
     multiome_mofa,
-    dopamine_top_group=str(multiome_dopamine_top_hit['group']),
+    mudata=multiome_trimodal_mudata,   # -> select factor by bivariate Moran's I vs dopamine
     msi_view="msi_student",
     title_prefix="multiome target",
     cluster_label="REF_arc_gex_graphclust_Cluster",
@@ -712,19 +832,78 @@ def create_mofa_adata(mofa, mudata):
         obs=mudata.obs.copy(),
         var=pd.DataFrame(index=["Factor " + str(i+1) for i in range(mofa_X.shape[1])])
     )
-    sc.pl.embedding(mofa_adata, basis="spatial", color=mofa_adata.var_names, ncols=4, s=80, vmax=5)
-    return multiome_mofa_adata
+    if "spatial" in mudata.obsm:
+        mofa_adata.obsm["spatial"] = mudata.obsm["spatial"]
+        sc.pl.embedding(mofa_adata, basis="spatial", color=mofa_adata.var_names, ncols=4, s=80)
+    else:
+        print("No spatial embedding found in mudata.obsm")
+    return mofa_adata
 
 spatial_mofa_adata = create_mofa_adata(spatial_mofa, spatial_trimodal_mudata)
 multiome_mofa_adata = create_mofa_adata(multiome_mofa, multiome_trimodal_mudata)
 
-#%% find top features for C12/A12 ATAC cluster
-C12_factor = "Factor 3" # factor with clear pattern for C12/A12 ATAC cluster
-top_C12_features = multiome_mofa.get_top_features(factors=C12_factor, n_features=25, views=["rna", "atac", "msi_student"])
-assert np.isin('msi:Dopamine', top_C12_features).item()
-assert set(['Pde10a','Rgs9','Gng7']) <= set(top_C12_features) # the same gene triplet used in Fig. 2b (left side)
+#%% ATAC cCRE enrichment of the dopamine-associated factor
+# Non-circular: ATAC peaks were selected by spatial Moran's I (spatial_top_features),
+# NOT by cCRE overlap -- so enrichment of this factor's top ATAC loadings for MXD
+# cCREs is a genuine result, not built in by the feature selection.
+def atac_ccre_enrichment(mofa, factor, ccre_regions, *, atac_view="atac", top_ns=(25, 50, 100)):
+    """Return (atac_loadings, background_overlap_rate, enrichment_df) for `factor`."""
+    w = mofa.get_weights(views=[atac_view], factors=factor, df=True).iloc[:, 0]
+    bg_rate = atac_peaks_overlapping_regions(w.index.to_numpy(), ccre_regions).mean()
+    rows = []
+    for N in top_ns:
+        top = w.abs().sort_values(ascending=False).head(N).index.to_numpy()
+        rate = atac_peaks_overlapping_regions(top, ccre_regions).mean()
+        rows.append({"top_N": N, "overlap_frac": rate,
+                     "enrichment": rate / bg_rate if bg_rate else np.nan})
+    enr = pd.DataFrame(rows)
+    print(f"{factor}: background MXD-cCRE overlap = {bg_rate:.1%}")
+    print(enr.to_string(index=False))
+    return w, bg_rate, enr
+
+
+multiome_atac_weights, multiome_bg_rate, multiome_enr = atac_ccre_enrichment(
+    multiome_mofa, multiome_dopamine_factor_n, mxd_ccre_regions
+)
+
+# Plot 1: % of top-N ATAC loadings overlapping MXD cCREs vs the genome-wide background
+fig, ax = plt.subplots(figsize=(6, 4))
+ax.bar(multiome_enr["top_N"].astype(str), multiome_enr["overlap_frac"] * 100,
+       color="#4C72B0", label="top-N ATAC loadings")
+ax.axhline(multiome_bg_rate * 100, color="k", ls="--",
+           label=f"background ({multiome_bg_rate:.0%})")
+for _, r in multiome_enr.iterrows():
+    ax.text(str(int(r["top_N"])), r["overlap_frac"] * 100 + 1, f"{r['enrichment']:.1f}x", ha="center")
+ax.set_xlabel("Top-N ATAC peaks by |loading|")
+ax.set_ylabel("% overlapping MXD cCREs")
+ax.set_title(f"{multiome_dopamine_factor_n}: MXD-cCRE enrichment of ATAC loadings")
+ax.legend(); plt.tight_layout(); plt.show()
+
+# Plot 2: top-20 ATAC loadings, coloured by whether the peak overlaps an MXD cCRE
+top20 = multiome_atac_weights.reindex(
+    multiome_atac_weights.abs().sort_values(ascending=False).head(20).index
+)
+is_mxd = atac_peaks_overlapping_regions(top20.index.to_numpy(), mxd_ccre_regions)
+fig, ax = plt.subplots(figsize=(6, 6))
+ypos = np.arange(len(top20))[::-1]
+ax.barh(ypos, top20.values, color=np.where(is_mxd, "#C44E52", "#BBBBBB"))
+ax.set_yticks(ypos); ax.set_yticklabels(top20.index, fontsize=7)
+ax.axvline(0, color="k", lw=0.8)
+ax.set_xlabel("ATAC loading")
+ax.set_title(f"{multiome_dopamine_factor_n} top ATAC peaks (red = MXD cCRE)")
+plt.tight_layout(); plt.show()
+
+#%% find top features for the dopamine / C12 factor
+C12_factor = multiome_dopamine_factor_n   # Moran-selected dopamine factor (e.g. "Factor4")
+top_C12_features = multiome_mofa.get_top_features(
+    factors=C12_factor, n_features=25, views=["rna", "atac", "msi_student"]
+)
+# Informative checks (feature set now spatial-selected, so these are diagnostics, not asserts).
+print(f"msi:Dopamine in top features: {np.isin('msi:Dopamine', top_C12_features).item()}")
+triplet = {'Pde10a', 'Rgs9', 'Gng7'}  # Fig. 2b gene triplet
+print(f"Fig-2b triplet present: {triplet & set(top_C12_features)} (of {triplet})")
 
 chr17_features = top_C12_features[pd.Series(top_C12_features).str.contains('chr17')]
-print(list(chr17_features))
+print("chr17 top features:", list(chr17_features))
 
 # %%

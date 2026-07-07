@@ -8,7 +8,6 @@ for thread_env_var in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREA
 from dotenv import load_dotenv
 load_dotenv(dotenv_path="/home/mcb/users/dmannk/BAKLAVA_base/BAKLAVA/.env", override=True)
 
-import sys
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -32,81 +31,30 @@ MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / RUN_ID
 # The MOFA+ section further down loads its own separate MuData objects from
 # spatial_target_trimodal_mudata_path / multiome_target_trimodal_mudata_path and never
 # references joint_adata, so this toggle cannot affect the MOFA+ results.
-NO_PANEL_REBUILD = True   # <-- flip to False to use the saved joint_adata.h5ad as-is
-
-if not NO_PANEL_REBUILD:
-    joint_adata = sc.read_h5ad(MODEL_DIR / "joint_adata.h5ad")
-else:
-    # Self-contained rebuild: no SCT lookup, no target-panel restriction. Mirrors
-    # 3__spatial_meta_modelling.py's assemble_section + preprocessing, minus the
-    # restrict_st_to_target_panel() call that would otherwise permanently drop
-    # non-panel ST genes before this script ever sees the data.
-    import muon as mu
-    import scipy.sparse as sp
-    sys.path.insert(0, os.path.join(os.environ["BAKLAVA_ROOT"], "scripts", "SMA"))
-    from load_aligned_mudata import load_sample
-    import spatialmeta as smt
-
-    H5MU_EXPORT_DIR = Path(os.environ["BAKLAVA_BASE_DIR"]) / "data" / "vicari_2023" / "h5mu_export"
-
-    def as_dense(X):
-        return X.toarray() if sp.issparse(X) else np.asarray(X)
-
-    joint_mudata = load_sample(RUN_ID, export_dir=H5MU_EXPORT_DIR)
-    mu.pp.intersect_obs(joint_mudata)
-
-    rna = joint_mudata.mod["rna"].copy()
-    msi = joint_mudata.mod["msi"].copy()
-
-    annotations = msi.var["annotation"].astype("string")
-    has_annotation = annotations.notna() & annotations.str.strip().ne("")
-    feature_ids = (
-        msi.var["feature_id"].astype("string")
-        if "feature_id" in msi.var.columns
-        else msi.var.index.astype("string")
+USE_NO_PANEL_JOINT_ADATA = True   # <-- flip to False to use panel-restricted joint_adata.h5ad
+joint_adata_path = MODEL_DIR / (
+    "joint_adata_no_panel.h5ad" if USE_NO_PANEL_JOINT_ADATA else "joint_adata.h5ad"
+)
+if not joint_adata_path.exists():
+    if USE_NO_PANEL_JOINT_ADATA:
+        raise FileNotFoundError(
+            f"Missing {joint_adata_path}. Run 3__spatial_meta_modelling.py for RUN_ID={RUN_ID!r} "
+            "to create joint_adata_no_panel.h5ad, or set USE_NO_PANEL_JOINT_ADATA=False "
+            "to use the panel-restricted joint_adata.h5ad."
+        )
+    raise FileNotFoundError(
+        f"Missing {joint_adata_path}. Run 3__spatial_meta_modelling.py for RUN_ID={RUN_ID!r} "
+        "to create the panel-restricted joint_adata.h5ad."
     )
-    msi.var_names = ["msi:" + str(v) for v in annotations.where(has_annotation, feature_ids)]
-    rna.var_names = ["rna:" + str(v) for v in rna.var_names]
-    msi = msi[:, ~msi.var_names.duplicated()]
 
-    adata = sc.concat({"ST": rna, "SM": msi}, axis=1, join="inner", label="type", merge="same")
-    adata.obsm["spatial"] = rna.obsm["spatial"]
-    adata.uns["spatial"] = {RUN_ID: rna.uns["spatial"][RUN_ID]} \
-        if RUN_ID in rna.uns["spatial"] else {RUN_ID: next(iter(rna.uns["spatial"].values()))}
-    adata.var = adata.var.merge(msi.var[["annotation"]], left_on="feature_id", right_index=True, how="left")
-    adata.obs[SECTION_KEY] = RUN_ID
+joint_adata = sc.read_h5ad(joint_adata_path)
+print(
+    f"[INFO] loaded {joint_adata_path.name}: {joint_adata.n_obs} spots, "
+    f"{joint_adata.n_vars} features ({joint_adata.var['type'].eq('ST').sum()} ST)"
+)
 
-    joint_adata = smt.util._classes.AnnDataJointSMST(adata)
-    joint_adata = smt.pp.removeHsp_mt_Rpl_Dnaj(joint_adata)
-    joint_adata.layers["counts"] = joint_adata.X.copy()
-
-    smt.pp.normalize_total_joint_adata_sm_st(joint_adata, target_sum_SM=1e4, target_sum_ST=1e4)
-    joint_adata.layers["normalized"] = joint_adata.X.copy()
-    joint_adata.raw = joint_adata
-
-    # no restrict_st_to_target_panel() call
-
-    smt.pp.spatial_variable_joint_adata_sm_st(
-        joint_adata, n_top_genes=2000, n_top_metabolites=800,
-        add_key="highly_variable_moranI", batch_key=None, min_frac=0.8, min_logfc=25,
-    )
-    joint_adata = joint_adata[:, joint_adata.var.highly_variable_moranI]
-
-    st_mask0 = joint_adata.var["type"].eq("ST").to_numpy()
-    st_lib = np.asarray(as_dense(joint_adata[:, st_mask0].X).sum(1)).ravel()
-    joint_adata = joint_adata[st_lib > 0].copy()
-
-    joint_adata.X = joint_adata.layers["counts"]
-    smt.pp.normalize_total_joint_adata_sm_st(joint_adata, target_sum_SM=1e3, target_sum_ST=None)
-
-    sm_mask = joint_adata.var["type"].eq("SM").to_numpy()
-    joint_adata.X[:, sm_mask] = np.log1p(joint_adata.X[:, sm_mask])
-    sm = joint_adata[:, sm_mask].copy()
-    sc.pp.scale(sm, zero_center=False, max_value=10)
-    joint_adata.X[:, sm_mask] = sm.X
-
-    print(f"[no-panel rebuild] {joint_adata.n_obs} spots, {joint_adata.n_vars} features "
-          f"({joint_adata.var['type'].eq('ST').sum()} ST)")
+def as_dense(X):
+    return X.toarray() if hasattr(X, "toarray") else np.asarray(X)
 
 #%% Run NMF on spatial Visium data
 
@@ -138,8 +86,8 @@ S0 = W.sum()
 n = joint_adata.n_obs
 
 st_features = joint_adata.var_names[joint_adata.var['type'].eq('ST').to_numpy()]
-x_visium = joint_adata[:,st_features].layers['normalized'].toarray()
-x_dopamine = joint_adata[:, 'msi:Dopamine'].X.toarray().squeeze()
+x_visium = as_dense(joint_adata[:, st_features].layers['normalized'])
+x_dopamine = as_dense(joint_adata[:, 'msi:Dopamine'].X).squeeze()
 zy = zscore(x_dopamine)                         # the "lagged" variable
 lag_y = W @ zy                                   # spatial lag of dopamine
 

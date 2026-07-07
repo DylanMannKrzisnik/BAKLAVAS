@@ -395,6 +395,9 @@ sample_metadata = metadata.loc[metadata["Sample.ID"].isin(SAMPLE_IDS)]
 print(sample_metadata.loc[~sample_metadata['Data.Type'].eq('RNA'), ['Sample.ID', 'sample', 'Matrix', 'Data.Type']].set_index('Sample.ID'))
 
 H5MU_EXPORT_DIR = Path(os.path.join(os.getenv("BAKLAVA_BASE_DIR"), "data", "vicari_2023", "h5mu_export"))
+OUTPUT_DIR = Path(os.getenv("OUTPATH"))
+MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / RUN_ID
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def assemble_section(sample_id):
@@ -555,60 +558,93 @@ elif species == "mouse":
 else:
     TARGET_PANEL_PATH = None
 
-joint_adata.uns["target_gene_panel_source"] = (
-    TARGET_PANEL_PATH.name if TARGET_PANEL_PATH else "nan"
-)
-if TARGET_PANEL_PATH:
-    joint_adata, panel_diag = restrict_st_to_target_panel(
-        joint_adata,
-        load_target_panel(TARGET_PANEL_PATH),
-        n_target_top=N_TARGET_TOP,
+def prepare_hvf_joint_adata(joint_adata, *, target_panel_path=None, variant_label="panel"):
+    """Apply optional panel restriction, Moran HVF selection, and final model scaling."""
+    joint_adata.uns["preprocessing_variant"] = variant_label
+    joint_adata.uns["target_gene_panel_source"] = (
+        target_panel_path.name if target_panel_path else "nan"
     )
-    print(f"[panel] restricted ST to target panel: {panel_diag}")
+    joint_adata.uns["target_gene_panel_applied"] = bool(target_panel_path)
 
-# When integrating multiple sections, the batch_key branch also removes features whose abundance differs strongly *between* sections (assumed technical batch effects). That
-# filter cannot tell a batch effect from genuine cross-section biology: e.g. Dopamine
-# (and anything co-depleted with it) varies across sections by lesion extent (log2FC ~= 19.7 between A1 and C1) and gets dropped at the default min_logfc=3. Use a very lenient threshold so only the most extreme present/absent artifacts (log2FC > 25) are removed, retaining the dopamine-correlated biological axis.
-smt.pp.spatial_variable_joint_adata_sm_st(joint_adata,
-                                         n_top_genes = 2000,
-                                         n_top_metabolites = 800,
-                                         add_key = "highly_variable_moranI",
-                                         batch_key = SECTION_KEY if MULTI else None,
-                                         min_frac = 0.8,
-                                         min_logfc = 25)
+    if target_panel_path:
+        joint_adata, panel_diag = restrict_st_to_target_panel(
+            joint_adata,
+            load_target_panel(target_panel_path),
+            n_target_top=N_TARGET_TOP,
+        )
+        print(f"[{variant_label}] restricted ST to target panel: {panel_diag}")
+    else:
+        print(f"[{variant_label}] keeping all ST genes before Moran's-I selection")
 
-joint_adata = joint_adata[:,joint_adata.var.highly_variable_moranI]
+    # When integrating multiple sections, the batch_key branch also removes features whose abundance differs strongly *between* sections (assumed technical batch effects). That
+    # filter cannot tell a batch effect from genuine cross-section biology: e.g. Dopamine
+    # (and anything co-depleted with it) varies across sections by lesion extent (log2FC ~= 19.7 between A1 and C1) and gets dropped at the default min_logfc=3. Use a very lenient threshold so only the most extreme present/absent artifacts (log2FC > 25) are removed, retaining the dopamine-correlated biological axis.
+    smt.pp.spatial_variable_joint_adata_sm_st(
+        joint_adata,
+        n_top_genes=2000,
+        n_top_metabolites=800,
+        add_key="highly_variable_moranI",
+        batch_key=SECTION_KEY if MULTI else None,
+        min_frac=0.8,
+        min_logfc=25,
+    )
 
-# Drop spots with zero RNA library over the retained features. The ZINB ST decoder scales px_rna_scale by lib_size = X_ST.sum(1); a zero-library spot forces logits = log(mu/theta) = log(0) = -inf -> NaN loss on the first forward (independent of learning rate). C1 is the only human sample with none of these.
-st_mask = joint_adata.var["type"].eq("ST").to_numpy()
-st_lib = np.asarray(joint_adata[:, st_mask].X.sum(1)).ravel()
-n_empty_rna = int((st_lib == 0).sum())
-if n_empty_rna:
-    print(f"Dropping {n_empty_rna} spots with zero RNA library over HVF genes")
-    joint_adata = joint_adata[st_lib > 0].copy()
+    joint_adata = joint_adata[:, joint_adata.var.highly_variable_moranI].copy()
 
-#%%
+    # Drop spots with zero RNA library over the retained features. The ZINB ST decoder scales px_rna_scale by lib_size = X_ST.sum(1); a zero-library spot forces logits = log(mu/theta) = log(0) = -inf -> NaN loss on the first forward (independent of learning rate). C1 is the only human sample with none of these.
+    st_mask = joint_adata.var["type"].eq("ST").to_numpy()
+    st_lib = np.asarray(joint_adata[:, st_mask].X.sum(1)).ravel()
+    n_empty_rna = int((st_lib == 0).sum())
+    if n_empty_rna:
+        print(f"[{variant_label}] dropping {n_empty_rna} spots with zero RNA library over HVF genes")
+        joint_adata = joint_adata[st_lib > 0].copy()
 
-#joint_adata = sc.read_h5ad(JOINT_HVF_PATH)
-if "SCT_counts" in joint_adata.layers:
-    # SCT corrected counts for ST; raw MSI counts in SM columns
-    joint_adata.X = joint_adata.layers["SCT_counts"]
-else:
-    joint_adata.X = joint_adata.layers["counts"]
+    #joint_adata = sc.read_h5ad(JOINT_HVF_PATH)
+    if "SCT_counts" in joint_adata.layers:
+        # SCT corrected counts for ST; raw MSI counts in SM columns
+        joint_adata.X = joint_adata.layers["SCT_counts"]
+    else:
+        joint_adata.X = joint_adata.layers["counts"]
 
-smt.pp.normalize_total_joint_adata_sm_st( # again, now on the spatially variable features
-    joint_adata,
-    target_sum_SM=1e3,
-    target_sum_ST=None,  # ZINB decoder uses lib_size = X_ST.sum(1) internally
+    smt.pp.normalize_total_joint_adata_sm_st( # again, now on the spatially variable features
+        joint_adata,
+        target_sum_SM=1e3,
+        target_sum_ST=None,  # ZINB decoder uses lib_size = X_ST.sum(1) internally
+    )
+
+    sm_mask = joint_adata.var["type"].eq("SM").to_numpy()
+    joint_adata.X[:, sm_mask] = np.log1p(joint_adata.X[:, sm_mask])
+
+    # Optional: preserves zeros, unlike zero_center=True
+    sm = joint_adata[:, sm_mask].copy()
+    sc.pp.scale(sm, zero_center=False, max_value=10)
+    joint_adata.X[:, sm_mask] = sm.X
+
+    print(
+        f"[{variant_label}] {joint_adata.n_obs} spots, {joint_adata.n_vars} features "
+        f"({joint_adata.var['type'].eq('ST').sum()} ST)"
+    )
+    return joint_adata
+
+
+# Build a no-panel artifact from the same canonical pre-panel object used for training.
+# This replaces the self-contained rebuild previously kept in 5__NMF_dopamine_spatial_xcorr.py.
+joint_adata_no_panel = prepare_hvf_joint_adata(
+    joint_adata.copy(),
+    target_panel_path=None,
+    variant_label="no-panel",
 )
+joint_adata_no_panel_path = MODEL_DIR / "joint_adata_no_panel.h5ad"
+joint_adata_no_panel.write_h5ad(joint_adata_no_panel_path)
+print(f"[INFO] Saved no-panel joint_adata to {joint_adata_no_panel_path.resolve()}")
+del joint_adata_no_panel
 
-sm_mask = joint_adata.var["type"].eq("SM").to_numpy()
-joint_adata.X[:, sm_mask] = np.log1p(joint_adata.X[:, sm_mask])
-
-# Optional: preserves zeros, unlike zero_center=True
-sm = joint_adata[:, sm_mask].copy()
-sc.pp.scale(sm, zero_center=False, max_value=10)
-joint_adata.X[:, sm_mask] = sm.X
+# Continue the modelling path with the target-panel restriction in place.
+joint_adata = prepare_hvf_joint_adata(
+    joint_adata,
+    target_panel_path=TARGET_PANEL_PATH,
+    variant_label="panel" if TARGET_PANEL_PATH else "standard",
+)
 
 #%% differential expression/abundance analysis, comparing intact vs lesioned striatum
 if species == "human":

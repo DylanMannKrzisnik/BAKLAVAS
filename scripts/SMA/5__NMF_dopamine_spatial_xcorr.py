@@ -237,6 +237,25 @@ def mofa_outfile_from_mudata_path(trimodal_mudata_path):
     return str(path.with_name(path.stem.replace("_rna_atac_msi", "_mofa_model") + ".hdf5"))
 
 
+def close_h5py_handles_for_path(path):
+    """Close lingering read/write h5py.File handles on `path`.
+
+    mofapy2 and mofax often leave HDF5 files open after training or loading.
+    Re-running MOFA then fails at save with:
+    OSError: unable to truncate a file which is already open
+    """
+    import gc
+    import h5py
+
+    path = str(path)
+    for obj in gc.get_objects():
+        try:
+            if isinstance(obj, h5py.File) and obj.id.valid and obj.filename == path:
+                obj.close()
+        except Exception:
+            pass
+
+
 def peaks_to_bed_df(names):
     """Parse 'chrN:start-end' peak/region names into a BED-style DataFrame.
 
@@ -485,6 +504,9 @@ def run_trimodal_mofa(
                 f"(std={msi_noise_std} x per-feature std) to cap Tau runaway."
             )
 
+    # mofapy2/mofax may still hold this path open from a prior run in the same kernel.
+    close_h5py_handles_for_path(mofa_outfile)
+
     with threadpool_limits(limits=1):
         mu.tl.mofa(
             mofa_mudata,
@@ -528,6 +550,9 @@ cCREs_table = pd.read_csv(
 mxd_cCREs = cCREs_table[cCREs_table['CellType'].eq('MXD')]
 mxd_ccre_regions = mxd_cCREs['cCRE_region']   # 'chrN:start-end'; overlapped (not string-matched) with ATAC peaks
 
+d2msn_cCREs = cCREs_table[cCREs_table['CellType'].str.contains('D2MSN')]
+d2msn_ccre_regions = d2msn_cCREs['cCRE_region']
+
 #%% Load trimodal targets
 
 spatial_trimodal_mudata = mu.read_h5mu(spatial_target_trimodal_mudata_path)
@@ -548,7 +573,6 @@ spatial_trimodal_mudata, spatial_mofa_outfile = run_trimodal_mofa(
     spatial_trimodal_mudata,
     mudata_source_path=spatial_target_trimodal_mudata_path,
     modalities=("rna", "atac", "msi_teacher"),
-    atac_ccre_regions=mxd_ccre_regions,
 )
 
 # multiome target
@@ -562,15 +586,14 @@ multiome_trimodal_mudata, multiome_mofa_outfile = run_trimodal_mofa(
     modalities=("rna", "atac", "msi_student"),
     spatial_top_features=2000,   # top-N spatially-variable HVG features per rna/atac view
     n_factors=15,
-    msi_noise_std=1,             # cap msi_student's Tau runaway; tune via Tau readouts
+    msi_noise_std=0.5,             # cap msi_student's Tau runaway; tune via Tau readouts
 )
 
 # %% load model for downstream analysis
 # mofax crashes if any view's features_metadata group is empty (pd.concat on []).
 # Patch: write feature names as a placeholder dataset for views missing metadata.
-import gc, h5py, mofax as mfx
+import h5py, mofax as mfx
 
-# mofapy2 leaves a read-only h5py handle open on the output file after training; close it first
 def patch_mofa_h5py_features_metadata(mofa_outfile):
     """
     Ensure each MOFA+ view has minimal feature metadata for mofax.
@@ -578,13 +601,7 @@ def patch_mofa_h5py_features_metadata(mofa_outfile):
     Some mofapy2 runs omit features_metadata entirely, while others create empty
     per-view groups. mofax can stumble on either form when building metadata.
     """
-    mofa_outfile = str(mofa_outfile)
-    for obj in gc.get_objects():
-        try:
-            if isinstance(obj, h5py.File) and obj.id.valid and obj.filename == mofa_outfile:
-                obj.close()
-        except Exception:
-            pass
+    close_h5py_handles_for_path(mofa_outfile)
 
     with h5py.File(mofa_outfile, "a") as f:
         features_metadata = f.require_group("features_metadata")
@@ -862,36 +879,88 @@ def atac_ccre_enrichment(mofa, factor, ccre_regions, *, atac_view="atac", top_ns
     return w, bg_rate, enr
 
 
-multiome_atac_weights, multiome_bg_rate, multiome_enr = atac_ccre_enrichment(
+mxd_multiome_atac_weights, mxd_multiome_bg_rate, mxd_multiome_enr = atac_ccre_enrichment(
     multiome_mofa, multiome_dopamine_factor_n, mxd_ccre_regions
 )
 
-# Plot 1: % of top-N ATAC loadings overlapping MXD cCREs vs the genome-wide background
-fig, ax = plt.subplots(figsize=(6, 4))
-ax.bar(multiome_enr["top_N"].astype(str), multiome_enr["overlap_frac"] * 100,
-       color="#4C72B0", label="top-N ATAC loadings")
-ax.axhline(multiome_bg_rate * 100, color="k", ls="--",
-           label=f"background ({multiome_bg_rate:.0%})")
-for _, r in multiome_enr.iterrows():
-    ax.text(str(int(r["top_N"])), r["overlap_frac"] * 100 + 1, f"{r['enrichment']:.1f}x", ha="center")
-ax.set_xlabel("Top-N ATAC peaks by |loading|")
-ax.set_ylabel("% overlapping MXD cCREs")
-ax.set_title(f"{multiome_dopamine_factor_n}: MXD-cCRE enrichment of ATAC loadings")
-ax.legend(); plt.tight_layout(); plt.show()
-
-# Plot 2: top-20 ATAC loadings, coloured by whether the peak overlaps an MXD cCRE
-top20 = multiome_atac_weights.reindex(
-    multiome_atac_weights.abs().sort_values(ascending=False).head(20).index
+d2msn_multiome_atac_weights, d2msn_multiome_bg_rate, d2msn_multiome_enr = atac_ccre_enrichment(
+    multiome_mofa, multiome_dopamine_factor_n, d2msn_ccre_regions
 )
-is_mxd = atac_peaks_overlapping_regions(top20.index.to_numpy(), mxd_ccre_regions)
-fig, ax = plt.subplots(figsize=(6, 6))
-ypos = np.arange(len(top20))[::-1]
-ax.barh(ypos, top20.values, color=np.where(is_mxd, "#C44E52", "#BBBBBB"))
-ax.set_yticks(ypos); ax.set_yticklabels(top20.index, fontsize=7)
-ax.axvline(0, color="k", lw=0.8)
-ax.set_xlabel("ATAC loading")
-ax.set_title(f"{multiome_dopamine_factor_n} top ATAC peaks (red = MXD cCRE)")
-plt.tight_layout(); plt.show()
+
+def plot_multiome_atac_enrichment(
+    multiome_enr,
+    multiome_bg_rate,
+    multiome_dopamine_factor_n,
+    multiome_atac_weights,
+    mxd_ccre_regions,
+    atac_peaks_overlapping_regions_func=atac_peaks_overlapping_regions
+):
+    """
+    Plot ATAC cCRE enrichment bar and top-20 peaks for dopamine-associated MOFA factor.
+    - multiome_enr: DataFrame with 'top_N', 'overlap_frac', 'enrichment'
+    - multiome_bg_rate: float, background overlap rate
+    - multiome_dopamine_factor_n: str, factor ID (e.g., "Factor4")
+    - multiome_atac_weights: pd.Series of ATAC loadings
+    - mxd_ccre_regions: MXD cCRE region list/array
+    - atac_peaks_overlapping_regions_func: function for overlap detection (defaults to local)
+    """
+    # Plot 1: % of top-N ATAC loadings overlapping MXD cCREs vs the genome-wide background
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(
+        multiome_enr["top_N"].astype(str),
+        multiome_enr["overlap_frac"] * 100,
+        color="#4C72B0",
+        label="top-N ATAC loadings"
+    )
+    ax.axhline(
+        multiome_bg_rate * 100, color="k", ls="--",
+        label=f"background ({multiome_bg_rate:.0%})"
+    )
+    for _, r in multiome_enr.iterrows():
+        ax.text(
+            str(int(r["top_N"])),
+            r["overlap_frac"] * 100 + 1,
+            f"{r['enrichment']:.1f}x",
+            ha="center"
+        )
+    ax.set_xlabel("Top-N ATAC peaks by |loading|")
+    ax.set_ylabel("% overlapping MXD cCREs")
+    ax.set_title(f"{multiome_dopamine_factor_n}: MXD-cCRE enrichment of ATAC loadings")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Plot 2: top-20 ATAC loadings, coloured by whether the peak overlaps an MXD cCRE
+    top20 = multiome_atac_weights.reindex(
+        multiome_atac_weights.abs().sort_values(ascending=False).head(20).index
+    )
+    is_mxd = atac_peaks_overlapping_regions_func(top20.index.to_numpy(), mxd_ccre_regions)
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ypos = np.arange(len(top20))[::-1]
+    ax.barh(ypos, top20.values, color=np.where(is_mxd, "#C44E52", "#BBBBBB"))
+    ax.set_yticks(ypos)
+    ax.set_yticklabels(top20.index, fontsize=7)
+    ax.axvline(0, color="k", lw=0.8)
+    ax.set_xlabel("ATAC loading")
+    ax.set_title(f"{multiome_dopamine_factor_n} top ATAC peaks (red = MXD cCRE)")
+    plt.tight_layout()
+    plt.show()
+
+plot_multiome_atac_enrichment(
+    mxd_multiome_enr,
+    mxd_multiome_bg_rate,
+    multiome_dopamine_factor_n,
+    mxd_multiome_atac_weights,
+    mxd_ccre_regions
+)
+
+plot_multiome_atac_enrichment(
+    d2msn_multiome_enr,
+    d2msn_multiome_bg_rate,
+    multiome_dopamine_factor_n,
+    d2msn_multiome_atac_weights,
+    d2msn_ccre_regions
+)
 
 #%% find top features for the dopamine / C12 factor
 C12_factor = multiome_dopamine_factor_n   # Moran-selected dopamine factor (e.g. "Factor4")

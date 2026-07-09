@@ -26,6 +26,7 @@ SECTION_KEY = "section"         # obs column written by script 3
 
 OUTPUT_DIR = Path(os.getenv("OUTPATH"))
 MODEL_DIR = OUTPUT_DIR / "spatialjepa_models" / RUN_ID
+PROJECTION_DIR = OUTPUT_DIR / "spatialjepa_projection" / RUN_ID
 
 # NOTE: joint_adata here is scoped to the NMF/bivariate-Moran's-I analysis below only.
 # The MOFA+ section further down loads its own separate MuData objects from
@@ -104,6 +105,8 @@ zy = zscore(x_dopamine)                         # the "lagged" variable
 lag_y = W @ zy                                   # spatial lag of dopamine
 
 # Poisson NMF with KL loss
+from joblib import dump, load
+
 nmf_kwargs = dict(
     init='nndsvda',
     solver='mu',
@@ -113,13 +116,147 @@ nmf_kwargs = dict(
     random_state=0,
 )
 
-sweep_n_components = np.arange(1, 30)
-max_bivariate_moran_Is = []
-for n_components in tqdm(sweep_n_components):
+RESUME_NMF_IF_AVAILABLE = True
+NMF_CACHE_STEM = (
+    "nmf_dopamine_spatial_xcorr"
+    + ("_no_panel" if USE_NO_PANEL_JOINT_ADATA else "_panel")
+)
 
-    nmf_adata, _ = fit_nmf_spatial(x_visium, n_components, joint_adata.obsm["spatial"], **nmf_kwargs)
+
+def nmf_cache_paths(model_dir=PROJECTION_DIR, cache_stem=NMF_CACHE_STEM):
+    """Paths for the trained NMF model, factor AnnData, and sweep metrics."""
+    model_dir = Path(model_dir)
+    return {
+        "model": model_dir / f"{cache_stem}_model.joblib",
+        "adata": model_dir / f"{cache_stem}_factors.h5ad",
+        "metrics": model_dir / f"{cache_stem}_metrics.npz",
+    }
+
+
+def save_trained_nmf_for_downstream(
+    nmf,
+    nmf_adata,
+    *,
+    sweep_n_components,
+    max_bivariate_moran_Is,
+    bivariate_moran_I,
+    cache_paths=None,
+):
+    """Persist fitted NMF outputs needed to resume the downstream plots."""
+    if cache_paths is None:
+        cache_paths = nmf_cache_paths()
+    for path in cache_paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    dump(nmf, cache_paths["model"])
+    nmf_adata.write_h5ad(cache_paths["adata"])
+    np.savez(
+        cache_paths["metrics"],
+        sweep_n_components=np.asarray(sweep_n_components),
+        max_bivariate_moran_Is=np.asarray(max_bivariate_moran_Is),
+        bivariate_moran_I=np.asarray(bivariate_moran_I),
+        best_n_components=np.asarray(nmf.components_.shape[0]),
+    )
+    print(f"Saved trained NMF cache to {cache_paths['model'].parent}")
+
+
+def load_trained_nmf_for_downstream(*, st_features, cache_paths=None):
+    """Load fitted NMF outputs and recreate variables used by downstream plots."""
+    if cache_paths is None:
+        cache_paths = nmf_cache_paths()
+    missing = [str(path) for path in cache_paths.values() if not path.exists()]
+    if missing:
+        raise FileNotFoundError("Missing trained NMF cache files:\n" + "\n".join(missing))
+
+    nmf = load(cache_paths["model"])
+    nmf_adata = sc.read_h5ad(cache_paths["adata"])
+    with np.load(cache_paths["metrics"]) as metrics:
+        sweep_n_components = metrics["sweep_n_components"]
+        max_bivariate_moran_Is = metrics["max_bivariate_moran_Is"]
+        bivariate_moran_I = metrics["bivariate_moran_I"]
+        best_n_components = int(metrics["best_n_components"])
+
+    H = nmf.components_
+    nmf_components = list(nmf_adata.var_names)
+    best_bivariate_moran_idx = int(np.argmax(bivariate_moran_I))
+    best_bivariate_moran_component = nmf_components[best_bivariate_moran_idx]
+    best_bivariate_moran_score = bivariate_moran_I[best_bivariate_moran_idx]
+    bivariate_moran_I_df = (
+        pd.DataFrame(bivariate_moran_I, index=nmf_components)
+        .sort_values(0, ascending=True)
+        .rename(columns={0: "bivariate_moran_I"})
+    )
+    best_nmf_component = pd.Series(nmf.components_[best_bivariate_moran_idx], index=st_features)
+    best_nmf_component.index = best_nmf_component.index.str.split(':').str[1]
+    print(f"Loaded trained NMF cache from {cache_paths['model'].parent}")
+    return (
+        nmf_adata,
+        nmf,
+        H,
+        sweep_n_components,
+        max_bivariate_moran_Is,
+        best_n_components,
+        bivariate_moran_I,
+        nmf_components,
+        best_bivariate_moran_idx,
+        best_bivariate_moran_component,
+        best_bivariate_moran_score,
+        bivariate_moran_I_df,
+        best_nmf_component,
+    )
+
+
+sweep_n_components = np.arange(1, 30)
+try:
+    if not RESUME_NMF_IF_AVAILABLE:
+        raise FileNotFoundError("NMF resume disabled.")
+    (
+        nmf_adata,
+        nmf,
+        H,
+        sweep_n_components,
+        max_bivariate_moran_Is,
+        best_n_components,
+        bivariate_moran_I,
+        nmf_components,
+        best_bivariate_moran_idx,
+        best_bivariate_moran_component,
+        best_bivariate_moran_score,
+        bivariate_moran_I_df,
+        best_nmf_component,
+    ) = load_trained_nmf_for_downstream(st_features=st_features)
+except FileNotFoundError as exc:
+    print(f"{exc}\nTraining NMF from scratch.")
+    max_bivariate_moran_Is = []
+    for n_components in tqdm(sweep_n_components):
+        nmf_adata, _ = fit_nmf_spatial(x_visium, n_components, joint_adata.obsm["spatial"], **nmf_kwargs)
+        bivariate_moran_I = bivariate_morans_i(nmf_adata.X, lag_y, n, S0)
+        max_bivariate_moran_Is.append(np.max(bivariate_moran_I))
+
+    best_n_components = sweep_n_components[np.argmax(max_bivariate_moran_Is)]
+    print(f"Best number of NMF components: {best_n_components}")
+
+    nmf_adata, nmf = fit_nmf_spatial(x_visium, best_n_components, joint_adata.obsm["spatial"], **nmf_kwargs)
+    H = nmf.components_
     bivariate_moran_I = bivariate_morans_i(nmf_adata.X, lag_y, n, S0)
-    max_bivariate_moran_Is.append(np.max(bivariate_moran_I))
+    nmf_components = list(nmf_adata.var_names)
+    best_bivariate_moran_idx = int(np.argmax(bivariate_moran_I))
+    best_bivariate_moran_component = nmf_components[best_bivariate_moran_idx]
+    best_bivariate_moran_score = bivariate_moran_I[best_bivariate_moran_idx]
+    bivariate_moran_I_df = (
+        pd.DataFrame(bivariate_moran_I, index=nmf_components)
+        .sort_values(0, ascending=True)
+        .rename(columns={0: "bivariate_moran_I"})
+    )
+    best_nmf_component = pd.Series(nmf.components_[best_bivariate_moran_idx], index=st_features)
+    best_nmf_component.index = best_nmf_component.index.str.split(':').str[1]
+    save_trained_nmf_for_downstream(
+        nmf,
+        nmf_adata,
+        sweep_n_components=sweep_n_components,
+        max_bivariate_moran_Is=max_bivariate_moran_Is,
+        bivariate_moran_I=bivariate_moran_I,
+    )
 
 plt.figure(figsize=(10, 5))
 plt.plot(sweep_n_components, max_bivariate_moran_Is, marker='o')
@@ -127,22 +264,13 @@ plt.xlabel("Number of NMF components")
 plt.ylabel("Max bivariate Moran's I")
 plt.title("Max bivariate Moran's I vs. Number of NMF components")
 
-best_n_components = sweep_n_components[np.argmax(max_bivariate_moran_Is)]
 print(f"Best number of NMF components: {best_n_components}")
 
-nmf_adata, nmf = fit_nmf_spatial(x_visium, best_n_components, joint_adata.obsm["spatial"], **nmf_kwargs)
-H = nmf.components_
-bivariate_moran_I = bivariate_morans_i(nmf_adata.X, lag_y, n, S0)
-
 # Plot NMF components as subfigures in the same Scanpy figure.
-nmf_components = list(nmf_adata.var_names)
 nmf_component_titles = [
     f"{comp} (biv. I = {bivariate_moran_I[k]:.3f})"
     for k, comp in enumerate(nmf_components)
 ]
-best_bivariate_moran_idx = int(np.argmax(bivariate_moran_I))
-best_bivariate_moran_component = nmf_components[best_bivariate_moran_idx]
-best_bivariate_moran_score = bivariate_moran_I[best_bivariate_moran_idx]
 embedding_axes = sc.pl.embedding(
     nmf_adata,
     color=nmf_components,
@@ -161,9 +289,6 @@ embedding_fig.suptitle(
 embedding_fig.tight_layout(rect=[0, 0, 1, 0.97])
 plt.show()
 # %% barplot of bivariate Moran's I
-bivariate_moran_I_df = pd.DataFrame(bivariate_moran_I, index=nmf_components).sort_values(0, ascending=True).rename(columns={0: 'bivariate_moran_I'})
-best_nmf_component = pd.Series(nmf.components_[best_bivariate_moran_idx], index=st_features)
-best_nmf_component.index = best_nmf_component.index.str.split(':').str[1]
 
 bivariate_moran_I_df.plot(kind='barh')
 plt.title('Bivariate Moran\'s I of NMF components against dopamine')
@@ -611,13 +736,75 @@ def patch_mofa_h5py_features_metadata(mofa_outfile):
                 names = f["features"][view][:].astype(str)
                 view_metadata.create_dataset("feature_name", data=names.astype("S"))
 
-## load spatial target MOFA+ model
-patch_mofa_h5py_features_metadata(spatial_mofa_outfile)
-spatial_mofa = mfx.mofa_model(spatial_mofa_outfile)
+def load_trained_mofa_for_downstream(
+    spatial_mudata_path=spatial_target_trimodal_mudata_path,
+    multiome_mudata_path=multiome_target_trimodal_mudata_path,
+    *,
+    multiome_spatial_h5ad_path=None,
+    plot_multiome_spatial_qc=False,
+):
+    """Load saved target MOFA+ models and the MuData objects needed downstream.
 
-## load multiome target MOFA+ model
-patch_mofa_h5py_features_metadata(multiome_mofa_outfile)
-multiome_mofa = mfx.mofa_model(multiome_mofa_outfile)
+    Use this after MOFA+ training has already written the `*_mofa_model.hdf5`
+    files. It recreates the variable set used by the downstream analysis without
+    rerunning `run_trimodal_mofa()`.
+    """
+    spatial_mudata_path = Path(spatial_mudata_path)
+    multiome_mudata_path = Path(multiome_mudata_path)
+    if multiome_spatial_h5ad_path is None:
+        multiome_spatial_h5ad_path = (
+            Path(os.getenv("DATAPATH"))
+            / "aligned_data"
+            / "target_rna_aligned_with_latents.h5ad"
+        )
+
+    spatial_trimodal_mudata = mu.read_h5mu(spatial_mudata_path)
+    multiome_trimodal_mudata = mu.read_h5mu(multiome_mudata_path)
+
+    multiome_target_rna_with_spatial = sc.read_h5ad(multiome_spatial_h5ad_path, backed="r")
+    assert multiome_trimodal_mudata.obs_names.equals(multiome_target_rna_with_spatial.obs_names)
+    multiome_trimodal_mudata.obsm["spatial"] = multiome_target_rna_with_spatial.obsm["spatial"]
+    multiome_trimodal_mudata.mod["msi_student"].obsm["spatial"] = multiome_trimodal_mudata.obsm["spatial"]
+
+    if plot_multiome_spatial_qc:
+        sc.pl.embedding(
+            multiome_trimodal_mudata.mod["msi_student"],
+            basis="spatial",
+            color=["msi:Dopamine", "REF_arc_gex_graphclust_Cluster"],
+            s=80,
+        )
+
+    spatial_mofa_outfile = mofa_outfile_from_mudata_path(spatial_mudata_path)
+    multiome_mofa_outfile = mofa_outfile_from_mudata_path(multiome_mudata_path)
+    for mofa_outfile in (spatial_mofa_outfile, multiome_mofa_outfile):
+        if not Path(mofa_outfile).exists():
+            raise FileNotFoundError(
+                f"Missing trained MOFA+ model: {mofa_outfile}. "
+                "Run the MOFA+ training cell first, or pass the correct MuData path."
+            )
+        patch_mofa_h5py_features_metadata(mofa_outfile)
+
+    spatial_mofa = mfx.mofa_model(spatial_mofa_outfile)
+    multiome_mofa = mfx.mofa_model(multiome_mofa_outfile)
+
+    return (
+        spatial_trimodal_mudata,
+        multiome_trimodal_mudata,
+        spatial_mofa,
+        multiome_mofa,
+        spatial_mofa_outfile,
+        multiome_mofa_outfile,
+    )
+
+
+(
+    spatial_trimodal_mudata,
+    multiome_trimodal_mudata,
+    spatial_mofa,
+    multiome_mofa,
+    spatial_mofa_outfile,
+    multiome_mofa_outfile,
+) = load_trained_mofa_for_downstream()
 
 #%% explore dopamine MOFA model
 def factor_most_associated_with_group(m, group, cluster_label):

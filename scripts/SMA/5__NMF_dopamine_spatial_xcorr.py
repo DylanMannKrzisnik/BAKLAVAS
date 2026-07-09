@@ -1079,7 +1079,8 @@ def plot_multiome_atac_enrichment(
     multiome_bg_rate,
     multiome_dopamine_factor_n,
     multiome_atac_weights,
-    mxd_ccre_regions,
+    ccre_regions,
+    ccre_label,
     atac_peaks_overlapping_regions_func=atac_peaks_overlapping_regions
 ):
     """
@@ -1088,10 +1089,11 @@ def plot_multiome_atac_enrichment(
     - multiome_bg_rate: float, background overlap rate
     - multiome_dopamine_factor_n: str, factor ID (e.g., "Factor4")
     - multiome_atac_weights: pd.Series of ATAC loadings
-    - mxd_ccre_regions: MXD cCRE region list/array
+    - ccre_regions: cell-type cCRE region list/array
+    - ccre_label: label used in figure titles (e.g., "MXD", "D2MSN")
     - atac_peaks_overlapping_regions_func: function for overlap detection (defaults to local)
     """
-    # Plot 1: % of top-N ATAC loadings overlapping MXD cCREs vs the genome-wide background
+    # Plot 1: % of top-N ATAC loadings overlapping cell-type cCREs vs the genome-wide background
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.bar(
         multiome_enr["top_N"].astype(str),
@@ -1111,25 +1113,25 @@ def plot_multiome_atac_enrichment(
             ha="center"
         )
     ax.set_xlabel("Top-N ATAC peaks by |loading|")
-    ax.set_ylabel("% overlapping MXD cCREs")
-    ax.set_title(f"{multiome_dopamine_factor_n}: MXD-cCRE enrichment of ATAC loadings")
+    ax.set_ylabel(f"% overlapping {ccre_label} cCREs")
+    ax.set_title(f"{multiome_dopamine_factor_n}: {ccre_label}-cCRE enrichment of ATAC loadings")
     ax.legend()
     plt.tight_layout()
     plt.show()
 
-    # Plot 2: top-20 ATAC loadings, coloured by whether the peak overlaps an MXD cCRE
+    # Plot 2: top-20 ATAC loadings, coloured by whether the peak overlaps a cell-type cCRE
     top20 = multiome_atac_weights.reindex(
         multiome_atac_weights.abs().sort_values(ascending=False).head(20).index
     )
-    is_mxd = atac_peaks_overlapping_regions_func(top20.index.to_numpy(), mxd_ccre_regions)
+    is_ccre = atac_peaks_overlapping_regions_func(top20.index.to_numpy(), ccre_regions)
     fig, ax = plt.subplots(figsize=(6, 6))
     ypos = np.arange(len(top20))[::-1]
-    ax.barh(ypos, top20.values, color=np.where(is_mxd, "#C44E52", "#BBBBBB"))
+    ax.barh(ypos, top20.values, color=np.where(is_ccre, "#C44E52", "#BBBBBB"))
     ax.set_yticks(ypos)
     ax.set_yticklabels(top20.index, fontsize=7)
     ax.axvline(0, color="k", lw=0.8)
     ax.set_xlabel("ATAC loading")
-    ax.set_title(f"{multiome_dopamine_factor_n} top ATAC peaks (red = MXD cCRE)")
+    ax.set_title(f"{multiome_dopamine_factor_n} top ATAC peaks (red = {ccre_label} cCRE)")
     plt.tight_layout()
     plt.show()
 
@@ -1138,7 +1140,8 @@ plot_multiome_atac_enrichment(
     mxd_multiome_bg_rate,
     multiome_dopamine_factor_n,
     mxd_multiome_atac_weights,
-    mxd_ccre_regions
+    mxd_ccre_regions,
+    "MXD",
 )
 
 plot_multiome_atac_enrichment(
@@ -1146,7 +1149,8 @@ plot_multiome_atac_enrichment(
     d2msn_multiome_bg_rate,
     multiome_dopamine_factor_n,
     d2msn_multiome_atac_weights,
-    d2msn_ccre_regions
+    d2msn_ccre_regions,
+    "D2MSN",
 )
 
 #%% find top features for the dopamine / C12 factor

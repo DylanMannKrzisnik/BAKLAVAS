@@ -1181,6 +1181,7 @@ def plot_atac_ccre_gsea(
     atac_peaks_overlapping_regions_func=atac_peaks_overlapping_regions,
     permutation_num=1000,
     seed=0,
+    output_file=None,
 ):
     """
     Pre-ranked GSEA of cCRE-overlapping peaks against ATAC loadings for the dopamine factor.
@@ -1217,33 +1218,45 @@ def plot_atac_ccre_gsea(
     print(pre.res2d[["Term", "ES", "NES", "NOM p-val", "FDR q-val"]].to_string(index=False))
 
     term = f"{ccre_label}_cCRE"
-    gp.gseaplot(
+    axes = gp.gseaplot(
         rank_metric=pre.ranking,
         term=term,
         **pre.results[term],
         figsize=(5, 5),
     )
     # gseaplot hard-codes gene-expression labels; relabel for the ATAC-peak context.
-    for ax in plt.gcf().get_axes():
+    for ax in axes:
         if ax.get_xlabel() == "Gene Rank":
             ax.set_xlabel("Peak Rank")
         if ax.get_ylabel() == "Ranked metric":
             ax.set_ylabel("Ranked weight")
-    plt.show()
+    fig = axes[0].figure
+    if output_file is None:
+        plt.show()
+    else:
+        fig.tight_layout()
+        fig.savefig(output_file)
+        plt.close(fig)
     return pre
 
-mxd_multiome_gsea = plot_atac_ccre_gsea(
+# Save GSEA plots to cibb overleaf figures directory
+overleaf_figures_dir = "/home/mcb/users/dmannk/THESIS_base/overleaf-cibb-2026/figures"
+os.makedirs(overleaf_figures_dir, exist_ok=True)
+
+plot_atac_ccre_gsea(
     mxd_multiome_atac_weights,
     mxd_ccre_regions,
     multiome_dopamine_factor_n,
     "MXD",
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_gsea.pdf"),
 )
 
-d2msn_multiome_gsea = plot_atac_ccre_gsea(
+plot_atac_ccre_gsea(
     d2msn_multiome_atac_weights,
     d2msn_ccre_regions,
     multiome_dopamine_factor_n,
     "D2MSN",
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_gsea.pdf"),
 )
 
 

@@ -1166,4 +1166,85 @@ print(f"Fig-2b triplet present: {triplet & set(top_C12_features)} (of {triplet})
 chr17_features = top_C12_features[pd.Series(top_C12_features).str.contains('chr17')]
 print("chr17 top features:", list(chr17_features))
 
+# %% plot cCRE enrichment of the top C12 features
+# GSEA-style running-enrichment curve: rank all ATAC peaks by their signed loading
+# on the dopamine factor and test whether cCRE-overlapping peaks concentrate at the top.
+# This is the pre-ranked GSEA (GSEAPreranked) statement, complementary to the top-N
+# bar plot above -- it uses the full ranking rather than a handful of thresholds.
+import gseapy as gp
+
+def plot_atac_ccre_gsea(
+    multiome_atac_weights,
+    ccre_regions,
+    multiome_dopamine_factor_n,
+    ccre_label,
+    atac_peaks_overlapping_regions_func=atac_peaks_overlapping_regions,
+    permutation_num=1000,
+    seed=0,
+):
+    """
+    Pre-ranked GSEA of cCRE-overlapping peaks against ATAC loadings for the dopamine factor.
+    - multiome_atac_weights: pd.Series of ATAC loadings (index = peak IDs)
+    - ccre_regions: cell-type cCRE region list/array
+    - ccre_label: label used in figure titles (e.g., "MXD", "D2MSN")
+    Returns the gseapy prerank result object.
+    """
+    # Ranked list: peak_id -> signed loading, descending (gseapy re-sorts internally).
+    rnk = (
+        multiome_atac_weights
+        .sort_values(ascending=False)
+        .rename("score")
+        .rename_axis("peak")
+        .reset_index()
+    )
+    # "Gene set" = peaks overlapping this cell type's cCREs.
+    is_ccre = atac_peaks_overlapping_regions_func(
+        multiome_atac_weights.index.to_numpy(), ccre_regions
+    )
+    ccre_peaks = multiome_atac_weights.index[is_ccre].tolist()
+    gene_sets = {f"{ccre_label}_cCRE": ccre_peaks}
+
+    pre = gp.prerank(
+        rnk=rnk,
+        gene_sets=gene_sets,
+        min_size=1,
+        max_size=len(rnk),      # don't drop the set for being "too large"
+        permutation_num=permutation_num,
+        seed=seed,
+        no_plot=True,
+        outdir=None,
+    )
+    print(pre.res2d[["Term", "ES", "NES", "NOM p-val", "FDR q-val"]].to_string(index=False))
+
+    term = f"{ccre_label}_cCRE"
+    gp.gseaplot(
+        rank_metric=pre.ranking,
+        term=term,
+        **pre.results[term],
+        figsize=(5, 5),
+    )
+    # gseaplot hard-codes gene-expression labels; relabel for the ATAC-peak context.
+    for ax in plt.gcf().get_axes():
+        if ax.get_xlabel() == "Gene Rank":
+            ax.set_xlabel("Peak Rank")
+        if ax.get_ylabel() == "Ranked metric":
+            ax.set_ylabel("Ranked weight")
+    plt.show()
+    return pre
+
+mxd_multiome_gsea = plot_atac_ccre_gsea(
+    mxd_multiome_atac_weights,
+    mxd_ccre_regions,
+    multiome_dopamine_factor_n,
+    "MXD",
+)
+
+d2msn_multiome_gsea = plot_atac_ccre_gsea(
+    d2msn_multiome_atac_weights,
+    d2msn_ccre_regions,
+    multiome_dopamine_factor_n,
+    "D2MSN",
+)
+
+
 # %%

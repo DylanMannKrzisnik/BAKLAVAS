@@ -1279,6 +1279,7 @@ import subprocess
 SCENICPLUS_ENV_PYTHON = "/home/mcb/users/dmannk/.conda/envs/scenicplus/bin/python"
 MOTIF_ENRICHMENT_WORKER = Path(__file__).resolve().parent / "run_motif_enrichment.py"
 MOTIF_ENRICHMENT_OUT_DIR = PROJECTION_DIR / "motif_enrichment"
+MM10_FASTA_PATH = Path.home() / ".local/share/genomes/mm10/mm10.fa"
 
 
 def run_tf_motif_enrichment(
@@ -1287,7 +1288,7 @@ def run_tf_motif_enrichment(
     label,
     top_n=100,
     genome_name="mm10",
-    fasta_path=None,
+    fasta_path=MM10_FASTA_PATH if MM10_FASTA_PATH.exists() else None,
     out_dir=MOTIF_ENRICHMENT_OUT_DIR,
 ):
     """Hand off a foreground-vs-background motif enrichment test to `scenicplus`.

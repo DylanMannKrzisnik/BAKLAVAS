@@ -97,7 +97,10 @@ def motif_to_log_odds(motif, bg, pseudocount):
 def build_scanner(matrices, bg, thresholds):
     import MOODS.scan as ms
 
-    window = max(len(matrix[0]) for matrix in matrices)
+    # MOODS lookahead-filter window; must be <= the shortest motif length, not the
+    # longest. Setting it to the longest motif silently rejects nearly every motif
+    # before scanning (only the widest survive), yielding ~no hits. 7 is canonical.
+    window = 7
     scanner = ms.Scanner(window)
     scanner.set_motifs(matrices, bg, thresholds)
     return scanner

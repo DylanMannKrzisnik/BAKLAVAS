@@ -1243,7 +1243,7 @@ def plot_atac_ccre_gsea(
 overleaf_figures_dir = "/home/mcb/users/dmannk/THESIS_base/overleaf-cibb-2026/figures"
 os.makedirs(overleaf_figures_dir, exist_ok=True)
 
-plot_atac_ccre_gsea(
+mxd_multiome_gsea = plot_atac_ccre_gsea(
     mxd_multiome_atac_weights,
     mxd_ccre_regions,
     multiome_dopamine_factor_n,
@@ -1251,13 +1251,42 @@ plot_atac_ccre_gsea(
     output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_gsea.pdf"),
 )
 
-plot_atac_ccre_gsea(
+d2msn_multiome_gsea = plot_atac_ccre_gsea(
     d2msn_multiome_atac_weights,
     d2msn_ccre_regions,
     multiome_dopamine_factor_n,
     "D2MSN",
     output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_gsea.pdf"),
 )
+
+
+def gsea_leading_edge_peaks(pre, ccre_label):
+    """Leading-edge peaks driving the cCRE enrichment for one cell type.
+
+    gseapy's `lead_genes` is the set of query members (here, cell-type cCRE peaks)
+    ranked at or before the running-ES maximum -- i.e. up to the rank where the
+    enrichment curve inflects from rising to falling. Because the query set is the
+    cell-type-specific cCRE peaks, this leading edge is already the intersection of
+    "top-ranked by dopamine loading" and "overlaps this cell type's cCREs", and so
+    differs between MXD and D2MSN.
+    """
+    term = f"{ccre_label}_cCRE"
+    lead = pre.results[term]["lead_genes"]
+    peaks = lead.split(";") if lead else []
+    print(f"{ccre_label}: {len(peaks)} leading-edge cCRE peaks (up to ES-curve inflection)")
+    return peaks
+
+
+def gsea_matched_ccre_peaks(pre, ccre_label):
+    """All of this cell type's cCRE peaks present in the ranking (the leading edge's
+    parent set). Used as the motif-enrichment background so the test contrasts the
+    dopamine-factor-driving cCREs against *other cCREs of the same cell type*, rather
+    than against generic accessible peaks -- controlling for the fact that cCREs carry
+    more TF motifs than average peaks.
+    """
+    term = f"{ccre_label}_cCRE"
+    matched = pre.results[term]["matched_genes"]
+    return matched.split(";") if matched else []
 
 #%% TF motif enrichment hand-off (conda env: scenicplus)
 # This env lacks MOODS/pyjaspar, so the actual PWM scan + Fisher's-exact test
@@ -1268,11 +1297,14 @@ plot_atac_ccre_gsea(
 # large arrays), so no staging/manifest/caching infrastructure is needed -- just
 # write two BEDs, invoke the worker, read back its output TSV.
 #
-# Foreground = top-N ATAC peaks by |loading| on the dopamine-associated MOFA
-# factor (matching plot_multiome_atac_enrichment's top-N bars above);
-# background = every other peak with a non-zero loading. Non-circular for the
-# same reason as the cCRE enrichment: peaks were selected by spatial Moran's I,
-# not by motif content.
+# Foreground = the GSEA leading-edge cCRE peaks for each cell type (the cCRE-
+# overlapping peaks ranked up to the running-ES inflection on the dopamine factor);
+# background = the same cell type's remaining cCRE peaks. Using the cell-type-specific
+# leading edge -- rather than a shared top-N by |loading| -- makes MXD and D2MSN
+# select different foregrounds; contrasting against other cCREs of the same type (not
+# generic peaks) controls for cCREs' higher baseline motif density, so any enrichment
+# reflects the dopamine factor rather than cCRE status. Non-circular for the same
+# reason as the cCRE enrichment: peaks were selected by spatial Moran's I, not motifs.
 import json
 import subprocess
 
@@ -1286,6 +1318,8 @@ def run_tf_motif_enrichment(
     atac_weights,
     *,
     label,
+    foreground_names=None,
+    background_names=None,
     top_n=100,
     genome_name="mm10",
     fasta_path=MM10_FASTA_PATH if MM10_FASTA_PATH.exists() else None,
@@ -1293,15 +1327,26 @@ def run_tf_motif_enrichment(
 ):
     """Hand off a foreground-vs-background motif enrichment test to `scenicplus`.
 
-    foreground = top-N peaks by |loading|; background = all remaining peaks
-    with a non-zero loading (same universe as atac_ccre_enrichment's bg_rate).
-    Returns the enrichment DataFrame (also written to out_dir/{label}_motif_enrichment.tsv).
+    foreground = `foreground_names` if given (e.g. the GSEA leading-edge cCRE peaks,
+    which differ by cell type), else the top-N peaks by |loading|. background =
+    `background_names` if given (e.g. the same cell type's cCRE peaks, so the test
+    contrasts dopamine-driving cCREs against other cCREs of that type), else every
+    remaining peak with a non-zero loading. Either universe has the foreground removed
+    before testing. Returns the enrichment DataFrame (also written to
+    out_dir/{label}_motif_enrichment.tsv).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ranked = atac_weights.abs().sort_values(ascending=False)
-    foreground_names = ranked.head(top_n).index
-    background_names = atac_weights.index.difference(foreground_names)
+    if foreground_names is None:
+        foreground_names = atac_weights.abs().sort_values(ascending=False).head(top_n).index
+    # Restrict foreground/background to peaks present in the loading vector, and always
+    # remove the foreground from the background so the two sets are disjoint.
+    foreground_names = atac_weights.index.intersection(pd.Index(foreground_names))
+    if background_names is None:
+        background_names = atac_weights.index
+    background_names = (
+        atac_weights.index.intersection(pd.Index(background_names)).difference(foreground_names)
+    )
 
     foreground_bed = peaks_to_bed_df(foreground_names)
     background_bed = peaks_to_bed_df(background_names)
@@ -1316,7 +1361,7 @@ def run_tf_motif_enrichment(
         "background_bed": str(background_bed_path),
         "output_tsv": str(output_tsv),
         "genome_name": genome_name,
-        "fasta_path": fasta_path,
+        "fasta_path": str(fasta_path) if fasta_path is not None else None,
     }
     config_path = out_dir / f"{label}_motif_enrichment_config.json"
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -1341,15 +1386,61 @@ def run_tf_motif_enrichment(
     return enr
 
 
-mxd_motif_enrichment = run_tf_motif_enrichment(mxd_multiome_atac_weights, label="mxd")
-d2msn_motif_enrichment = run_tf_motif_enrichment(d2msn_multiome_atac_weights, label="d2msn")
+# Foreground = GSEA leading-edge cCRE peaks (cell-type-specific); background = the rest
+# of the same cell type's cCRE peaks. Both differ by cell type, so MXD and D2MSN yield
+# distinct motif enrichments, and the cCRE-vs-cCRE contrast controls for generic cCRE
+# motif density -- isolating what distinguishes the dopamine-driving cCREs.
+mxd_leading_edge_peaks = gsea_leading_edge_peaks(mxd_multiome_gsea, "MXD")
+d2msn_leading_edge_peaks = gsea_leading_edge_peaks(d2msn_multiome_gsea, "D2MSN")
+mxd_ccre_background_peaks = gsea_matched_ccre_peaks(mxd_multiome_gsea, "MXD")
+d2msn_ccre_background_peaks = gsea_matched_ccre_peaks(d2msn_multiome_gsea, "D2MSN")
+
+mxd_motif_enrichment = run_tf_motif_enrichment(
+    mxd_multiome_atac_weights, label="mxd",
+    foreground_names=mxd_leading_edge_peaks,
+    background_names=mxd_ccre_background_peaks,
+)
+d2msn_motif_enrichment = run_tf_motif_enrichment(
+    d2msn_multiome_atac_weights, label="d2msn",
+    foreground_names=d2msn_leading_edge_peaks,
+    background_names=d2msn_ccre_background_peaks,
+)
 
 def plot_top_motifs(enr, label, n_top=15, output_file=None):
+    from matplotlib.patches import Patch
+
     top = enr.sort_values("padj").head(n_top).iloc[::-1]
+
+    # Three significance tiers, encoded by lightness (darkest = strongest) so the
+    # ordering survives greyscale/colour-blind viewing:
+    #   FDR q < 0.05              -> survives multiple-testing correction
+    #   nominal p < 0.05 (FDR ns) -> suggestive only
+    #   otherwise                 -> not significant
+    TIER_COLORS = {"fdr": "#B2182B", "nominal": "#F4A582", "ns": "#BBBBBB"}
+
+    def tier(row):
+        if row["padj"] < 0.05:
+            return "fdr"
+        if row["pvalue"] < 0.05:
+            return "nominal"
+        return "ns"
+
+    bar_colors = [TIER_COLORS[tier(r)] for _, r in top.iterrows()]
+
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.barh(top["motif_name"], -np.log10(top["padj"].clip(lower=1e-300)))
+    ax.barh(top["motif_name"], -np.log10(top["padj"].clip(lower=1e-300)), color=bar_colors)
+    # FDR q = 0.05 cutoff on the (already -log10 FDR) x-axis; bars past it are FDR-significant.
+    ax.axvline(-np.log10(0.05), color="k", ls="--", lw=0.8, zorder=0)
     ax.set_xlabel("-log10(FDR q-value)")
     ax.set_title(f"{label}: top enriched TF motifs")
+    ax.legend(
+        handles=[
+            Patch(facecolor=TIER_COLORS["fdr"], label="FDR q < 0.05"),
+            Patch(facecolor=TIER_COLORS["nominal"], label="nominal p < 0.05"),
+            Patch(facecolor=TIER_COLORS["ns"], label="n.s."),
+        ],
+        fontsize=8, loc="lower right", frameon=False,
+    )
     plt.tight_layout()
     if output_file is None:
         plt.show()

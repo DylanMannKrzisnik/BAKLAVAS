@@ -1,5 +1,5 @@
 #%% Load data
-# conda env: eclare_env
+# conda env: nichecompass_liana
 
 import os
 for thread_env_var in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS"):
@@ -1257,6 +1257,112 @@ plot_atac_ccre_gsea(
     multiome_dopamine_factor_n,
     "D2MSN",
     output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_gsea.pdf"),
+)
+
+#%% TF motif enrichment hand-off (conda env: scenicplus)
+# This env lacks MOODS/pyjaspar, so the actual PWM scan + Fisher's-exact test
+# runs out-of-process via run_motif_enrichment.py in the `scenicplus` conda env
+# (see that script's docstring for the MOODS+pyjaspar design rationale). Unlike
+# the spatialMETA hand-off in 0__sea_ad_celltype_tangram_minimal.py, this is a
+# one-shot call on an already-small ranked peak list (not a per-donor loop over
+# large arrays), so no staging/manifest/caching infrastructure is needed -- just
+# write two BEDs, invoke the worker, read back its output TSV.
+#
+# Foreground = top-N ATAC peaks by |loading| on the dopamine-associated MOFA
+# factor (matching plot_multiome_atac_enrichment's top-N bars above);
+# background = every other peak with a non-zero loading. Non-circular for the
+# same reason as the cCRE enrichment: peaks were selected by spatial Moran's I,
+# not by motif content.
+import json
+import subprocess
+
+SCENICPLUS_ENV_PYTHON = "/home/mcb/users/dmannk/.conda/envs/scenicplus/bin/python"
+MOTIF_ENRICHMENT_WORKER = Path(__file__).resolve().parent / "run_motif_enrichment.py"
+MOTIF_ENRICHMENT_OUT_DIR = PROJECTION_DIR / "motif_enrichment"
+
+
+def run_tf_motif_enrichment(
+    atac_weights,
+    *,
+    label,
+    top_n=100,
+    genome_name="mm10",
+    fasta_path=None,
+    out_dir=MOTIF_ENRICHMENT_OUT_DIR,
+):
+    """Hand off a foreground-vs-background motif enrichment test to `scenicplus`.
+
+    foreground = top-N peaks by |loading|; background = all remaining peaks
+    with a non-zero loading (same universe as atac_ccre_enrichment's bg_rate).
+    Returns the enrichment DataFrame (also written to out_dir/{label}_motif_enrichment.tsv).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ranked = atac_weights.abs().sort_values(ascending=False)
+    foreground_names = ranked.head(top_n).index
+    background_names = atac_weights.index.difference(foreground_names)
+
+    foreground_bed = peaks_to_bed_df(foreground_names)
+    background_bed = peaks_to_bed_df(background_names)
+    foreground_bed_path = out_dir / f"{label}_foreground.bed"
+    background_bed_path = out_dir / f"{label}_background.bed"
+    foreground_bed.to_csv(foreground_bed_path, sep="\t", header=False, index=False)
+    background_bed.to_csv(background_bed_path, sep="\t", header=False, index=False)
+
+    output_tsv = out_dir / f"{label}_motif_enrichment.tsv"
+    config = {
+        "foreground_bed": str(foreground_bed_path),
+        "background_bed": str(background_bed_path),
+        "output_tsv": str(output_tsv),
+        "genome_name": genome_name,
+        "fasta_path": fasta_path,
+    }
+    config_path = out_dir / f"{label}_motif_enrichment_config.json"
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+    print(f"Handing off motif enrichment for {label!r} to scenicplus env "
+          f"({len(foreground_bed)} fg / {len(background_bed)} bg peaks)...")
+    result = subprocess.run(
+        [SCENICPLUS_ENV_PYTHON, str(MOTIF_ENRICHMENT_WORKER), str(config_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    log_path = out_dir / f"{label}_motif_enrichment.log"
+    log_path.write_text(result.stdout + result.stderr, encoding="utf-8")
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"run_motif_enrichment.py failed for {label!r} (see {log_path})."
+        )
+
+    enr = pd.read_csv(output_tsv, sep="\t")
+    print(f"{label}: top motif hits\n{enr.head(10).to_string(index=False)}")
+    return enr
+
+
+mxd_motif_enrichment = run_tf_motif_enrichment(mxd_multiome_atac_weights, label="mxd")
+d2msn_motif_enrichment = run_tf_motif_enrichment(d2msn_multiome_atac_weights, label="d2msn")
+
+def plot_top_motifs(enr, label, n_top=15, output_file=None):
+    top = enr.sort_values("padj").head(n_top).iloc[::-1]
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.barh(top["motif_name"], -np.log10(top["padj"].clip(lower=1e-300)))
+    ax.set_xlabel("-log10(FDR q-value)")
+    ax.set_title(f"{label}: top enriched TF motifs")
+    plt.tight_layout()
+    if output_file is None:
+        plt.show()
+    else:
+        fig.savefig(output_file)
+        plt.close(fig)
+
+plot_top_motifs(
+    mxd_motif_enrichment, "MXD",
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_motif_enrichment.pdf"),
+)
+plot_top_motifs(
+    d2msn_motif_enrichment, "D2MSN",
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_motif_enrichment.pdf"),
 )
 
 

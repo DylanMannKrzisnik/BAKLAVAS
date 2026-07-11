@@ -1458,4 +1458,237 @@ plot_top_motifs(
 )
 
 
-# %%
+# %% RNA-side regulon enrichment (TRRUST) vs ATAC motif hits
+# Cross-modality check: the ATAC motif enrichment says certain TFs bind the dopamine-
+# driving cCREs. Here we test the complementary RNA statement -- are those TFs' *target
+# genes* (TRRUST regulons) enriched among the dopamine factor's top RNA loadings? -- and
+# report which TFs are hits on BOTH modalities. Default test is ORA (gp.enrichr
+# hypergeometric on the top-N factor genes) -- simple and parallel to the ATAC top-N
+# foreground; pass method="gsea" for a pre-ranked GSEA on the full signed ranking
+# (consistent with the cCRE GSEA above, no gene cutoff).
+#
+# NOTE: library choice is a coverage/evidence-type trade-off.
+#   - Curated/ChIP libraries (TRRUST, ChEA_2022) give *direct-binding* regulons, which
+#     match the ATAC-motif logic best -- but they DON'T cover the D2MSN nuclear-receptor
+#     hits (RXRG/RXRB/NR2F1 largely absent; ChEA_2022 has only RXRA). Good for the MXD
+#     EGR/KLF/SP story.
+#   - Co-expression libraries ("ARCHS4_TFs_Coexp") DO cover all the D2MSN NRs, but are
+#     guilt-by-association rather than direct targets -- a softer cross-check for a
+#     motif-based claim. Use for the D2MSN NR concordance, and label it as such.
+# The parser and GSEA are library-agnostic, so this is a one-line swap; consider running
+# both and reporting the concordance per library.
+REGULON_LIBRARY = "ChEA_2022"
+
+
+def parse_regulon_library(lib, organism=None):
+    """Collapse an Enrichr TF library into {TF_symbol: [uppercase targets]}.
+
+    Works across libraries with different term-naming schemes -- TRRUST
+    ('TF mouse') and ChEA_2022 ('TF <pmid> <assay> <tissue> <Organism>') both put
+    the TF symbol first and the organism last. TF = first token; organism = last
+    token. If `organism` is given, keep only matching terms; otherwise keep all and
+    union each TF's targets across every experiment/organism (maximises coverage).
+    """
+    regulons = {}
+    for term, genes in lib.items():
+        toks = term.split()
+        if not toks:
+            continue
+        tf = toks[0].upper()
+        org = toks[-1].lower() if len(toks) > 1 else None
+        if organism is not None and org != organism.lower():
+            continue
+        regulons.setdefault(tf, set()).update(g.upper() for g in genes)
+    return {tf: sorted(g) for tf, g in regulons.items()}
+
+
+def rna_regulon_enrichment(
+    mofa, factor, *, method="ora", rna_view="rna", organism=None,
+    library=REGULON_LIBRARY, top_n=200, permutation_num=1000, seed=0,
+):
+    """Regulon enrichment of the dopamine factor's RNA genes.
+
+    method="ora" (default): gp.enrichr hypergeometric test on the top-`top_n` genes
+        by |loading|, with the full RNA view as background -- fast, and parallel to
+        the ATAC top-N-peaks foreground.
+    method="gsea": gp.prerank on the full signed ranking (no gene cutoff), consistent
+        with the cCRE GSEA above.
+
+    `organism=None` unions each TF's targets across all experiments/organisms in
+    `library`; pass e.g. "mouse" to restrict. Returns a DataFrame normalised to
+    columns [Term, pval, padj, ...native...], sorted by padj; `Term` = bare TF symbol.
+    """
+    w = mofa.get_weights(views=[rna_view], factors=factor, df=True).iloc[:, 0]
+    # Regulon targets are UPPERCASE; MOFA mouse symbols are title-case -> uppercase to
+    # match. Collapse any post-uppercasing collisions to the strongest-|loading| gene.
+    w.index = w.index.str.upper()
+    w = w.reindex(w.abs().sort_values(ascending=False).index)
+    w = w[~w.index.duplicated(keep="first")]
+
+    regulons = parse_regulon_library(gp.get_library(library), organism)
+    print(f"{library}: {len(regulons)} TF regulons"
+          + (f" ({organism})" if organism else " (all organisms)")
+          + f"; {len(w)} RNA genes; method={method}")
+
+    if method == "ora":
+        top_genes = w.abs().sort_values(ascending=False).head(top_n).index.tolist()
+        enr = gp.enrichr(
+            gene_list=top_genes, gene_sets=regulons,
+            background=w.index.tolist(), outdir=None, no_plot=True,
+        )
+        res = enr.results.rename(columns={"P-value": "pval", "Adjusted P-value": "padj"})
+    elif method == "gsea":
+        rnk = w.sort_values(ascending=False).rename("score").rename_axis("gene").reset_index()
+        pre = gp.prerank(
+            rnk=rnk, gene_sets=regulons, min_size=5, max_size=1500,
+            permutation_num=permutation_num, seed=seed, no_plot=True, outdir=None,
+        )
+        res = pre.res2d.rename(columns={"NOM p-val": "pval", "FDR q-val": "padj"})
+    else:
+        raise ValueError(f"method must be 'ora' or 'gsea', got {method!r}")
+
+    res = res.copy()
+    res["pval"] = res["pval"].astype(float)
+    res["padj"] = res["padj"].astype(float)
+    return res.sort_values("padj").reset_index(drop=True)
+
+
+def motif_hits_to_tf_symbols(enr, *, use="padj", alpha=0.05):
+    """Uppercase TF symbols from significant JASPAR motif rows; splits dimers on '::'."""
+    sig = enr.loc[enr[use] < alpha, "motif_name"]
+    return {part.upper() for name in sig for part in str(name).split("::")}
+
+
+# Default ORA (gp.enrichr); pass method="gsea" for the pre-ranked GSEA variant.
+#regulon_res = rna_regulon_enrichment(multiome_mofa, multiome_dopamine_factor_n, top_n=200)
+regulon_res = rna_regulon_enrichment(multiome_mofa, multiome_dopamine_factor_n, method="gsea")   # GSEA
+
+enriched_regulons_fdr = set(regulon_res.loc[regulon_res["padj"] < 0.05, "Term"])
+enriched_regulons_nom = set(regulon_res.loc[regulon_res["pval"] < 0.05, "Term"])
+_top_cols = [c for c in ["Term", "NES", "Odds Ratio", "Overlap", "pval", "padj"]
+             if c in regulon_res.columns]
+print("\nTop RNA regulons:\n",
+      regulon_res.head(12)[_top_cols].to_string(index=False))
+
+# Cross-modality concordance: regulon enriched on RNA AND motif enriched on ATAC.
+for atac_label, atac_enr in [("MXD", mxd_motif_enrichment), ("D2MSN", d2msn_motif_enrichment)]:
+    atac_tfs_fdr = motif_hits_to_tf_symbols(atac_enr, use="padj", alpha=0.05)
+    atac_tfs_nom = motif_hits_to_tf_symbols(atac_enr, use="pvalue", alpha=0.05)
+    print(f"\n[{atac_label}] concordant TFs (enriched on RNA regulon AND ATAC motif):")
+    print(f"  RNA-FDR  x ATAC-FDR : {sorted(enriched_regulons_fdr & atac_tfs_fdr)}")
+    print(f"  RNA-nom  x ATAC-nom : {sorted(enriched_regulons_nom & atac_tfs_nom)}")
+
+
+def plot_top_regulons(regulon_res, atac_tf_hits, label, n_top=15, output_file=None):
+    """Top regulons by FDR; bars highlighted when the TF is also an ATAC motif hit."""
+    from matplotlib.patches import Patch
+
+    top = regulon_res.sort_values("padj").head(n_top).iloc[::-1]
+    concordant = "#4C72B0"   # also an ATAC motif hit -> cross-modality concordant
+    rna_only = "#BBBBBB"
+    colors = [concordant if t in atac_tf_hits else rna_only for t in top["Term"]]
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.barh(top["Term"], -np.log10(top["padj"].clip(lower=1e-300)), color=colors)
+    ax.axvline(-np.log10(0.05), color="k", ls="--", lw=0.8, zorder=0)
+    ax.set_xlabel("-log10(FDR q-value)")
+    ax.set_title(f"RNA regulon enrichment (dopamine factor)\nhighlight = {label} ATAC motif hit")
+    ax.legend(
+        handles=[Patch(facecolor=concordant, label=f"also {label} ATAC motif hit"),
+                 Patch(facecolor=rna_only, label="RNA regulon only")],
+        fontsize=8, loc="lower right", frameon=False,
+    )
+    plt.tight_layout()
+    if output_file is None:
+        plt.show()
+    else:
+        fig.savefig(output_file)
+        plt.close(fig)
+
+
+plot_top_regulons(
+    regulon_res, motif_hits_to_tf_symbols(mxd_motif_enrichment, use="pvalue"), "MXD",
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_regulon_enrichment.pdf"),
+)
+plot_top_regulons(
+    regulon_res, motif_hits_to_tf_symbols(d2msn_motif_enrichment, use="padj"), "D2MSN",
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_regulon_enrichment.pdf"),
+)
+
+
+# %% Load CATLAS cCRE->gene connections (co-accessibility) as a reusable mapping
+# CATLAS whole-mouse-brain co-accessibility links (mm10, matching our peaks): each row
+# connects a cCRE (BEDPE anchor B, cols 4-6) to a target gene's promoter (anchor A; gene
+# symbol in the col-7 label "cCREs<id>|<Gene>"). Cell-type-specific (e.g. D2MSN1). Loaded
+# here as a reusable cCRE->gene table and overlapped onto our ATAC peaks so a peak can be
+# resolved to its putative cell-type target gene(s). Downstream use (e.g. chaining
+# TF-motif -> cCRE -> gene into empirical regulons) is deferred to a later step.
+CATLAS_CONNS_DIR = Path(os.getenv("OUTPATH")) / "catlas_conns"
+CATLAS_CONNS_URL = (
+    "https://decoder-genetics.wustl.edu/catlasv1/catlas_downloads/"
+    "mousebrain/conns/{celltype}.bedpe"
+)
+
+
+def load_catlas_ccre_gene_conns(celltype="D2MSN1", conns_dir=CATLAS_CONNS_DIR):
+    """cCRE->gene connections for one CATLAS cell type (downloaded once and cached).
+
+    Returns a DataFrame [chrom, start, end, gene, ccre_id, sign] where chrom/start/end
+    are the *cCRE* anchor (BEDPE anchor B, which is the stable locus per cCRE id).
+    """
+    conns_dir.mkdir(parents=True, exist_ok=True)
+    path = conns_dir / f"{celltype}.bedpe"
+    if not path.exists():
+        import urllib.request
+        url = CATLAS_CONNS_URL.format(celltype=celltype)
+        print(f"Downloading CATLAS conns for {celltype} -> {path}")
+        urllib.request.urlretrieve(url, path)
+    df = pd.read_csv(
+        path, sep="\t", header=None,
+        names=["cA", "sA", "eA", "cB", "sB", "eB", "label", "sign"],
+    )
+    df["ccre_id"] = df["label"].str.split("|").str[0]
+    df["gene"] = df["label"].str.split("|").str[1]
+    conns = df[["cB", "sB", "eB", "gene", "ccre_id", "sign"]].rename(
+        columns={"cB": "chrom", "sB": "start", "eB": "end"}
+    )
+    print(f"{celltype}: {len(conns)} cCRE->gene links "
+          f"({conns['ccre_id'].nunique()} cCREs, {conns['gene'].nunique()} genes)")
+    return conns
+
+
+def peaks_to_linked_genes(atac_var_names, conns):
+    """Map ATAC peaks to CATLAS target genes by overlapping peaks with cCRE anchors.
+
+    Returns a tidy DataFrame [peak, gene, ccre_id, sign], one row per peak-gene link.
+    """
+    import pybedtools
+
+    peaks_bed = peaks_to_bed_df(atac_var_names)
+    if len(peaks_bed) == 0 or len(conns) == 0:
+        return pd.DataFrame(columns=["peak", "gene", "ccre_id", "sign"])
+    peaks_bt = pybedtools.BedTool.from_dataframe(peaks_bed).sort()
+    conns_bt = pybedtools.BedTool.from_dataframe(
+        conns[["chrom", "start", "end", "gene", "ccre_id", "sign"]]
+    ).sort()
+    # -wa -wb: emit peak fields (0-3: chrom,start,end,peak) then conn fields
+    # (4-9: chrom,start,end,gene,ccre_id,sign) for every overlapping pair.
+    hits = peaks_bt.intersect(conns_bt, wa=True, wb=True)
+    rows = [
+        {"peak": f[3], "gene": f[7], "ccre_id": f[8], "sign": f[9]}
+        for f in (iv.fields for iv in hits)
+    ]
+    return pd.DataFrame(rows, columns=["peak", "gene", "ccre_id", "sign"]).drop_duplicates()
+
+
+d2msn_conns = load_catlas_ccre_gene_conns("D2MSN1")
+# Resolve the dopamine-factor leading-edge cCRE peaks to their D2MSN target genes.
+d2msn_leading_edge_gene_links = peaks_to_linked_genes(d2msn_leading_edge_peaks, d2msn_conns)
+print(
+    f"D2MSN leading edge: {d2msn_leading_edge_gene_links['peak'].nunique()}"
+    f"/{len(d2msn_leading_edge_peaks)} peaks linked to "
+    f"{d2msn_leading_edge_gene_links['gene'].nunique()} genes"
+)
+
+
+# %% gene enrichment of the top C12 genes

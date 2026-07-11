@@ -1504,16 +1504,22 @@ def parse_regulon_library(lib, organism=None):
 
 def rna_regulon_enrichment(
     mofa, factor, *, method="ora", rna_view="rna", organism=None,
-    library=REGULON_LIBRARY, top_n=200, permutation_num=1000, seed=0,
+    library=REGULON_LIBRARY, top_n=200, background=None,
+    permutation_num=1000, seed=0,
 ):
     """Regulon enrichment of the dopamine factor's RNA genes.
 
     method="ora" (default): gp.enrichr hypergeometric test on the top-`top_n` genes
-        by |loading|, with the full RNA view as background -- fast, and parallel to
-        the ATAC top-N-peaks foreground.
+        by |loading|, with `background` as the universe -- fast, and parallel to the
+        ATAC top-N-peaks foreground.
     method="gsea": gp.prerank on the full signed ranking (no gene cutoff), consistent
         with the cCRE GSEA above.
 
+    `background`: iterable of gene symbols defining the enrichment universe (e.g.
+        multiome_trimodal_mudata.mod['rna'].var_names to use the whole detected
+        transcriptome). Default None -> the factor's own weighted genes. For ORA this
+        sets the hypergeometric N directly; for GSEA the extra background genes are
+        folded into the ranking at a neutral score of 0 so the universe still matches.
     `organism=None` unions each TF's targets across all experiments/organisms in
     `library`; pass e.g. "mouse" to restrict. Returns a DataFrame normalised to
     columns [Term, pval, padj, ...native...], sorted by padj; `Term` = bare TF symbol.
@@ -1525,20 +1531,32 @@ def rna_regulon_enrichment(
     w = w.reindex(w.abs().sort_values(ascending=False).index)
     w = w[~w.index.duplicated(keep="first")]
 
+    # Background universe (uppercased, unique). Default = the factor's weighted genes.
+    if background is None:
+        background_genes = w.index
+    else:
+        background_genes = pd.Index([str(g).upper() for g in background]).unique()
+
     regulons = parse_regulon_library(gp.get_library(library), organism)
     print(f"{library}: {len(regulons)} TF regulons"
           + (f" ({organism})" if organism else " (all organisms)")
-          + f"; {len(w)} RNA genes; method={method}")
+          + f"; {len(w)} weighted / {len(background_genes)} background genes; method={method}")
 
     if method == "ora":
-        top_genes = w.abs().sort_values(ascending=False).head(top_n).index.tolist()
+        # Foreground must be a subset of the background universe.
+        top_genes = w.abs().sort_values(ascending=False).head(top_n).index
+        top_genes = top_genes.intersection(background_genes).tolist()
         enr = gp.enrichr(
             gene_list=top_genes, gene_sets=regulons,
-            background=w.index.tolist(), outdir=None, no_plot=True,
+            background=background_genes.tolist(), outdir=None, no_plot=True,
         )
         res = enr.results.rename(columns={"P-value": "pval", "Adjusted P-value": "padj"})
     elif method == "gsea":
-        rnk = w.sort_values(ascending=False).rename("score").rename_axis("gene").reset_index()
+        # Fold background-only genes into the ranking at a neutral score so the GSEA
+        # universe equals `background_genes` (no-op when background defaults to w).
+        extra = background_genes.difference(w.index)
+        w_ranked = pd.concat([w, pd.Series(0.0, index=extra)]) if len(extra) else w
+        rnk = w_ranked.sort_values(ascending=False).rename("score").rename_axis("gene").reset_index()
         pre = gp.prerank(
             rnk=rnk, gene_sets=regulons, min_size=5, max_size=1500,
             permutation_num=permutation_num, seed=seed, no_plot=True, outdir=None,
@@ -1560,8 +1578,11 @@ def motif_hits_to_tf_symbols(enr, *, use="padj", alpha=0.05):
 
 
 # Default ORA (gp.enrichr); pass method="gsea" for the pre-ranked GSEA variant.
-#regulon_res = rna_regulon_enrichment(multiome_mofa, multiome_dopamine_factor_n, top_n=200)
-regulon_res = rna_regulon_enrichment(multiome_mofa, multiome_dopamine_factor_n, method="gsea")   # GSEA
+# background = whole detected transcriptome (all RNA var_names); pass background=None to
+# fall back to the factor's own weighted genes.
+rna_background = multiome_trimodal_mudata.mod["rna"].var_names
+regulon_res = rna_regulon_enrichment(multiome_mofa, multiome_dopamine_factor_n, top_n=100, background=rna_background)
+#regulon_res = rna_regulon_enrichment(multiome_mofa, multiome_dopamine_factor_n, method="gsea", background=None)   # GSEA
 
 enriched_regulons_fdr = set(regulon_res.loc[regulon_res["padj"] < 0.05, "Term"])
 enriched_regulons_nom = set(regulon_res.loc[regulon_res["pval"] < 0.05, "Term"])
@@ -1576,6 +1597,8 @@ for atac_label, atac_enr in [("MXD", mxd_motif_enrichment), ("D2MSN", d2msn_moti
     atac_tfs_nom = motif_hits_to_tf_symbols(atac_enr, use="pvalue", alpha=0.05)
     print(f"\n[{atac_label}] concordant TFs (enriched on RNA regulon AND ATAC motif):")
     print(f"  RNA-FDR  x ATAC-FDR : {sorted(enriched_regulons_fdr & atac_tfs_fdr)}")
+    print(f"  RNA-nom  x ATAC-FDR : {sorted(enriched_regulons_nom & atac_tfs_fdr)}")
+    print(f"  RNA-FDR  x ATAC-nom : {sorted(enriched_regulons_fdr & atac_tfs_nom)}")
     print(f"  RNA-nom  x ATAC-nom : {sorted(enriched_regulons_nom & atac_tfs_nom)}")
 
 

@@ -1468,7 +1468,8 @@ plot_top_motifs(
 # (consistent with the cCRE GSEA above, no gene cutoff).
 #
 # NOTE: library choice is a coverage/evidence-type trade-off.
-#   - Curated/ChIP libraries (TRRUST, ChEA_2022) give *direct-binding* regulons, which
+#   - Curated/ChIP libraries (TRRUST_Transcription_Factors_2019, ChEA_2022, TF_Perturbations_Followed_by_Expression, TRANSFAC_and_JASPAR_PWMs)
+#   give *direct-binding* regulons, which
 #     match the ATAC-motif logic best -- but they DON'T cover the D2MSN nuclear-receptor
 #     hits (RXRG/RXRB/NR2F1 largely absent; ChEA_2022 has only RXRA). Good for the MXD
 #     EGR/KLF/SP story.
@@ -1477,7 +1478,8 @@ plot_top_motifs(
 #     motif-based claim. Use for the D2MSN NR concordance, and label it as such.
 # The parser and GSEA are library-agnostic, so this is a one-line swap; consider running
 # both and reporting the concordance per library.
-REGULON_LIBRARY = "ChEA_2022"
+
+REGULON_LIBRARY = "TRANSFAC_and_JASPAR_PWMs"
 
 
 def parse_regulon_library(lib, organism=None):
@@ -1502,9 +1504,89 @@ def parse_regulon_library(lib, organism=None):
     return {tf: sorted(g) for tf, g in regulons.items()}
 
 
+def fit_weight_gmm(w, *, seed=0):
+    """Fit a 2-component Gaussian mixture to |weight| for one factor.
+
+    Spike-and-slab training (`model_options/spikeslab_weights=True`) makes each
+    factor's loadings bimodal: a dense 'spike' of shrunk-out features near 0 plus a
+    'slab' of genuine loadings. MOFA doesn't save the per-weight posterior inclusion
+    probability, so we recover it empirically -- fitting two Gaussians to |w| and
+    treating the higher-mean component as the significant (slab) set. Genes with a
+    slab posterior >= 0.5 are 'significant'.
+
+    Returns a dict with the fitted `gm`, absolute weights `aw`, `slab` component index,
+    per-gene slab posterior `resp`, boolean `sig` mask, decision `threshold` (smallest
+    significant |w|), and `dbic` (1-component BIC minus 2-component BIC; large positive
+    => bimodality strongly favoured).
+    """
+    from sklearn.mixture import GaussianMixture
+
+    aw = np.abs(np.asarray(w, dtype=float))
+    X = aw.reshape(-1, 1)
+    g1 = GaussianMixture(n_components=1, random_state=seed, n_init=3).fit(X)
+    gm = GaussianMixture(n_components=2, covariance_type="full",
+                         random_state=seed, n_init=5).fit(X)
+    slab = int(np.argmax(gm.means_.ravel()))
+    resp = gm.predict_proba(X)[:, slab]
+    sig = resp >= 0.5
+    threshold = float(aw[sig].min()) if sig.any() else np.inf
+    return {"gm": gm, "aw": aw, "slab": slab, "resp": resp, "sig": sig,
+            "threshold": threshold, "dbic": float(g1.bic(X) - gm.bic(X))}
+
+
+def gmm_significant_weights(w, *, seed=0):
+    """Index of genes in the slab (significant) GMM component of |w|. See fit_weight_gmm."""
+    fit = fit_weight_gmm(w, seed=seed)
+    return pd.Index(w.index)[fit["sig"]]
+
+
+def plot_weight_gmm(w, *, seed=0, output_file=None, title=None):
+    """Two-panel diagnostic of the 2-component GMM fit on |weight| (see fit_weight_gmm).
+
+    Left: histogram of |w| with the spike/slab component densities and their mixture
+    (linear y). Right: same on a log y-axis to show the slab fit through the tail. The
+    dotted line marks the |w| decision boundary; genes to its right are 'significant'.
+    """
+    from scipy.stats import norm
+
+    fit = fit_weight_gmm(w, seed=seed)
+    gm, aw, slab, sig, thr = fit["gm"], fit["aw"], fit["slab"], fit["sig"], fit["threshold"]
+    means = gm.means_.ravel()
+    sds = np.sqrt(gm.covariances_.ravel())
+    wts = gm.weights_.ravel()
+    xs = np.linspace(0, aw.max(), 600)
+    comp = [wts[k] * norm.pdf(xs, means[k], sds[k]) for k in range(2)]
+    mix = comp[0] + comp[1]
+
+    fig, axes = plt.subplots(1, 2, figsize=(9, 3.6))
+    for ax, logy in zip(axes, [False, True]):
+        ax.hist(aw, bins=90, density=True, color="#DDDDDD", edgecolor="none")
+        for k in range(2):
+            ax.plot(xs, comp[k], lw=2, color="#B2182B" if k == slab else "#4C72B0",
+                    label="slab (significant)" if k == slab else "spike (background)")
+        ax.plot(xs, mix, "k--", lw=1, label="mixture")
+        ax.axvline(thr, color="k", ls=":", lw=1)
+        ax.set_xlabel("|MOFA weight|")
+        if logy:
+            ax.set_yscale("log")
+            ax.set_ylim(1e-2, 1e2)
+            ax.set_title("log-y (slab fit)")
+        else:
+            ax.set_ylabel("density")
+            ax.set_title(f"n_sig={int(sig.sum())}  thr={thr:.3f}  ΔBIC={fit['dbic']:.0f}")
+    axes[0].legend(fontsize=8, frameon=False)
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+    if output_file:
+        fig.savefig(output_file, bbox_inches="tight")
+        print(f"Wrote GMM weight-fit diagnostic -> {output_file}")
+    return fit
+
+
 def rna_regulon_enrichment(
     mofa, factor, *, method="ora", rna_view="rna", organism=None,
-    library=REGULON_LIBRARY, top_n=200, background=None,
+    library=REGULON_LIBRARY, top_n=200, foreground="gmm", background=None,
     permutation_num=1000, seed=0,
 ):
     """Regulon enrichment of the dopamine factor's RNA genes.
@@ -1514,6 +1596,12 @@ def rna_regulon_enrichment(
         ATAC top-N-peaks foreground.
     method="gsea": gp.prerank on the full signed ranking (no gene cutoff), consistent
         with the cCRE GSEA above.
+
+    `foreground` (ORA only): how to pick the discrete gene list.
+        "gmm" (default): the significant (slab) genes from a 2-component GMM on |w|
+            (see fit_weight_gmm) -- a data-driven, factor-specific set that mirrors the
+            spike-and-slab structure instead of an arbitrary cutoff.
+        "top_n": the top-`top_n` genes by |loading|.
 
     `background`: iterable of gene symbols defining the enrichment universe (e.g.
         multiome_trimodal_mudata.mod['rna'].var_names to use the whole detected
@@ -1543,9 +1631,15 @@ def rna_regulon_enrichment(
           + f"; {len(w)} weighted / {len(background_genes)} background genes; method={method}")
 
     if method == "ora":
-        # Foreground must be a subset of the background universe.
-        top_genes = w.abs().sort_values(ascending=False).head(top_n).index
-        top_genes = top_genes.intersection(background_genes).tolist()
+        # Data-driven (GMM slab) or fixed-N foreground; must be a subset of the universe.
+        if foreground == "gmm":
+            fg = gmm_significant_weights(w, seed=seed)
+            print(f"  GMM foreground: {len(fg)} significant genes (slab component)")
+        elif foreground == "top_n":
+            fg = w.abs().sort_values(ascending=False).head(top_n).index
+        else:
+            raise ValueError(f"foreground must be 'gmm' or 'top_n', got {foreground!r}")
+        top_genes = fg.intersection(background_genes).tolist()
         enr = gp.enrichr(
             gene_list=top_genes, gene_sets=regulons,
             background=background_genes.tolist(), outdir=None, no_plot=True,
@@ -1581,8 +1675,16 @@ def motif_hits_to_tf_symbols(enr, *, use="padj", alpha=0.05):
 # background = whole detected transcriptome (all RNA var_names); pass background=None to
 # fall back to the factor's own weighted genes.
 rna_background = multiome_trimodal_mudata.mod["rna"].var_names
-regulon_res = rna_regulon_enrichment(multiome_mofa, multiome_dopamine_factor_n, top_n=100, background=rna_background)
+# ORA foreground = GMM-significant (slab) genes of the factor's RNA loadings.
+regulon_res = rna_regulon_enrichment(multiome_mofa, multiome_dopamine_factor_n, foreground="gmm", background=rna_background)
 #regulon_res = rna_regulon_enrichment(multiome_mofa, multiome_dopamine_factor_n, method="gsea", background=None)   # GSEA
+
+# Diagnostic: how well the 2-component GMM separates spike (background) from slab.
+_rna_w = multiome_mofa.get_weights(views=["rna"], factors=multiome_dopamine_factor_n, df=True).iloc[:, 0]
+plot_weight_gmm(
+    _rna_w, title=f"Dopamine factor RNA loadings (factor {multiome_dopamine_factor_n})",
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_rna_weight_gmm.pdf"),
+)
 
 enriched_regulons_fdr = set(regulon_res.loc[regulon_res["padj"] < 0.05, "Term"])
 enriched_regulons_nom = set(regulon_res.loc[regulon_res["pval"] < 0.05, "Term"])
@@ -1602,25 +1704,94 @@ for atac_label, atac_enr in [("MXD", mxd_motif_enrichment), ("D2MSN", d2msn_moti
     print(f"  RNA-nom  x ATAC-nom : {sorted(enriched_regulons_nom & atac_tfs_nom)}")
 
 
-def plot_top_regulons(regulon_res, atac_tf_hits, label, n_top=15, output_file=None):
-    """Top regulons by FDR; bars highlighted when the TF is also an ATAC motif hit."""
+# Cross-modality concordance tiers, in decreasing stringency (== the priority order used
+# to assign each TF its single, most-stringent tier). FDR-significant implies nominally
+# significant, so the sets are nested; assigning the first match makes them exclusive.
+CONCORDANCE_TIERS = [
+    ("RNA-FDR x ATAC-FDR", "#B2182B"),   # both FDR  -> strongest (dark red)
+    ("RNA-nom x ATAC-FDR", "#F4A582"),   # ATAC FDR, RNA nominal (light red)
+    ("RNA-FDR x ATAC-nom", "#92C5DE"),   # RNA FDR, ATAC nominal (light blue)
+    ("RNA-nom x ATAC-nom", "#2166AC"),   # both nominal only (dark blue)
+]
+CONCORDANCE_COLORS = dict(CONCORDANCE_TIERS)
+NOT_CONCORDANT_COLOR = "#DDDDDD"
+
+
+def assign_concordance_tier(term, rna_fdr, rna_nom, atac_fdr, atac_nom):
+    """Most-stringent RNAxATAC concordance tier a TF satisfies, or None (not concordant)."""
+    if term in rna_fdr and term in atac_fdr:
+        return "RNA-FDR x ATAC-FDR"
+    if term in rna_nom and term in atac_fdr:
+        return "RNA-nom x ATAC-FDR"
+    if term in rna_fdr and term in atac_nom:
+        return "RNA-FDR x ATAC-nom"
+    if term in rna_nom and term in atac_nom:
+        return "RNA-nom x ATAC-nom"
+    return None
+
+
+def plot_regulon_concordance_dotplot(regulon_res, atac_enr, label, *, n_top=20, output_file=None):
+    """Enrichr-style dotplot of top RNA regulons, colored by RNAxATAC concordance tier.
+
+    x = -log10(RNA regulon FDR); dot size proportional to the regulon's overlap gene
+    count; dot color = the most-stringent concordance tier the TF reaches against this
+    cell type's ATAC motif hits (grey if not concordant at all). See CONCORDANCE_TIERS.
+    """
+    from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 
-    top = regulon_res.sort_values("padj").head(n_top).iloc[::-1]
-    concordant = "#4C72B0"   # also an ATAC motif hit -> cross-modality concordant
-    rna_only = "#BBBBBB"
-    colors = [concordant if t in atac_tf_hits else rna_only for t in top["Term"]]
+    rna_fdr = set(regulon_res.loc[regulon_res["padj"] < 0.05, "Term"])
+    rna_nom = set(regulon_res.loc[regulon_res["pval"] < 0.05, "Term"])
+    atac_fdr = motif_hits_to_tf_symbols(atac_enr, use="padj", alpha=0.05)
+    atac_nom = motif_hits_to_tf_symbols(atac_enr, use="pvalue", alpha=0.05)
 
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ax.barh(top["Term"], -np.log10(top["padj"].clip(lower=1e-300)), color=colors)
+    top = regulon_res.sort_values("padj").head(n_top).copy()
+    top["tier"] = [assign_concordance_tier(t, rna_fdr, rna_nom, atac_fdr, atac_nom)
+                   for t in top["Term"]]
+    # Overlap "k/n" -> k overlapping genes for the dot size (constant if absent, e.g. GSEA).
+    if "Overlap" in top.columns:
+        n_genes = top["Overlap"].astype(str).str.split("/").str[0].astype(float).to_numpy()
+    else:
+        n_genes = np.ones(len(top))
+    top = top.iloc[::-1]                      # most significant at the top of the axis
+    n_genes = n_genes[::-1]
+
+    smin, smax = 40.0, 400.0
+    span = n_genes.max() - n_genes.min()
+    sizes = (smin + (n_genes - n_genes.min()) / span * (smax - smin)
+             if span > 0 else np.full(len(n_genes), 0.5 * (smin + smax)))
+    colors = [CONCORDANCE_COLORS.get(t, NOT_CONCORDANT_COLOR) for t in top["tier"]]
+    x = -np.log10(top["padj"].clip(lower=1e-300))
+    y = np.arange(len(top))
+
+    fig, ax = plt.subplots(figsize=(6.5, 0.34 * len(top) + 1.6))
+    ax.scatter(x, y, s=sizes, c=colors, edgecolor="k", linewidth=0.4, zorder=3)
     ax.axvline(-np.log10(0.05), color="k", ls="--", lw=0.8, zorder=0)
-    ax.set_xlabel("-log10(FDR q-value)")
-    ax.set_title(f"RNA regulon enrichment (dopamine factor)\nhighlight = {label} ATAC motif hit")
-    ax.legend(
-        handles=[Patch(facecolor=concordant, label=f"also {label} ATAC motif hit"),
-                 Patch(facecolor=rna_only, label="RNA regulon only")],
-        fontsize=8, loc="lower right", frameon=False,
-    )
+    ax.set_yticks(y)
+    ax.set_yticklabels(top["Term"])
+    ax.set_ylim(-0.6, len(top) - 0.4)
+    ax.set_xlabel("-log10(RNA regulon FDR)")
+    ax.set_title(f"RNA regulon enrichment x {label} ATAC motif concordance")
+
+    tier_handles = [Patch(facecolor=c, edgecolor="k", lw=0.4, label=t)
+                    for t, c in CONCORDANCE_TIERS]
+    tier_handles.append(Patch(facecolor=NOT_CONCORDANT_COLOR, edgecolor="k", lw=0.4,
+                              label="not concordant"))
+    leg1 = ax.legend(handles=tier_handles, fontsize=7, loc="lower right",
+                     frameon=False, title="concordance")
+    ax.add_artist(leg1)
+
+    # Size legend: representative overlap gene counts mapped through the same transform.
+    refs = np.unique(np.quantile(n_genes, [0.0, 0.5, 1.0]).round().astype(int))
+    ref_s = (smin + (refs - n_genes.min()) / span * (smax - smin)
+             if span > 0 else np.full(len(refs), 0.5 * (smin + smax)))
+    size_handles = [Line2D([0], [0], marker="o", color="w", markerfacecolor="#888888",
+                           markeredgecolor="k", markersize=np.sqrt(s),
+                           label=f"{int(v)} genes")
+                    for v, s in zip(refs, ref_s)]
+    ax.legend(handles=size_handles, fontsize=7, loc="upper left",
+              frameon=False, title="overlap", labelspacing=1.2, borderpad=1.0)
+
     plt.tight_layout()
     if output_file is None:
         plt.show()
@@ -1629,15 +1800,15 @@ def plot_top_regulons(regulon_res, atac_tf_hits, label, n_top=15, output_file=No
         plt.close(fig)
 
 
-plot_top_regulons(
-    regulon_res, motif_hits_to_tf_symbols(mxd_motif_enrichment, use="pvalue"), "MXD",
-    output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_regulon_enrichment.pdf"),
+# Enrichr-style concordance dotplots: top regulons colored by RNAxATAC concordance tier.
+plot_regulon_concordance_dotplot(
+    regulon_res, mxd_motif_enrichment, "MXD",
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_regulon_concordance_dotplot.pdf"),
 )
-plot_top_regulons(
-    regulon_res, motif_hits_to_tf_symbols(d2msn_motif_enrichment, use="padj"), "D2MSN",
-    output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_regulon_enrichment.pdf"),
+plot_regulon_concordance_dotplot(
+    regulon_res, d2msn_motif_enrichment, "D2MSN",
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_regulon_concordance_dotplot.pdf"),
 )
-
 
 # %% Load CATLAS cCRE->gene connections (co-accessibility) as a reusable mapping
 # CATLAS whole-mouse-brain co-accessibility links (mm10, matching our peaks): each row

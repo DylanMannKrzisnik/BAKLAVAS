@@ -46,7 +46,7 @@ from anndata import AnnData
 sys.path.insert(0, os.path.join(os.getenv("BAKLAVA_ROOT"), "scripts", "SMA"))
 from spatialjepa_model import load_spatialjepa_model
 
-SAMPLE_ID = "V11L12-109_B1"  # SMA sample/run whose trained student we project with
+SAMPLE_ID = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]  # SMA sample/run whose trained student we project with
 DECODER_MODE = "auto"         # "auto" -> PLS if present, otherwise neural fallback
 BATCH_SIZE = 1024
 MIN_ST_OVERLAP_FRACTION = 0.10
@@ -66,13 +66,24 @@ def env_path(name: str, default: Path | str) -> Path:
     return Path(value) if value else Path(default)
 
 
+# Species-specific spatial target RNA defaults (override with SPATIAL_TARGET_RNA_PATH /
+# TARGET_RNA_PATH only when needed). Human path matches the CaH Xenium panel used for
+# target-gene ranking in script 3.
+if species == "mouse":
+    SPATIAL_TARGET_RNA_PATH = ALIGNED_DATA_DIR / "source_rna_aligned_SCT.h5ad"
+elif species == "human":
+    SPATIAL_TARGET_RNA_PATH = (
+        Path(os.getenv("DATAPATH"))
+        / "SEA_AD"
+        / "sea_ad_cah"
+        / "CaH_Xenium_final.2026-01-07.h5ad"
+    )
+else:
+    raise ValueError(f"Unsupported species for spatial target RNA: {species!r}")
+
 spatial_target_rna_path_env = os.getenv("SPATIAL_TARGET_RNA_PATH") or os.getenv("TARGET_RNA_PATH")
 if spatial_target_rna_path_env:
     SPATIAL_TARGET_RNA_PATH = Path(spatial_target_rna_path_env)
-elif species == "mouse":
-    SPATIAL_TARGET_RNA_PATH = ALIGNED_DATA_DIR / "source_rna_aligned_SCT.h5ad"
-else:
-    raise ValueError("Set SPATIAL_TARGET_RNA_PATH or TARGET_RNA_PATH for human target RNA projection.")
 
 TARGET_RNA_PATH = SPATIAL_TARGET_RNA_PATH  # Backwards-compatible metadata alias.
 SPATIAL_TARGET_ATAC_PATH = env_path(

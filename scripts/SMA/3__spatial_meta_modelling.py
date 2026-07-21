@@ -375,8 +375,8 @@ class SpatialJEPA_trainer:
 # list of sample IDs that share a prefix (e.g. all "V11T17-102_*") to additionally
 # enable horizontal (multi-section) integration of the same sample/donor.
 
-sample_ids = "V11L12-109_B1"
-#sample_ids = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]
+#sample_ids = "V11L12-109_B1"
+sample_ids = ["V11T17-102_A1", "V11T17-102_C1", "V11T17-102_D1"]
 
 SAMPLE_IDS = [sample_ids] if isinstance(sample_ids, str) else list(sample_ids)
 SECTION_KEY = "section"
@@ -529,7 +529,7 @@ joint_adata.raw = joint_adata
 # Restrict ST features to a ranked target panel (if provided) before Moran's-I selection,
 # so the candidate ST pool only contains genes the transfer target measures. Whitelisted
 # target genes sit at the top of the ranking, so they are always in the candidate pool.
-N_TARGET_TOP = 2000
+N_TARGET_TOP = 442 # 442 for whitelist Xenium genes
 if species == "human":
     TARGET_PANEL_PATH = Path(
         "/home/mcb/users/dmannk/BAKLAVA_base/outputs/target_gene_rankings/"

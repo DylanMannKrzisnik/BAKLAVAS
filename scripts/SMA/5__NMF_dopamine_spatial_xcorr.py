@@ -481,6 +481,7 @@ def run_trimodal_mofa(
     gpu_mode=True,
     seed=42,
     winsorize_percentile=0.5,
+    overwrite=False,
 ):
     """
     Run MOFA+ on a trimodal MuData object (RNA, ATAC, MSI).
@@ -494,6 +495,10 @@ def run_trimodal_mofa(
 
     Returns (trimodal_mudata, mofa_outfile). Factors are written to
     trimodal_mudata.obsm['X_mofa'] and trimodal_mudata.uns['mofa'].
+
+    If ``mofa_outfile`` already exists, training is skipped unless
+    ``overwrite=True``. The saved model is loaded later by
+    ``load_trained_mofa_for_downstream``.
     """
     if mudata_source_path is not None:
         mudata_source_path = str(mudata_source_path)
@@ -504,6 +509,10 @@ def run_trimodal_mofa(
         target_label = "trimodal"
         if mofa_outfile is None:
             raise ValueError("mofa_outfile is required when mudata_source_path is not provided.")
+
+    if Path(mofa_outfile).exists() and not overwrite:
+        print(f"MOFA {target_label}: found existing model at {mofa_outfile}; skipping training.")
+        return trimodal_mudata, mofa_outfile
 
     trimodal_mudata = trimodal_mudata.copy()
 
@@ -753,6 +762,8 @@ def load_trained_mofa_for_downstream(
     spatial_mudata_path=spatial_target_trimodal_mudata_path,
     multiome_mudata_path=multiome_target_trimodal_mudata_path,
     *,
+    spatial_trimodal_mudata=None,
+    multiome_trimodal_mudata=None,
     multiome_spatial_h5ad_path=None,
     plot_multiome_spatial_qc=False,
 ):
@@ -760,7 +771,8 @@ def load_trained_mofa_for_downstream(
 
     Use this after MOFA+ training has already written the `*_mofa_model.hdf5`
     files. It recreates the variable set used by the downstream analysis without
-    rerunning `run_trimodal_mofa()`.
+    rerunning `run_trimodal_mofa()`. Pre-loaded MuData objects can be supplied to
+    avoid reading the same input files twice.
     """
     spatial_mudata_path = Path(spatial_mudata_path)
     multiome_mudata_path = Path(multiome_mudata_path)
@@ -771,12 +783,21 @@ def load_trained_mofa_for_downstream(
             / "target_rna_aligned_with_latents.h5ad"
         )
 
-    spatial_trimodal_mudata = mu.read_h5mu(spatial_mudata_path)
-    multiome_trimodal_mudata = mu.read_h5mu(multiome_mudata_path)
+    if spatial_trimodal_mudata is None:
+        spatial_trimodal_mudata = mu.read_h5mu(spatial_mudata_path)
+    if multiome_trimodal_mudata is None:
+        multiome_trimodal_mudata = mu.read_h5mu(multiome_mudata_path)
 
-    multiome_target_rna_with_spatial = sc.read_h5ad(multiome_spatial_h5ad_path, backed="r")
-    assert multiome_trimodal_mudata.obs_names.equals(multiome_target_rna_with_spatial.obs_names)
-    multiome_trimodal_mudata.obsm["spatial"] = multiome_target_rna_with_spatial.obsm["spatial"]
+    if "spatial" not in multiome_trimodal_mudata.obsm:
+        multiome_target_rna_with_spatial = sc.read_h5ad(
+            multiome_spatial_h5ad_path, backed="r"
+        )
+        assert multiome_trimodal_mudata.obs_names.equals(
+            multiome_target_rna_with_spatial.obs_names
+        )
+        multiome_trimodal_mudata.obsm["spatial"] = (
+            multiome_target_rna_with_spatial.obsm["spatial"]
+        )
     multiome_trimodal_mudata.mod["msi_student"].obsm["spatial"] = multiome_trimodal_mudata.obsm["spatial"]
 
     if plot_multiome_spatial_qc:
@@ -817,7 +838,10 @@ def load_trained_mofa_for_downstream(
     multiome_mofa,
     spatial_mofa_outfile,
     multiome_mofa_outfile,
-) = load_trained_mofa_for_downstream()
+) = load_trained_mofa_for_downstream(
+    spatial_trimodal_mudata=spatial_trimodal_mudata,
+    multiome_trimodal_mudata=multiome_trimodal_mudata,
+)
 
 #%% explore dopamine MOFA model
 def factor_most_associated_with_group(m, group, cluster_label):

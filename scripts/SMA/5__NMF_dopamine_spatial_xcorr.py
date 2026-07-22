@@ -290,19 +290,6 @@ embedding_fig.tight_layout(rect=[0, 0, 1, 0.97])
 plt.show()
 # %% barplot of bivariate Moran's I
 
-def FIG_nmf_dopamine(override_nmf_cmp=None): # can override with '16' for full bi-hemispheric striatal NMF
-    nmf_cmp = override_nmf_cmp if override_nmf_cmp is not None else bivariate_moran_I_df.iloc[bivariate_moran_I_df['bivariate_moran_I'].argmax()].name
-    nmf_cmp_morans_i = bivariate_moran_I_df.loc[nmf_cmp, 'bivariate_moran_I']
-
-    fig, ax = plt.subplots(1, 3, figsize=(10, 3))
-    sc.pl.embedding(joint_adata, basis='spatial', color='msi:Dopamine', size=100, ax=ax[0], show=False)
-    sc.pl.embedding(nmf_adata, basis='spatial', color=nmf_cmp, size=100, ax=ax[1], show=False)
-    ax[1].set_title(f'NMF {nmf_cmp} (biv. I = {nmf_cmp_morans_i:.3f})')
-    best_nmf_component[~best_nmf_component.index.str.contains('mt-')].sort_values(ascending=True).tail(10).plot(kind='barh', ax=ax[2])
-    ax[2].set_title(f'Gene loading for NMF {nmf_cmp}')
-    fig.tight_layout(); fig.show()
-    return fig, ax
-
 bivariate_moran_I_df.plot(kind='barh')
 plt.title('Bivariate Moran\'s I of NMF components against dopamine')
 plt.xlabel('Bivariate Moran\'s I')
@@ -1922,4 +1909,504 @@ print(
 )
 
 
-# %% gene enrichment of the top C12 genes
+# %% figure functions
+# Manuscript figures for the SMA dopamine story. These were first produced by
+# standalone scripts that re-loaded everything from disk; here they are rebuilt on
+# the objects already in scope, so they always reflect the current run (e.g. the
+# no-panel joint_adata / SCT_counts NMF input and the retrained target MOFA models)
+# rather than the inputs that happened to be on disk when the figures were first made.
+#
+# Convention matches plot_atac_ccre_gsea / plot_top_motifs above: pass output_file to
+# save, leave it None to show. Each returns the Figure.
+
+FIG_RCPARAMS = {
+    "font.size": 11,
+    "axes.titlesize": 12,
+    "pdf.fonttype": 42,   # embed TrueType rather than Type-3, for journal submission
+    "ps.fonttype": 42,
+}
+
+
+def _fig_finish(fig, output_file):
+    if output_file is None:
+        plt.show()
+    else:
+        fig.savefig(output_file, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Wrote {output_file}")
+    return fig
+
+
+def _fig_spatial_scatter(ax, spatial, values, title, *, cbar_label=None,
+                         cmap="viridis", s=8, sort_by_value=True):
+    """Tissue-map panel: square aspect, inverted y, no frame or ticks."""
+    values = np.asarray(values, dtype=float).ravel()
+    order = np.argsort(values) if sort_by_value else np.arange(len(values))
+    handle = ax.scatter(spatial[order, 0], spatial[order, 1], c=values[order],
+                        cmap=cmap, s=s, linewidths=0)
+    ax.set_aspect("equal")
+    ax.invert_yaxis()
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.set_title(title)
+    if cbar_label is not None:
+        cbar = ax.figure.colorbar(handle, ax=ax, fraction=0.046, pad=0.02)
+        cbar.set_label(cbar_label, fontsize=9)
+        cbar.ax.tick_params(labelsize=8)
+    return handle
+
+
+def _fig_top_loadings(weights, n=12):
+    """Top-n features by |loading|, returned ascending so barh reads top-down."""
+    return weights.reindex(weights.abs().sort_values(ascending=False).head(n).index).sort_values()
+
+
+def _fig_msi_bar_colors(features):
+    """Red for dopamine and its metabolite 3-MT; green for every other MSI feature."""
+    return ["#c0392b" if ("Dopamine" in f or f == "msi:3-MT") else "#7fbf7b" for f in features]
+
+
+def _fig_sorted_clusters(index, *, strip_prefix=False):
+    """Numeric cluster ordering; handles both '3' and 'C12' style labels."""
+    def sort_key(label):
+        text = str(label)[1:] if strip_prefix else str(label)
+        try:
+            return (0, int(text))
+        except ValueError:
+            return (1, str(label))
+    return sorted(index, key=sort_key)
+
+
+def _fig_bare_gene_index(weights, side):
+    """Reduce a loading Series to bare gene symbols.
+
+    The two sides disagree on naming: joint_adata stores ST features as 'rna:Pde10a'
+    while these target MOFA models store bare 'Pde10a' (other models in this project
+    keep the prefix, so neither convention can be assumed). Splitting on the *last*
+    ':' normalises both.
+
+    Guards the one case that cannot be normalised: re-running the NMF cell on an
+    already-stripped index maps every name to NaN ("Pde10a".split(":")[1]), which
+    would otherwise silently empty the intersection.
+    """
+    weights = pd.Series(weights).copy()
+    index = pd.Index(weights.index)
+    if index.isna().all():
+        raise ValueError(
+            f"{side} loadings have an all-null index -- this index was almost certainly "
+            "stripped twice ('Pde10a'.split(':')[1] -> NaN). Rebuild it by re-running "
+            "the NMF cell against joint_adata, whose ST names carry the 'rna:' prefix."
+        )
+    weights = weights[index.notna()]
+    weights.index = pd.Index([str(gene).split(":")[-1] for gene in weights.index])
+    return weights[~weights.index.duplicated()]
+
+
+def _fig_dopamine_factor(mofa, msi_view, factor=None):
+    """Resolve the dopamine factor plus the sign that orients it toward dopamine.
+
+    MOFA factor signs are arbitrary, so every panel gets multiplied by `sign` to keep
+    the dopamine loading positive. This makes the teacher and student figures directly
+    comparable; when the loading is already positive it is a no-op.
+    """
+    dopamine_weights = mofa.get_weights(views=[msi_view], df=True).loc["msi:Dopamine"]
+    if factor is None:
+        factor = dopamine_weights.abs().idxmax()
+    sign = float(np.sign(dopamine_weights[factor])) or 1.0
+    return factor, sign, dopamine_weights
+
+
+def _fig_factor_r2(mofa, factor):
+    """Per-view R2 (% variance explained) for one factor, averaged over groups."""
+    r2 = mofa.get_r2()
+    return r2[r2["Factor"] == factor].groupby("View")["R2"].mean()
+
+
+def _fig_factor_scores_on_spatial(mofa, mudata, factor, sign):
+    """Oriented factor scores aligned to the MuData's spatial coordinates."""
+    Z = mofa.get_factors(df=True)
+    positions = pd.Index(mudata.obs_names.astype(str)).get_indexer(
+        Z.index.to_numpy().astype(str)
+    )
+    if (positions < 0).any():
+        raise KeyError("MOFA sample names are not all present in the MuData obs_names.")
+    scores = Z[factor].to_numpy() * sign
+    return scores, np.asarray(mudata.obsm["spatial"], dtype=float)[positions], positions
+
+
+def FIG_nmf_dopamine(
+    override_nmf_cmp=None, output_file=None
+): # can override with '16' for full bi-hemispheric striatal NMF
+    nmf_cmp = override_nmf_cmp if override_nmf_cmp is not None else bivariate_moran_I_df.iloc[bivariate_moran_I_df['bivariate_moran_I'].argmax()].name
+    nmf_cmp_morans_i = bivariate_moran_I_df.loc[nmf_cmp, 'bivariate_moran_I']
+
+    fig, ax = plt.subplots(1, 3, figsize=(10, 3))
+    sc.pl.embedding(joint_adata, basis='spatial', color='msi:Dopamine', size=100, ax=ax[0], show=False)
+    sc.pl.embedding(nmf_adata, basis='spatial', color=nmf_cmp, size=100, ax=ax[1], show=False)
+    ax[1].set_title(f'NMF {nmf_cmp} (biv. I = {nmf_cmp_morans_i:.3f})')
+    best_nmf_component[~best_nmf_component.index.str.contains('mt-')].sort_values(ascending=True).tail(10).plot(kind='barh', ax=ax[2])
+    ax[2].set_title(f'Gene loading for NMF {nmf_cmp}')
+    fig.tight_layout(); _fig_finish(fig, output_file)
+    return fig, ax
+
+
+
+def FIG_mofa_dopamine_factor(
+    mofa=None, *, msi_view="msi_student", factor=None, n_top=12, output_file=None,
+):
+    """The trimodal MOFA+ factor carrying imputed dopamine in the multiome target.
+
+    (a) dopamine's loading on every factor, (b) and (c) that factor's top RNA and MSI
+    loadings. Defaults to the Moran-selected factor used by the rest of this script.
+    """
+    if mofa is None:
+        mofa = multiome_mofa
+        if factor is None:
+            factor = multiome_dopamine_factor_n
+    factor, sign, dopamine_weights = _fig_dopamine_factor(mofa, msi_view, factor)
+
+    dopamine_oriented = dopamine_weights * sign
+    top_rna = _fig_top_loadings(mofa.get_weights(views=["rna"], df=True)[factor] * sign, n_top)
+    top_msi = _fig_top_loadings(mofa.get_weights(views=[msi_view], df=True)[factor] * sign, n_top)
+
+    with plt.rc_context(FIG_RCPARAMS):
+        fig, axes = plt.subplots(1, 3, figsize=(14, 5.2), constrained_layout=True)
+
+        ax = axes[0]
+        colors = ["#c0392b" if f == factor else "#95a5a6" for f in dopamine_oriented.index]
+        ax.barh(range(len(dopamine_oriented)), dopamine_oriented.values, color=colors)
+        ax.set_yticks(range(len(dopamine_oriented)))
+        ax.set_yticklabels([f.replace("Factor", "F") for f in dopamine_oriented.index], fontsize=8)
+        ax.invert_yaxis()
+        ax.axvline(0, color="k", lw=0.6)
+        ax.set_xlabel("msi:Dopamine loading")
+        ax.set_title(f"(a) Dopamine loads on {factor}")
+
+        ax = axes[1]
+        ax.barh(range(len(top_rna)), top_rna.values, color="#2c7fb8")
+        ax.set_yticks(range(len(top_rna)))
+        ax.set_yticklabels(top_rna.index, fontsize=9, fontstyle="italic")
+        ax.axvline(0, color="k", lw=0.6)
+        ax.set_xlabel("Gene loading")
+        ax.set_title(f"(b) Top RNA loadings ({factor})")
+
+        ax = axes[2]
+        ax.barh(range(len(top_msi)), top_msi.values, color=_fig_msi_bar_colors(top_msi.index))
+        ax.set_yticks(range(len(top_msi)))
+        ax.set_yticklabels([f.replace("msi:", "") for f in top_msi.index], fontsize=9)
+        ax.axvline(0, color="k", lw=0.6)
+        ax.set_xlabel("Metabolite / m/z loading")
+        ax.set_title(f"(c) Top MSI loadings ({factor})")
+
+    return _fig_finish(fig, output_file)
+
+
+def FIG_teacher_mofa_dopamine(
+    mofa=None,
+    mudata=None,
+    *,
+    msi_view="msi_teacher",
+    factor=None,
+    cluster_key="ATAC_clusters",
+    highlight_cluster="C12",
+    section_label="p22",
+    n_top=12,
+    output_file=None,
+):
+    """The teacher-side MOFA+ factor on the spatial target, the counterpart to
+    FIG_mofa_dopamine_factor.
+
+    (a) the factor in tissue space, (b) dopamine's loading across factors, (c) mean
+    factor score per ATAC cluster -- the MXD cluster is the point of the panel --
+    (d)/(e) top RNA and MSI loadings, (f) a numeric summary including per-view R2.
+    """
+    if mofa is None:
+        mofa = spatial_mofa
+        if factor is None:
+            factor = spatial_dopamine_factor_n
+    if mudata is None:
+        mudata = spatial_trimodal_mudata
+    factor, sign, dopamine_weights = _fig_dopamine_factor(mofa, msi_view, factor)
+
+    scores, spatial, positions = _fig_factor_scores_on_spatial(mofa, mudata, factor, sign)
+    clusters = mudata.obs[cluster_key].astype(str).to_numpy()[positions]
+    cluster_means = pd.DataFrame({"cluster": clusters, "score": scores}).groupby("cluster")["score"].mean()
+    cluster_means = cluster_means.reindex(_fig_sorted_clusters(cluster_means.index, strip_prefix=True))
+    top_cluster = cluster_means.idxmax()
+
+    dopamine_oriented = dopamine_weights * sign
+    top_rna = _fig_top_loadings(mofa.get_weights(views=["rna"], df=True)[factor] * sign, n_top)
+    top_msi = _fig_top_loadings(mofa.get_weights(views=[msi_view], df=True)[factor] * sign, n_top)
+    r2 = _fig_factor_r2(mofa, factor)
+    runner_up = sorted(cluster_means.values)[-2] if cluster_means.size > 1 else np.nan
+
+    with plt.rc_context(FIG_RCPARAMS):
+        fig = plt.figure(figsize=(13, 7.6), constrained_layout=True)
+        gs = fig.add_gridspec(2, 3)
+
+        ax = fig.add_subplot(gs[0, 0])
+        _fig_spatial_scatter(ax, spatial, scores,
+                             f"(a) Teacher {factor} on {section_label} spatial",
+                             cbar_label="factor score")
+
+        ax = fig.add_subplot(gs[0, 1])
+        colors = ["#c0392b" if f == factor else "#95a5a6" for f in dopamine_oriented.index]
+        ax.barh(range(len(dopamine_oriented)), dopamine_oriented.values, color=colors)
+        ax.set_yticks(range(len(dopamine_oriented)))
+        ax.set_yticklabels([f.replace("Factor", "F") for f in dopamine_oriented.index], fontsize=8)
+        ax.invert_yaxis()
+        ax.axvline(0, color="k", lw=0.6)
+        ax.set_xlabel("msi:Dopamine loading")
+        ax.set_title(f"(b) Dopamine loads on {factor}")
+
+        ax = fig.add_subplot(gs[0, 2])
+        colors = [
+            "#c0392b" if c == top_cluster else ("#e67e22" if c == highlight_cluster else "#95a5a6")
+            for c in cluster_means.index
+        ]
+        ax.bar(range(len(cluster_means)), cluster_means.values, color=colors)
+        ax.set_xticks(range(len(cluster_means)))
+        ax.set_xticklabels(cluster_means.index, fontsize=7, rotation=90)
+        ax.axhline(0, color="k", lw=0.6)
+        ax.set_ylabel(f"mean {factor} score")
+        ax.set_title(f"(c) Factor by ATAC cluster ({highlight_cluster}=MXD)")
+
+        ax = fig.add_subplot(gs[1, 0])
+        ax.barh(range(len(top_rna)), top_rna.values, color="#2c7fb8")
+        ax.set_yticks(range(len(top_rna)))
+        ax.set_yticklabels(top_rna.index, fontsize=9, fontstyle="italic")
+        ax.axvline(0, color="k", lw=0.6)
+        ax.set_xlabel("gene loading")
+        ax.set_title(f"(d) Top RNA loadings ({factor})")
+
+        ax = fig.add_subplot(gs[1, 1])
+        ax.barh(range(len(top_msi)), top_msi.values, color=_fig_msi_bar_colors(top_msi.index))
+        ax.set_yticks(range(len(top_msi)))
+        ax.set_yticklabels([f.replace("msi:", "") for f in top_msi.index], fontsize=9)
+        ax.axvline(0, color="k", lw=0.6)
+        ax.set_xlabel("metabolite / m/z loading")
+        ax.set_title(f"(e) Top MSI loadings ({factor})")
+
+        ax = fig.add_subplot(gs[1, 2])
+        ax.axis("off")
+        ax.text(0.0, 0.97, f"Teacher {factor} ({section_label} target)",
+                fontweight="bold", fontsize=11, va="top")
+        summary = (
+            f"dopamine loading: {dopamine_oriented[factor]:+.2f}\n"
+            f"top ATAC cluster: {top_cluster} (MXD)\n"
+            f"  mean {cluster_means[top_cluster]:+.1f} vs {runner_up:+.1f} next\n\n"
+            f"R2 (% variance explained):\n"
+            f"  MSI  {r2.get(msi_view, np.nan):.1f}\n"
+            f"  RNA  {r2.get('rna', np.nan):.2f}\n"
+            f"  ATAC {r2.get('atac', np.nan):.3f}"
+        )
+        ax.text(0.0, 0.82, summary, fontsize=9.5, va="top", family="monospace")
+
+    return _fig_finish(fig, output_file)
+
+
+def FIG_multiome_dopamine_transfer(
+    mudata=None,
+    *,
+    msi_view="msi_student",
+    cluster_key="REF_arc_gex_graphclust_Cluster",
+    output_file=None,
+):
+    """Student-imputed dopamine in the dissociated multiome target lands on one cluster.
+
+    (a) imputed dopamine over the ingest-derived coordinates, (b) the graph-cluster
+    occupying that same territory, (c) mean imputed dopamine per cluster -- the
+    quantification that makes the co-localisation in (a)/(b) a claim rather than an
+    impression.
+    """
+    from matplotlib.lines import Line2D
+
+    if mudata is None:
+        mudata = multiome_trimodal_mudata
+
+    msi = mudata.mod[msi_view]
+    dopamine = as_dense(msi[:, "msi:Dopamine"].X).ravel()
+    spatial = np.asarray(mudata.obsm["spatial"], dtype=float)
+    clusters = (
+        msi.obs[cluster_key] if cluster_key in msi.obs.columns else mudata.obs[cluster_key]
+    ).astype(str).to_numpy()
+
+    cluster_means = pd.DataFrame({"cluster": clusters, "dopamine": dopamine}).groupby("cluster")["dopamine"].mean()
+    cluster_means = cluster_means.reindex(_fig_sorted_clusters(cluster_means.index))
+    top_cluster = cluster_means.idxmax()
+    is_top = clusters == top_cluster
+    print(f"Dopamine-high cluster: {top_cluster} (mean {cluster_means.max():+.3f}; "
+          f"next {sorted(cluster_means.values)[-2]:+.3f})")
+
+    with plt.rc_context(FIG_RCPARAMS):
+        fig = plt.figure(figsize=(14, 4.4), constrained_layout=True)
+        gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.9])
+
+        ax = fig.add_subplot(gs[0, 0])
+        _fig_spatial_scatter(ax, spatial, dopamine,
+                             "(a) Student-imputed msi:Dopamine\n(ingest coordinates)",
+                             cbar_label="imputed intensity", s=6)
+
+        ax = fig.add_subplot(gs[0, 1])
+        ax.scatter(spatial[~is_top, 0], spatial[~is_top, 1], c="#d9d9d9", s=6, linewidths=0)
+        ax.scatter(spatial[is_top, 0], spatial[is_top, 1], c="#c0392b", s=8, linewidths=0)
+        ax.set_aspect("equal")
+        ax.invert_yaxis()
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.set_title(f"(b) REF graph-cluster {top_cluster}\n(striatal domain)")
+        ax.legend(
+            handles=[
+                Line2D([0], [0], marker="o", color="w", markerfacecolor="#c0392b",
+                       markersize=7, label=f"cluster {top_cluster}"),
+                Line2D([0], [0], marker="o", color="w", markerfacecolor="#d9d9d9",
+                       markersize=7, label="other"),
+            ],
+            loc="lower right", fontsize=8, frameon=False,
+        )
+
+        ax = fig.add_subplot(gs[0, 2])
+        colors = ["#c0392b" if c == top_cluster else "#95a5a6" for c in cluster_means.index]
+        ax.bar(range(len(cluster_means)), cluster_means.values, color=colors)
+        ax.set_xticks(range(len(cluster_means)))
+        ax.set_xticklabels(cluster_means.index, fontsize=7)
+        ax.set_xlabel("REF graph-cluster")
+        ax.set_ylabel("mean imputed msi:Dopamine")
+        ax.set_title(f"(c) Dopamine concentrates in cluster {top_cluster}")
+
+    return _fig_finish(fig, output_file)
+
+
+def FIG_nmf_mofa_enrichment(
+    *,
+    nmf_loadings=None,
+    models=None,
+    top_k=50,
+    output_file=None,
+):
+    """Do the MOFA factors rediscover the ST NMF dopamine program?
+
+    Ranks the NMF program's top-`top_k` genes against each model's factor RNA
+    loadings. This is the cross-dataset check: the NMF program is fit on the spatial
+    source section, while the factors come from the spatial and multiome *targets*,
+    so agreement cannot be an artefact of shared fitting.
+    """
+    from matplotlib.lines import Line2D
+    from sklearn.metrics import roc_auc_score
+    from scipy.stats import hypergeom, spearmanr
+
+    if nmf_loadings is None:
+        nmf_loadings = best_nmf_component
+    if models is None:
+        models = [
+            ("Teacher", spatial_mofa, "msi_teacher", spatial_dopamine_factor_n),
+            ("Student", multiome_mofa, "msi_student", multiome_dopamine_factor_n),
+        ]
+
+    nmf_bare = _fig_bare_gene_index(nmf_loadings, "NMF")
+
+    results = []
+    for name, mofa, msi_view, factor in models:
+        factor, sign, _ = _fig_dopamine_factor(mofa, msi_view, factor)
+        rna = _fig_bare_gene_index(
+            mofa.get_weights(views=["rna"], df=True)[factor] * sign, f"{name} MOFA RNA"
+        )
+        shared = nmf_bare.index.intersection(rna.index)
+        if len(shared) == 0:
+            raise ValueError(
+                f"No genes shared between the NMF program and {name} {factor} RNA loadings.\n"
+                f"  NMF  ({len(nmf_bare)}): {list(nmf_bare.index[:5])}\n"
+                f"  MOFA ({len(rna)}): {list(rna.index[:5])}\n"
+                "Both are already stripped of any 'view:' prefix, so this is a genuine "
+                "naming mismatch (e.g. case, or mouse vs human symbols), not a prefix issue."
+            )
+        nmf_shared = nmf_bare.reindex(shared)
+        rna_shared = rna.reindex(shared)
+
+        nmf_top = set(nmf_shared.sort_values(ascending=False).head(top_k).index)
+        labels = np.fromiter((g in nmf_top for g in shared), dtype=int, count=len(shared))
+        auroc = roc_auc_score(labels, rna_shared.values)
+        rho, rho_p = spearmanr(nmf_shared.values, rna_shared.values)
+        mofa_top = set(rna_shared.sort_values(ascending=False).head(top_k).index)
+        overlap = len(nmf_top & mofa_top)
+        # P(overlap >= observed) for two top-k draws from the shared gene pool
+        hyper_p = float(hypergeom.sf(overlap - 1, len(shared), top_k, top_k))
+        expected = top_k ** 2 / len(shared)
+
+        print(f"{name} {factor}: |shared|={len(shared)} AUROC={auroc:.3f} "
+              f"rho={rho:.3f} overlap@{top_k}={overlap} (exp {expected:.1f}) p={hyper_p:.2e}")
+        results.append({
+            "name": name, "auroc": float(auroc), "spearman": float(rho),
+            "spearman_p": float(rho_p), "overlap": overlap, "expected": expected,
+            "hyper_p": hyper_p, "n_shared": len(shared),
+            "top": rna_shared.reindex(nmf_top).dropna().values,
+            "rest": rna_shared.drop(index=[g for g in nmf_top if g in rna_shared.index]).values,
+        })
+
+    with plt.rc_context(FIG_RCPARAMS):
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4.6), constrained_layout=True)
+
+        ax = axes[0]
+        for i, res in enumerate(results):
+            box = ax.boxplot([res["rest"], res["top"]], positions=[i * 2 + 1, i * 2 + 1.7],
+                             widths=0.5, patch_artist=True, showfliers=False)
+            for patch, color in zip(box["boxes"], ["#bdbdbd", "#c0392b"]):
+                patch.set_facecolor(color)
+            ax.text(i * 2 + 1.35, 0.96,
+                    f"AUROC={res['auroc']:.2f}\n$p$={res['hyper_p']:.0e}",
+                    ha="center", va="top", fontsize=9,
+                    transform=ax.get_xaxis_transform())
+        ax.set_xticks([i * 2 + 1.35 for i in range(len(results))])
+        ax.set_xticklabels([res["name"] for res in results])
+        ax.set_ylabel("MOFA factor RNA loading")
+        ax.set_title(f"(a) NMF-dopamine top-{top_k} genes\nrank high on the MOFA factor")
+        ax.legend(
+            handles=[
+                Line2D([0], [0], marker="s", color="w", markerfacecolor="#c0392b",
+                       markersize=9, label=f"NMF top-{top_k}"),
+                Line2D([0], [0], marker="s", color="w", markerfacecolor="#bdbdbd",
+                       markersize=9, label="other shared genes"),
+            ],
+            fontsize=8, frameon=False, loc="lower right",
+        )
+
+        ax = axes[1]
+        x = np.arange(len(results))
+        width = 0.38
+        observed = [res["overlap"] for res in results]
+        expected = [res["expected"] for res in results]
+        ax.bar(x - width / 2, observed, width, color="#c0392b", label="observed overlap")
+        ax.bar(x + width / 2, expected, width, color="#95a5a6", label="expected (random)")
+        for i, (obs, exp) in enumerate(zip(observed, expected)):
+            ax.text(i - width / 2, obs, str(obs), ha="center", va="bottom", fontsize=9)
+            ax.text(i + width / 2, exp, f"{exp:.1f}", ha="center", va="bottom", fontsize=9)
+        ax.set_xticks(x)
+        ax.set_xticklabels([res["name"] for res in results])
+        ax.set_ylabel(f"genes in top-{top_k} of both")
+        ax.set_title("(b) Top-50 overlap: observed vs expected")
+        ax.legend(fontsize=8, frameon=False)
+
+    return _fig_finish(fig, output_file)
+
+
+FIG_nmf_dopamine(
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_nmf_xcorr.pdf"),
+)
+FIG_mofa_dopamine_factor(
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_mofa_factor.pdf"),
+)
+FIG_teacher_mofa_dopamine(
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_teacher_mofa.pdf"),
+)
+FIG_multiome_dopamine_transfer(
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_multiome_transfer.pdf"),
+)
+FIG_nmf_mofa_enrichment(
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_nmf_mofa_enrichment.pdf"),
+)
+
+# %%

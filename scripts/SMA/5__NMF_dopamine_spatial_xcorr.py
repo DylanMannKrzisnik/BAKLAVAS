@@ -16,6 +16,14 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
 
+
+def save_figure_png(fig, output_file, **savefig_kwargs):
+    """Save a figure as a 300-dpi PNG, regardless of the supplied suffix."""
+    output_path = Path(output_file).with_suffix(".png")
+    fig.savefig(output_path, format="png", dpi=300, **savefig_kwargs)
+    return output_path
+
+
 #%% Load joint data
 # Mirrors the save path at the end of 3__spatial_meta_modelling.py:
 #   OUTPUT_DIR / "spatialjepa_models" / RUN_ID / "joint_adata.h5ad"
@@ -1259,7 +1267,7 @@ def plot_atac_ccre_gsea(
         plt.show()
     else:
         fig.tight_layout()
-        fig.savefig(output_file)
+        save_figure_png(fig, output_file)
         plt.close(fig)
     return pre
 
@@ -1272,7 +1280,7 @@ mxd_multiome_gsea = plot_atac_ccre_gsea(
     mxd_ccre_regions,
     multiome_dopamine_factor_n,
     "MXD",
-    output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_gsea.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_gsea.png"),
 )
 
 d2msn_multiome_gsea = plot_atac_ccre_gsea(
@@ -1280,7 +1288,7 @@ d2msn_multiome_gsea = plot_atac_ccre_gsea(
     d2msn_ccre_regions,
     multiome_dopamine_factor_n,
     "D2MSN",
-    output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_gsea.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_gsea.png"),
 )
 
 
@@ -1469,16 +1477,16 @@ def plot_top_motifs(enr, label, n_top=15, output_file=None):
     if output_file is None:
         plt.show()
     else:
-        fig.savefig(output_file)
+        save_figure_png(fig, output_file)
         plt.close(fig)
 
 plot_top_motifs(
     mxd_motif_enrichment, "MXD",
-    output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_motif_enrichment.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_motif_enrichment.png"),
 )
 plot_top_motifs(
     d2msn_motif_enrichment, "D2MSN",
-    output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_motif_enrichment.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_motif_enrichment.png"),
 )
 
 
@@ -1603,8 +1611,8 @@ def plot_weight_gmm(w, *, seed=0, output_file=None, title=None):
         fig.suptitle(title)
     fig.tight_layout()
     if output_file:
-        fig.savefig(output_file, bbox_inches="tight")
-        print(f"Wrote GMM weight-fit diagnostic -> {output_file}")
+        output_path = save_figure_png(fig, output_file, bbox_inches="tight")
+        print(f"Wrote GMM weight-fit diagnostic -> {output_path}")
     return fit
 
 
@@ -1707,7 +1715,7 @@ regulon_res = rna_regulon_enrichment(multiome_mofa, multiome_dopamine_factor_n, 
 _rna_w = multiome_mofa.get_weights(views=["rna"], factors=multiome_dopamine_factor_n, df=True).iloc[:, 0]
 plot_weight_gmm(
     _rna_w, title=f"Dopamine factor RNA loadings (factor {multiome_dopamine_factor_n})",
-    output_file=os.path.join(overleaf_figures_dir, "dopamine_rna_weight_gmm.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_rna_weight_gmm.png"),
 )
 
 enriched_regulons_fdr = set(regulon_res.loc[regulon_res["padj"] < 0.05, "Term"])
@@ -1820,18 +1828,18 @@ def plot_regulon_concordance_dotplot(regulon_res, atac_enr, label, *, n_top=20, 
     if output_file is None:
         plt.show()
     else:
-        fig.savefig(output_file)
+        save_figure_png(fig, output_file)
         plt.close(fig)
 
 
 # Enrichr-style concordance dotplots: top regulons colored by RNAxATAC concordance tier.
 plot_regulon_concordance_dotplot(
     regulon_res, mxd_motif_enrichment, "MXD",
-    output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_regulon_concordance_dotplot.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_mxd_regulon_concordance_dotplot.png"),
 )
 plot_regulon_concordance_dotplot(
     regulon_res, d2msn_motif_enrichment, "D2MSN",
-    output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_regulon_concordance_dotplot.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "dopamine_d2msn_regulon_concordance_dotplot.png"),
 )
 
 # %% Load CATLAS cCRE->gene connections (co-accessibility) as a reusable mapping
@@ -1931,7 +1939,7 @@ def _fig_finish(fig, output_file):
     if output_file is None:
         plt.show()
     else:
-        fig.savefig(output_file, bbox_inches="tight")
+        output_file = save_figure_png(fig, output_file, bbox_inches="tight")
         plt.close(fig)
         print(f"Wrote {output_file}")
     return fig
@@ -2394,19 +2402,19 @@ def FIG_nmf_mofa_enrichment(
 
 
 FIG_nmf_dopamine(
-    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_nmf_xcorr.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_nmf_xcorr.png"),
 )
 FIG_mofa_dopamine_factor(
-    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_mofa_factor.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_mofa_factor.png"),
 )
 FIG_teacher_mofa_dopamine(
-    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_teacher_mofa.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_teacher_mofa.png"),
 )
 FIG_multiome_dopamine_transfer(
-    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_multiome_transfer.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_multiome_transfer.png"),
 )
 FIG_nmf_mofa_enrichment(
-    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_nmf_mofa_enrichment.pdf"),
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_nmf_mofa_enrichment.png"),
 )
 
 # %%

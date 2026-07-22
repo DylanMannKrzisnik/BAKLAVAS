@@ -290,8 +290,8 @@ embedding_fig.tight_layout(rect=[0, 0, 1, 0.97])
 plt.show()
 # %% barplot of bivariate Moran's I
 
-def FIG_nmf_dopamine():
-    nmf_cmp = bivariate_moran_I_df.iloc[bivariate_moran_I_df['bivariate_moran_I'].argmax()].name
+def FIG_nmf_dopamine(override_nmf_cmp=None): # can override with '16' for full bi-hemispheric striatal NMF
+    nmf_cmp = override_nmf_cmp if override_nmf_cmp is not None else bivariate_moran_I_df.iloc[bivariate_moran_I_df['bivariate_moran_I'].argmax()].name
     nmf_cmp_morans_i = bivariate_moran_I_df.loc[nmf_cmp, 'bivariate_moran_I']
 
     fig, ax = plt.subplots(1, 3, figsize=(10, 3))

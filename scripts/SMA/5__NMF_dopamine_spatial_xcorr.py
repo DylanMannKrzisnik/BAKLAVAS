@@ -290,6 +290,19 @@ embedding_fig.tight_layout(rect=[0, 0, 1, 0.97])
 plt.show()
 # %% barplot of bivariate Moran's I
 
+def FIG_nmf_dopamine():
+    nmf_cmp = bivariate_moran_I_df.iloc[bivariate_moran_I_df['bivariate_moran_I'].argmax()].name
+    nmf_cmp_morans_i = bivariate_moran_I_df.loc[nmf_cmp, 'bivariate_moran_I']
+
+    fig, ax = plt.subplots(1, 3, figsize=(10, 3))
+    sc.pl.embedding(joint_adata, basis='spatial', color='msi:Dopamine', size=100, ax=ax[0], show=False)
+    sc.pl.embedding(nmf_adata, basis='spatial', color=nmf_cmp, size=100, ax=ax[1], show=False)
+    ax[1].set_title(f'NMF {nmf_cmp} (biv. I = {nmf_cmp_morans_i:.3f})')
+    best_nmf_component[~best_nmf_component.index.str.contains('mt-')].sort_values(ascending=True).tail(10).plot(kind='barh', ax=ax[2])
+    ax[2].set_title(f'Gene loading for NMF {nmf_cmp}')
+    fig.tight_layout(); fig.show()
+    return fig, ax
+
 bivariate_moran_I_df.plot(kind='barh')
 plt.title('Bivariate Moran\'s I of NMF components against dopamine')
 plt.xlabel('Bivariate Moran\'s I')

@@ -24,6 +24,13 @@ def save_figure_png(fig, output_file, **savefig_kwargs):
     return output_path
 
 
+def save_figure_svg(fig, output_file, **savefig_kwargs):
+    """Save a figure as a vector SVG, regardless of the supplied suffix."""
+    output_path = Path(output_file).with_suffix(".svg")
+    fig.savefig(output_path, format="svg", **savefig_kwargs)
+    return output_path
+
+
 #%% Load joint data
 # Mirrors the save path at the end of 3__spatial_meta_modelling.py:
 #   OUTPUT_DIR / "spatialjepa_models" / RUN_ID / "joint_adata.h5ad"
@@ -1254,22 +1261,53 @@ def plot_atac_ccre_gsea(
         rank_metric=pre.ranking,
         term=term,
         **pre.results[term],
-        figsize=(5, 5),
+        figsize=(4, 4.5),
     )
     # gseaplot hard-codes gene-expression labels; relabel for the ATAC-peak context.
     for ax in axes:
         if ax.get_xlabel() == "Gene Rank":
-            ax.set_xlabel("Peak Rank")
+            ax.set_xlabel("Peak Rank", fontsize=10)
+        elif ax.get_xlabel():
+            ax.set_xlabel(ax.get_xlabel(), fontsize=10)
+
         if ax.get_ylabel() == "Ranked metric":
-            ax.set_ylabel("Ranked weight")
+            ax.set_ylabel("Ranked weight", fontsize=10, fontweight="normal")
+        elif ax.get_ylabel():
+            ax.set_ylabel(ax.get_ylabel(), fontsize=10, fontweight="normal")
     fig = axes[0].figure
     if output_file is None:
         plt.show()
     else:
-        fig.tight_layout()
-        save_figure_png(fig, output_file)
+        save_figure_png(fig, output_file, bbox_inches="tight")
         plt.close(fig)
     return pre
+
+def _fig_draw_gsea(host_ax, pre, ccre_label):
+    """Draw a pre-computed cCRE GSEA (from plot_atac_ccre_gsea's `pre`) into host_ax's
+    figure.
+
+    gseapy's GSEAPlot subdivides its target *figure* at fixed fractions and ignores the
+    host axis position, so host_ax must belong to a figure/subfigure dedicated to this
+    one GSEA plot (a matplotlib SubFigure is the intended container). Reuses the same
+    relabelling as plot_atac_ccre_gsea. No prerank recompute -- the `pre` object is reused.
+    """
+    from gseapy.plot import GSEAPlot
+
+    term = f"{ccre_label}_cCRE"
+    r = pre.results[term]
+    g = GSEAPlot(
+        term=term, tag=r["hits"], runes=r["RES"],
+        nes=r["nes"], pval=r["pval"], fdr=r["fdr"],
+        rank_metric=pre.ranking, color="#88C544", ax=host_ax,
+    )
+    g.add_axes()
+    for ax in g.fig.axes:
+        if ax.get_xlabel() == "Gene Rank":
+            ax.set_xlabel("Peak Rank", fontsize=10)
+        if ax.get_ylabel() == "Ranked metric":
+            ax.set_ylabel("Ranked weight", fontsize=10, fontweight="normal")
+    return g
+
 
 # Save GSEA plots to cibb overleaf figures directory
 overleaf_figures_dir = "/home/mcb/users/dmannk/THESIS_base/overleaf-cibb-2026/figures"
@@ -1438,7 +1476,9 @@ d2msn_motif_enrichment = run_tf_motif_enrichment(
     background_names=d2msn_ccre_background_peaks,
 )
 
-def plot_top_motifs(enr, label, n_top=15, output_file=None):
+def _fig_draw_top_motifs(ax, enr, label, n_top=15):
+    """Draw the top-TF-motif bar panel onto `ax` (shared by the standalone figure and
+    the cCRE/TF overview composite)."""
     from matplotlib.patches import Patch
 
     top = enr.sort_values("padj").head(n_top).iloc[::-1]
@@ -1459,20 +1499,24 @@ def plot_top_motifs(enr, label, n_top=15, output_file=None):
 
     bar_colors = [TIER_COLORS[tier(r)] for _, r in top.iterrows()]
 
-    fig, ax = plt.subplots(figsize=(6, 5))
     ax.barh(top["motif_name"], -np.log10(top["padj"].clip(lower=1e-300)), color=bar_colors)
     # FDR q = 0.05 cutoff on the (already -log10 FDR) x-axis; bars past it are FDR-significant.
     ax.axvline(-np.log10(0.05), color="k", ls="--", lw=0.8, zorder=0)
     ax.set_xlabel("-log10(FDR q-value)")
-    ax.set_title(f"{label}: top enriched TF motifs")
+    ax.set_title(f"{label}: top TF motifs")
     ax.legend(
         handles=[
             Patch(facecolor=TIER_COLORS["fdr"], label="FDR q < 0.05"),
             Patch(facecolor=TIER_COLORS["nominal"], label="nominal p < 0.05"),
             Patch(facecolor=TIER_COLORS["ns"], label="n.s."),
         ],
-        fontsize=8, loc="lower right", frameon=False,
+        fontsize=8, loc="lower right", frameon=True, framealpha=1.0
     )
+
+
+def plot_top_motifs(enr, label, n_top=15, output_file=None):
+    fig, ax = plt.subplots(figsize=(3.5, 4))
+    _fig_draw_top_motifs(ax, enr, label, n_top=n_top)
     plt.tight_layout()
     if output_file is None:
         plt.show()
@@ -1762,8 +1806,9 @@ def assign_concordance_tier(term, rna_fdr, rna_nom, atac_fdr, atac_nom):
     return None
 
 
-def plot_regulon_concordance_dotplot(regulon_res, atac_enr, label, *, n_top=20, output_file=None):
-    """Enrichr-style dotplot of top RNA regulons, colored by RNAxATAC concordance tier.
+def _fig_draw_regulon_concordance(ax, regulon_res, atac_enr, label, *, n_top=20, title=None):
+    """Draw the RNAxATAC concordance dotplot onto `ax` (shared by the standalone figure
+    and the cCRE/TF overview composite).
 
     x = -log10(RNA regulon FDR); dot size proportional to the regulon's overlap gene
     count; dot color = the most-stringent concordance tier the TF reaches against this
@@ -1796,14 +1841,13 @@ def plot_regulon_concordance_dotplot(regulon_res, atac_enr, label, *, n_top=20, 
     x = -np.log10(top["padj"].clip(lower=1e-300))
     y = np.arange(len(top))
 
-    fig, ax = plt.subplots(figsize=(6.5, 0.34 * len(top) + 1.6))
     ax.scatter(x, y, s=sizes, c=colors, edgecolor="k", linewidth=0.4, zorder=3)
     ax.axvline(-np.log10(0.05), color="k", ls="--", lw=0.8, zorder=0)
     ax.set_yticks(y)
     ax.set_yticklabels(top["Term"])
     ax.set_ylim(-0.6, len(top) - 0.4)
     ax.set_xlabel("-log10(RNA regulon FDR)")
-    ax.set_title(f"RNA regulon enrichment x {label} ATAC motif concordance")
+    ax.set_title(title or f"RNA regulon enrichment x {label} ATAC motif concordance")
 
     tier_handles = [Patch(facecolor=c, edgecolor="k", lw=0.4, label=t)
                     for t, c in CONCORDANCE_TIERS]
@@ -1824,6 +1868,12 @@ def plot_regulon_concordance_dotplot(regulon_res, atac_enr, label, *, n_top=20, 
     ax.legend(handles=size_handles, fontsize=7, loc="upper left",
               frameon=False, title="overlap", labelspacing=1.2, borderpad=1.0)
 
+
+def plot_regulon_concordance_dotplot(regulon_res, atac_enr, label, *, n_top=20, output_file=None):
+    """Enrichr-style dotplot of top RNA regulons, colored by RNAxATAC concordance tier."""
+    n_rows = min(n_top, len(regulon_res))
+    fig, ax = plt.subplots(figsize=(3, 0.34 * n_rows + 1.6))
+    _fig_draw_regulon_concordance(ax, regulon_res, atac_enr, label, n_top=n_top)
     plt.tight_layout()
     if output_file is None:
         plt.show()
@@ -2523,6 +2573,80 @@ def FIG_dopamine_overview(
     return _fig_finish(fig, output_file)
 
 
+def FIG_ccre_tf_overview(
+    *,
+    cell_types=("D2MSN", "MXD"),
+    gsea_by_label=None,
+    motif_by_label=None,
+    regulon_res_obj=None,
+    n_top_motifs=15,
+    n_top_regulons=20,
+    output_file=None,
+):
+    """cCRE -> TF regulatory overview, one column pair per cell type.
+
+    Assembles the panels of the standalone cCRE/TF figures into a single board and
+    saves it as **SVG** (vector) by default:
+
+      left,  top:    pre-ranked cCRE GSEA curve per cell type (reuses each cell type's
+                     `pre` object via _fig_draw_gsea)
+      left,  bottom: top enriched TF motifs per cell type (_fig_draw_top_motifs)
+      right:         RNA-regulon x ATAC-motif concordance dotplot per cell type
+                     (_fig_draw_regulon_concordance)
+
+    The spatial cCRE maps in the source screenshot are intentionally omitted (they have
+    no generating function in this script). Because gseapy's GSEAPlot subdivides a whole
+    figure at fixed fractions, each GSEA curve gets its own matplotlib SubFigure so the
+    two don't collide.
+
+    Defaults pull the module-level objects already computed above:
+      gsea:    {label: pre}          e.g. {"D2MSN": d2msn_multiome_gsea, "MXD": mxd_multiome_gsea}
+      motif:   {label: enrichment}   e.g. {"D2MSN": d2msn_motif_enrichment, ...}
+      regulon: regulon_res
+    """
+    if gsea_by_label is None:
+        gsea_by_label = {"D2MSN": d2msn_multiome_gsea, "MXD": mxd_multiome_gsea}
+    if motif_by_label is None:
+        motif_by_label = {"D2MSN": d2msn_motif_enrichment, "MXD": mxd_motif_enrichment}
+    if regulon_res_obj is None:
+        regulon_res_obj = regulon_res
+
+    with plt.rc_context(FIG_RCPARAMS):
+        fig = plt.figure(figsize=(7 + 3.2 * len(cell_types), 9))
+        # left half = GSEA (top) + motif bars (bottom); right half = concordance dotplots
+        sf_left, sf_right = fig.subfigures(1, 2, width_ratios=[1.0, 1.15], wspace=0.02)
+        sf_gsea, sf_motif = sf_left.subfigures(2, 1, height_ratios=[1.0, 1.0], hspace=0.05)
+
+        # GSEA row: one dedicated SubFigure per cell type (GSEAPlot needs its own figure)
+        gsea_cells = sf_gsea.subfigures(1, len(cell_types), wspace=0.05)
+        gsea_cells = np.atleast_1d(gsea_cells)
+        for sf_cell, label in zip(gsea_cells, cell_types):
+            host = sf_cell.add_subplot(111)
+            host.set_axis_off()
+            _fig_draw_gsea(host, gsea_by_label[label], label)
+
+        # TF-motif bar row
+        motif_axes = np.atleast_1d(sf_motif.subplots(1, len(cell_types)))
+        for ax, label in zip(motif_axes, cell_types):
+            _fig_draw_top_motifs(ax, motif_by_label[label], label, n_top=n_top_motifs)
+
+        # concordance dotplots (tall, span the full right half)
+        conc_axes = np.atleast_1d(sf_right.subplots(1, len(cell_types)))
+        for ax, label in zip(conc_axes, cell_types):
+            _fig_draw_regulon_concordance(
+                ax, regulon_res_obj, motif_by_label[label], label,
+                n_top=n_top_regulons, title=f"motif concordance ({label})",
+            )
+
+    if output_file is None:
+        plt.show()
+    else:
+        output_file = save_figure_svg(fig, output_file, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Wrote {output_file}")
+    return fig
+
+
 #%%
 FIG_nmf_dopamine(
     output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_nmf_xcorr.png"),
@@ -2544,4 +2668,7 @@ FIG_nmf_mofa_enrichment(
 
 FIG_dopamine_overview(
     output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_overview.png"),
+)
+FIG_ccre_tf_overview(
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_ccre_tf_overview.svg"),
 )

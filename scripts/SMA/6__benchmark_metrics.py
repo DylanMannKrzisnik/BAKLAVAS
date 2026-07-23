@@ -90,6 +90,11 @@ SSM_RNG = np.random.default_rng(0)
 # so the claim is structural (Metrics 1-3), not "the latent can decode dopamine"
 # (the decodability control, Metric 4, is expected to be at parity across models).
 DOPA_MODELS = ("teacher", "student", "nonspatial")  # core lineup; others added if present
+MODEL_COLORS = {
+    "teacher": "#66C2A5",      # Teal/Green from Set2
+    "student": "#FC8D62",      # Orange from Set2
+    "nonspatial": "#8DA0CB"    # Blue/Gray from Set2
+}
 DOPA_FEATURE = "msi:Dopamine"        # the clean intact-striatum-specific peak (vs the
                                       # weaker, ~0.2-correlated "msi:Dopamine (single)").
 DOPA_LAYER = "normalized"            # the per-spot values the models were trained on; no
@@ -660,27 +665,68 @@ def dopamine_representation_analysis(joint, sample_id, k=DOPA_K, n_boot=DOPA_N_B
     return results_long, comparison, decod, ksweep
 
 
-def _dopamine_figures(results_long, comparison, decod, ksweep, latents, sample_id):
-    order = [m for m in DOPA_MODELS if m in latents]
+def _finish_svg(fig, output_file):
+    """Show a figure or save it as SVG, regardless of the supplied suffix."""
+    if output_file is None:
+        plt.show()
+    else:
+        output_path = Path(output_file).with_suffix(".svg")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, format="svg", bbox_inches="tight")
+        plt.close(fig)
+        print(f"[INFO] wrote {output_path}")
+    return fig
 
-    # 1. Headline: ΔAUROC per model with block-bootstrap CI.
+
+def _dopamine_model_order(df, model_order=None):
+    """Return the requested model order followed by any additional models."""
+    present = list(pd.unique(df["model"]))
+    requested = list(DOPA_MODELS if model_order is None else model_order)
+    return [m for m in requested if m in present] + [
+        m for m in present if m not in requested
+    ]
+
+
+def FIG_dopamine_structural_gain(
+    results_long,
+    *,
+    sample_id="V11L12-109_B1",
+    model_order=None,
+    output_file=None,
+):
+    """ΔAUROC per model with spatial-block-bootstrap confidence intervals."""
+    order = _dopamine_model_order(results_long, model_order)
     d = results_long[(results_long.metric == "delta_auroc")].set_index("model").loc[order]
     fig, ax = plt.subplots(figsize=(4.2, 3.4))
     yerr = np.vstack([d.value - d.ci_low, d.ci_high - d.value])
-    ax.bar(order, d.value, yerr=yerr, capsize=4, color=sns.color_palette("Set2"),
+    colors = [MODEL_COLORS.get(m, "#888888") for m in order]
+    ax.bar(order, d.value, yerr=yerr, capsize=4, color=colors,
            edgecolor="#555", linewidth=1)
     ax.axhline(0, color="#999", lw=0.8, ls="--")
     ax.set_ylabel("ΔAUROC (smoothed − raw dopamine)")
-    ax.set_title(f"SMA {sample_id}: dopamine structural gain")
-    ax.tick_params(axis="x", labelrotation=20)
+    ax.set_title("Dopamine structural gain")
+    ax.tick_params(axis="x", labelrotation=15)
+    for label in ax.get_xticklabels():
+        label.set_ha("right")
     fig.tight_layout()
-    save_figure(fig, "sma_dopamine_delta_auroc.pdf")
+    return _finish_svg(fig, output_file)
 
-    # 2. Moran's I per model × group (intact/lesioned striatum get CIs).
+
+def FIG_dopamine_latent_graph_smoothness(
+    results_long,
+    *,
+    sample_id="V11L12-109_B1",
+    model_order=None,
+    output_file=None,
+):
+    """Dopamine Moran's I per model and anatomical/lesion group."""
+    order = _dopamine_model_order(results_long, model_order)
     mi = results_long[results_long.metric == "morans_I"]
     fig, ax = plt.subplots(figsize=(7.0, 3.6))
     grp_order = ["intact_striatum", "lesioned_striatum",
                  "intact_not_striatum", "lesioned_not_striatum"]
+    grp_labels = ["intact striatum", "lesioned striatum",
+                  "intact non-striatum", "lesioned non-striatum"]
     x = np.arange(len(grp_order))
     w = 0.8 / max(len(order), 1)
     for i, m in enumerate(order):
@@ -688,43 +734,174 @@ def _dopamine_figures(results_long, comparison, decod, ksweep, latents, sample_i
         err = np.vstack([(sub.value - sub.ci_low).fillna(0),
                          (sub.ci_high - sub.value).fillna(0)])
         ax.bar(x + i * w, sub.value, width=w, yerr=err, capsize=3, label=m,
-               edgecolor="#555", linewidth=0.8)
+               color=MODEL_COLORS.get(m, "#888888"), edgecolor="#555", linewidth=0.8)
     ax.set_xticks(x + w * (len(order) - 1) / 2)
-    ax.set_xticklabels(grp_order, rotation=20, ha="right")
+    ax.set_xticklabels(grp_labels, rotation=15, ha="right")
     ax.set_ylabel("Moran's I of dopamine")
-    ax.set_title(f"SMA {sample_id}: dopamine latent-graph smoothness")
+    ax.set_title("Dopamine latent-graph smoothness")
     ax.legend(frameon=False, fontsize=8)
     fig.tight_layout()
-    save_figure(fig, "sma_dopamine_morans_I.pdf")
+    return _finish_svg(fig, output_file)
 
-    # 3. Intact-striatal enrichment of the dopamine-high latent region (log-odds).
+
+def FIG_dopamine_intact_striatal_enrichment(
+    results_long,
+    *,
+    sample_id="V11L12-109_B1",
+    model_order=None,
+    output_file=None,
+):
+    """Intact-striatal enrichment of the dopamine-high latent region."""
+    order = _dopamine_model_order(results_long, model_order)
     en = (results_long[results_long.metric == "enrich_log_odds"]
           .set_index("model").reindex(order))
     fig, ax = plt.subplots(figsize=(4.2, 3.4))
     en_err = np.vstack([(en.value - en.ci_low).fillna(0),
                         (en.ci_high - en.value).fillna(0)])
+    colors = [MODEL_COLORS.get(m, "#888888") for m in order]
     ax.bar(order, en.value, yerr=en_err, capsize=4,
-           color=sns.color_palette("Set2"), edgecolor="#555", linewidth=1)
+           color=colors, edgecolor="#555", linewidth=1)
     ax.axhline(0, color="#999", lw=0.8, ls="--")
     ax.set_ylabel("log-odds (intact-striatal | dopamine-high)")
-    ax.set_title(f"SMA {sample_id}: intact-striatal specificity")
-    ax.tick_params(axis="x", labelrotation=20)
+    ax.set_title("Intact-striatal specificity")
+    ax.tick_params(axis="x", labelrotation=15)
+    for label in ax.get_xticklabels():
+        label.set_ha("right")
     fig.tight_layout()
-    save_figure(fig, "sma_dopamine_enrichment.pdf")
+    return _finish_svg(fig, output_file)
 
-    # 4. k-sensitivity sweep of the headline metrics.
+
+def FIG_dopamine_composite(
+    results_long,
+    *,
+    sample_id="V11L12-109_B1",
+    model_order=None,
+    output_file=None,
+):
+    """3-panel horizontal composite figure of dopamine representation metrics."""
+    order = _dopamine_model_order(results_long, model_order)
+    colors = [MODEL_COLORS.get(m, "#888888") for m in order]
+    
+    # 1 row, 3 columns with custom width ratios to give the smoothness plot more space
+    fig, axes = plt.subplots(1, 3, figsize=(14.0, 4.0), gridspec_kw={'width_ratios': [1.6, 1.0, 1.0]})
+    
+    # ── Panel 1: Latent-graph smoothness (Moran's I) ─────────────────────────
+    ax = axes[0]
+    mi = results_long[results_long.metric == "morans_I"]
+    grp_order = ["intact_striatum", "lesioned_striatum",
+                 "intact_not_striatum", "lesioned_not_striatum"]
+    grp_labels = ["intact striatum", "lesioned striatum",
+                  "intact non-striatum", "lesioned non-striatum"]
+    x = np.arange(len(grp_order))
+    w = 0.8 / max(len(order), 1)
+    
+    for i, m in enumerate(order):
+        sub = mi[mi.model == m].set_index("group").reindex(grp_order)
+        err = np.vstack([(sub.value - sub.ci_low).fillna(0),
+                         (sub.ci_high - sub.value).fillna(0)])
+        ax.bar(x + i * w, sub.value, width=w, yerr=err, capsize=3, label=m,
+               color=colors[i], edgecolor="#555", linewidth=0.8)
+               
+    ax.set_xticks(x + w * (len(order) - 1) / 2)
+    ax.set_xticklabels(grp_labels, rotation=15, ha="right", fontsize=9)
+    ax.set_ylabel("Moran's I of dopamine", fontsize=10)
+    ax.set_title("Dopamine latent-graph smoothness", fontsize=11, fontweight="bold")
+    ax.legend(frameon=False, fontsize=8)
+    
+    # ── Panel 2: Structural gain (ΔAUROC) ────────────────────────────────────
+    ax = axes[1]
+    d = results_long[(results_long.metric == "delta_auroc")].set_index("model").loc[order]
+    yerr = np.vstack([d.value - d.ci_low, d.ci_high - d.value])
+    ax.bar(order, d.value, yerr=yerr, capsize=4, color=colors,
+           edgecolor="#555", linewidth=1)
+    ax.axhline(0, color="#999", lw=0.8, ls="--")
+    ax.set_ylabel("ΔAUROC (smoothed − raw dopamine)", fontsize=10)
+    ax.set_title("Dopamine structural gain", fontsize=11, fontweight="bold")
+    ax.tick_params(axis="x", labelrotation=15)
+    for label in ax.get_xticklabels():
+        label.set_ha("right")
+        label.set_fontsize(9)
+    
+    # ── Panel 3: Intact-striatal enrichment (log-odds) ───────────────────────
+    ax = axes[2]
+    en = (results_long[results_long.metric == "enrich_log_odds"]
+          .set_index("model").reindex(order))
+    en_err = np.vstack([(en.value - en.ci_low).fillna(0),
+                        (en.ci_high - en.value).fillna(0)])
+    ax.bar(order, en.value, yerr=en_err, capsize=4,
+           color=colors, edgecolor="#555", linewidth=1)
+    ax.axhline(0, color="#999", lw=0.8, ls="--")
+    ax.set_ylabel("log-odds (intact-striatal | dopamine-high)", fontsize=10)
+    ax.set_title("Intact-striatal specificity", fontsize=11, fontweight="bold")
+    ax.tick_params(axis="x", labelrotation=15)
+    for label in ax.get_xticklabels():
+        label.set_ha("right")
+        label.set_fontsize(9)
+    
+    fig.tight_layout()
+    return _finish_svg(fig, output_file)
+
+
+def FIG_dopamine_k_sensitivity(
+    ksweep,
+    *,
+    sample_id="V11L12-109_B1",
+    model_order=None,
+    output_file=None,
+):
+    """Sensitivity of ΔAUROC and intact-striatal Moran's I to kNN degree."""
+    order = _dopamine_model_order(ksweep, model_order)
     fig, axes = plt.subplots(1, 2, figsize=(8.0, 3.2))
+    met_labels = {
+        "delta_auroc": "ΔAUROC",
+        "moran_intact": "Moran's I (intact striatum)"
+    }
     for met, ax in zip(("delta_auroc", "moran_intact"), axes):
         for m in order:
             sub = ksweep[ksweep.model == m].sort_values("k")
-            ax.plot(sub.k, sub[met], marker="o", label=m)
+            ax.plot(sub.k, sub[met], marker="o", label=m, color=MODEL_COLORS.get(m, "#888888"))
         ax.set_xlabel("k (kNN degree)")
-        ax.set_ylabel(met)
-        ax.set_title(met)
+        ax.set_ylabel(met_labels[met])
+        ax.set_title(met_labels[met])
     axes[0].legend(frameon=False, fontsize=8)
-    fig.suptitle(f"SMA {sample_id}: dopamine metric k-sensitivity", y=1.02)
+    fig.suptitle("Dopamine metric k-sensitivity", y=1.02)
     fig.tight_layout()
-    save_figure(fig, "sma_dopamine_ksweep.pdf")
+    return _finish_svg(fig, output_file)
+
+
+def _dopamine_figures(results_long, comparison, decod, ksweep, latents, sample_id):
+    """Write the four reusable dopamine benchmark panels as SVG files."""
+    order = [m for m in DOPA_MODELS if m in latents]
+    FIG_dopamine_structural_gain(
+        results_long,
+        sample_id=sample_id,
+        model_order=order,
+        output_file=FIG_DIR / "sma_dopamine_delta_auroc.svg",
+    )
+    FIG_dopamine_latent_graph_smoothness(
+        results_long,
+        sample_id=sample_id,
+        model_order=order,
+        output_file=FIG_DIR / "sma_dopamine_morans_I.svg",
+    )
+    FIG_dopamine_intact_striatal_enrichment(
+        results_long,
+        sample_id=sample_id,
+        model_order=order,
+        output_file=FIG_DIR / "sma_dopamine_enrichment.svg",
+    )
+    FIG_dopamine_k_sensitivity(
+        ksweep,
+        sample_id=sample_id,
+        model_order=order,
+        output_file=FIG_DIR / "sma_dopamine_ksweep.svg",
+    )
+    FIG_dopamine_composite(
+        results_long,
+        sample_id=sample_id,
+        model_order=order,
+        output_file=FIG_DIR / "sma_dopamine_composite.svg",
+    )
 
 
 # ── outputs ──────────────────────────────────────────────────────────────────

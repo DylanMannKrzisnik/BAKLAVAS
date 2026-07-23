@@ -1976,6 +1976,26 @@ def _fig_msi_bar_colors(features):
     return ["#c0392b" if ("Dopamine" in f or f == "msi:3-MT") else "#7fbf7b" for f in features]
 
 
+def _fig_gene_loadings_barh(ax, top_rna, *, title, xlabel="Gene loading"):
+    """Horizontal bar of RNA loadings (blue, italic gene labels)."""
+    ax.barh(range(len(top_rna)), top_rna.values, color="#2c7fb8")
+    ax.set_yticks(range(len(top_rna)))
+    ax.set_yticklabels(top_rna.index, fontsize=9, fontstyle="italic")
+    ax.axvline(0, color="k", lw=0.6)
+    ax.set_xlabel(xlabel)
+    ax.set_title(title)
+
+
+def _fig_msi_loadings_barh(ax, top_msi, *, title, xlabel="Metabolite / m/z loading"):
+    """Horizontal bar of MSI loadings (dopamine/3-MT red, others green; 'msi:' stripped)."""
+    ax.barh(range(len(top_msi)), top_msi.values, color=_fig_msi_bar_colors(top_msi.index))
+    ax.set_yticks(range(len(top_msi)))
+    ax.set_yticklabels([f.replace("msi:", "") for f in top_msi.index], fontsize=9)
+    ax.axvline(0, color="k", lw=0.6)
+    ax.set_xlabel(xlabel)
+    ax.set_title(title)
+
+
 def _fig_sorted_clusters(index, *, strip_prefix=False):
     """Numeric cluster ordering; handles both '3' and 'C12' style labels."""
     def sort_key(label):
@@ -2092,21 +2112,8 @@ def FIG_mofa_dopamine_factor(
         ax.set_xlabel("msi:Dopamine loading")
         ax.set_title(f"(a) Dopamine loads on {factor}")
 
-        ax = axes[1]
-        ax.barh(range(len(top_rna)), top_rna.values, color="#2c7fb8")
-        ax.set_yticks(range(len(top_rna)))
-        ax.set_yticklabels(top_rna.index, fontsize=9, fontstyle="italic")
-        ax.axvline(0, color="k", lw=0.6)
-        ax.set_xlabel("Gene loading")
-        ax.set_title(f"(b) Top RNA loadings ({factor})")
-
-        ax = axes[2]
-        ax.barh(range(len(top_msi)), top_msi.values, color=_fig_msi_bar_colors(top_msi.index))
-        ax.set_yticks(range(len(top_msi)))
-        ax.set_yticklabels([f.replace("msi:", "") for f in top_msi.index], fontsize=9)
-        ax.axvline(0, color="k", lw=0.6)
-        ax.set_xlabel("Metabolite / m/z loading")
-        ax.set_title(f"(c) Top MSI loadings ({factor})")
+        _fig_gene_loadings_barh(axes[1], top_rna, title=f"(b) Top RNA loadings ({factor})")
+        _fig_msi_loadings_barh(axes[2], top_msi, title=f"(c) Top MSI loadings ({factor})")
 
     return _fig_finish(fig, output_file)
 
@@ -2181,21 +2188,11 @@ def FIG_teacher_mofa_dopamine(
         ax.set_ylabel(f"mean {factor} score")
         ax.set_title(f"(c) Factor by ATAC cluster ({highlight_cluster}=MXD)")
 
-        ax = fig.add_subplot(gs[1, 0])
-        ax.barh(range(len(top_rna)), top_rna.values, color="#2c7fb8")
-        ax.set_yticks(range(len(top_rna)))
-        ax.set_yticklabels(top_rna.index, fontsize=9, fontstyle="italic")
-        ax.axvline(0, color="k", lw=0.6)
-        ax.set_xlabel("gene loading")
-        ax.set_title(f"(d) Top RNA loadings ({factor})")
-
-        ax = fig.add_subplot(gs[1, 1])
-        ax.barh(range(len(top_msi)), top_msi.values, color=_fig_msi_bar_colors(top_msi.index))
-        ax.set_yticks(range(len(top_msi)))
-        ax.set_yticklabels([f.replace("msi:", "") for f in top_msi.index], fontsize=9)
-        ax.axvline(0, color="k", lw=0.6)
-        ax.set_xlabel("metabolite / m/z loading")
-        ax.set_title(f"(e) Top MSI loadings ({factor})")
+        _fig_gene_loadings_barh(fig.add_subplot(gs[1, 0]), top_rna,
+                                title=f"(d) Top RNA loadings ({factor})", xlabel="gene loading")
+        _fig_msi_loadings_barh(fig.add_subplot(gs[1, 1]), top_msi,
+                               title=f"(e) Top MSI loadings ({factor})",
+                               xlabel="metabolite / m/z loading")
 
         ax = fig.add_subplot(gs[1, 2])
         ax.axis("off")
@@ -2289,31 +2286,24 @@ def FIG_multiome_dopamine_transfer(
     return _fig_finish(fig, output_file)
 
 
-def FIG_nmf_mofa_enrichment(
-    *,
-    nmf_loadings=None,
-    models=None,
-    top_k=50,
-    output_file=None,
-):
-    """Do the MOFA factors rediscover the ST NMF dopamine program?
+def _fig_default_enrichment_models():
+    """The (name, mofa, msi_view, factor) lineup used by the enrichment panels."""
+    return [
+        ("Teacher", spatial_mofa, "msi_teacher", spatial_dopamine_factor_n),
+        ("Student", multiome_mofa, "msi_student", multiome_dopamine_factor_n),
+    ]
 
-    Ranks the NMF program's top-`top_k` genes against each model's factor RNA
-    loadings. This is the cross-dataset check: the NMF program is fit on the spatial
-    source section, while the factors come from the spatial and multiome *targets*,
-    so agreement cannot be an artefact of shared fitting.
+
+def _fig_nmf_mofa_enrichment_stats(nmf_loadings, models, top_k):
+    """Score each model's factor RNA loadings against the NMF dopamine program.
+
+    Returns one dict per model with the AUROC / Spearman / top-k overlap stats and the
+    loading values needed to draw the box and overlap panels. Cross-dataset by design:
+    the NMF program is fit on the spatial source section while the factors come from
+    the spatial and multiome targets, so agreement cannot be a shared-fitting artefact.
     """
-    from matplotlib.lines import Line2D
     from sklearn.metrics import roc_auc_score
     from scipy.stats import hypergeom, spearmanr
-
-    if nmf_loadings is None:
-        nmf_loadings = best_nmf_component
-    if models is None:
-        models = [
-            ("Teacher", spatial_mofa, "msi_teacher", spatial_dopamine_factor_n),
-            ("Student", multiome_mofa, "msi_student", multiome_dopamine_factor_n),
-        ]
 
     nmf_bare = _fig_bare_gene_index(nmf_loadings, "NMF")
 
@@ -2354,53 +2344,186 @@ def FIG_nmf_mofa_enrichment(
             "top": rna_shared.reindex(nmf_top).dropna().values,
             "rest": rna_shared.drop(index=[g for g in nmf_top if g in rna_shared.index]).values,
         })
+    return results
+
+
+def _fig_draw_enrichment_box(ax, results, top_k, *, title=None):
+    """Panel: NMF-top genes vs other shared genes, boxed by MOFA loading, per model."""
+    from matplotlib.lines import Line2D
+
+    for i, res in enumerate(results):
+        box = ax.boxplot([res["rest"], res["top"]], positions=[i * 2 + 1, i * 2 + 1.7],
+                         widths=0.5, patch_artist=True, showfliers=False)
+        for patch, color in zip(box["boxes"], ["#bdbdbd", "#c0392b"]):
+            patch.set_facecolor(color)
+        ax.text(i * 2 + 1.35, 0.96,
+                f"AUROC={res['auroc']:.2f}\n$p$={res['hyper_p']:.0e}",
+                ha="center", va="top", fontsize=9,
+                transform=ax.get_xaxis_transform())
+    ax.set_xticks([i * 2 + 1.35 for i in range(len(results))])
+    ax.set_xticklabels([res["name"] for res in results])
+    ax.set_ylabel("MOFA factor RNA loading")
+    ax.set_title(title or f"(a) NMF-dopamine top-{top_k} genes\nrank high on the MOFA factor")
+    ax.legend(
+        handles=[
+            Line2D([0], [0], marker="s", color="w", markerfacecolor="#c0392b",
+                   markersize=9, label=f"NMF top-{top_k}"),
+            Line2D([0], [0], marker="s", color="w", markerfacecolor="#bdbdbd",
+                   markersize=9, label="other shared genes"),
+        ],
+        fontsize=8, frameon=False, loc="lower right",
+    )
+
+
+def _fig_draw_enrichment_overlap(ax, results, top_k, *, title=None):
+    """Panel: observed vs chance-expected top-k gene overlap, per model."""
+    x = np.arange(len(results))
+    width = 0.38
+    observed = [res["overlap"] for res in results]
+    expected = [res["expected"] for res in results]
+    ax.bar(x - width / 2, observed, width, color="#c0392b", label="observed overlap")
+    ax.bar(x + width / 2, expected, width, color="#95a5a6", label="expected (random)")
+    for i, (obs, exp) in enumerate(zip(observed, expected)):
+        ax.text(i - width / 2, obs, str(obs), ha="center", va="bottom", fontsize=9)
+        ax.text(i + width / 2, exp, f"{exp:.1f}", ha="center", va="bottom", fontsize=9)
+    ax.set_xticks(x)
+    ax.set_xticklabels([res["name"] for res in results])
+    ax.set_ylabel(f"genes in top-{top_k} of both")
+    ax.set_title(title or f"(b) Top-{top_k} overlap: observed vs expected")
+    ax.legend(fontsize=8, frameon=False)
+
+
+def FIG_nmf_mofa_enrichment(
+    *,
+    nmf_loadings=None,
+    models=None,
+    top_k=50,
+    output_file=None,
+):
+    """Do the MOFA factors rediscover the ST NMF dopamine program?
+
+    Two panels: (a) NMF-top genes rank higher on each factor than other shared genes,
+    (b) observed vs chance top-k overlap. See _fig_nmf_mofa_enrichment_stats for the
+    cross-dataset rationale.
+    """
+    if nmf_loadings is None:
+        nmf_loadings = best_nmf_component
+    if models is None:
+        models = _fig_default_enrichment_models()
+
+    results = _fig_nmf_mofa_enrichment_stats(nmf_loadings, models, top_k)
 
     with plt.rc_context(FIG_RCPARAMS):
         fig, axes = plt.subplots(1, 2, figsize=(11, 4.6), constrained_layout=True)
-
-        ax = axes[0]
-        for i, res in enumerate(results):
-            box = ax.boxplot([res["rest"], res["top"]], positions=[i * 2 + 1, i * 2 + 1.7],
-                             widths=0.5, patch_artist=True, showfliers=False)
-            for patch, color in zip(box["boxes"], ["#bdbdbd", "#c0392b"]):
-                patch.set_facecolor(color)
-            ax.text(i * 2 + 1.35, 0.96,
-                    f"AUROC={res['auroc']:.2f}\n$p$={res['hyper_p']:.0e}",
-                    ha="center", va="top", fontsize=9,
-                    transform=ax.get_xaxis_transform())
-        ax.set_xticks([i * 2 + 1.35 for i in range(len(results))])
-        ax.set_xticklabels([res["name"] for res in results])
-        ax.set_ylabel("MOFA factor RNA loading")
-        ax.set_title(f"(a) NMF-dopamine top-{top_k} genes\nrank high on the MOFA factor")
-        ax.legend(
-            handles=[
-                Line2D([0], [0], marker="s", color="w", markerfacecolor="#c0392b",
-                       markersize=9, label=f"NMF top-{top_k}"),
-                Line2D([0], [0], marker="s", color="w", markerfacecolor="#bdbdbd",
-                       markersize=9, label="other shared genes"),
-            ],
-            fontsize=8, frameon=False, loc="lower right",
-        )
-
-        ax = axes[1]
-        x = np.arange(len(results))
-        width = 0.38
-        observed = [res["overlap"] for res in results]
-        expected = [res["expected"] for res in results]
-        ax.bar(x - width / 2, observed, width, color="#c0392b", label="observed overlap")
-        ax.bar(x + width / 2, expected, width, color="#95a5a6", label="expected (random)")
-        for i, (obs, exp) in enumerate(zip(observed, expected)):
-            ax.text(i - width / 2, obs, str(obs), ha="center", va="bottom", fontsize=9)
-            ax.text(i + width / 2, exp, f"{exp:.1f}", ha="center", va="bottom", fontsize=9)
-        ax.set_xticks(x)
-        ax.set_xticklabels([res["name"] for res in results])
-        ax.set_ylabel(f"genes in top-{top_k} of both")
-        ax.set_title("(b) Top-50 overlap: observed vs expected")
-        ax.legend(fontsize=8, frameon=False)
+        _fig_draw_enrichment_box(axes[0], results, top_k)
+        _fig_draw_enrichment_overlap(axes[1], results, top_k)
 
     return _fig_finish(fig, output_file)
 
 
+def FIG_dopamine_overview(
+    *,
+    nmf_cmp=None,
+    n_top_loadings=6,
+    top_k=50,
+    section_label="p22",
+    output_file=None,
+):
+    """One-page overview stitching together the key panels of the SMA dopamine story.
+
+    A 2x4 board assembled from the panel drawers used by the standalone FIG_* figures,
+    so nothing is recomputed differently here:
+
+      top:    measured msi:Dopamine | dopamine-aligned NMF program |
+              student MOFA top-N gene loadings | top-N MSI loadings
+      bottom: teacher factor in tissue | student-imputed dopamine (ingest coords) |
+              NMF<->MOFA enrichment box | top-k overlap vs chance
+
+    Panels 1-2 reuse FIG_nmf_dopamine's scanpy embeddings; the loadings reuse
+    _fig_{gene,msi}_loadings_barh on the student factor; the tissue maps reuse
+    _fig_spatial_scatter; the enrichment pair reuses the enrichment stats + drawers.
+    """
+    # --- NMF panel: the dopamine-aligned component and its spatial Moran's I ---
+    if nmf_cmp is None:
+        nmf_cmp = bivariate_moran_I_df.iloc[bivariate_moran_I_df["bivariate_moran_I"].argmax()].name
+    nmf_cmp_morans_i = bivariate_moran_I_df.loc[nmf_cmp, "bivariate_moran_I"]
+
+    # --- student MOFA loadings (same selection as FIG_mofa_dopamine_factor) ---
+    student_factor, student_sign, _ = _fig_dopamine_factor(
+        multiome_mofa, "msi_student", multiome_dopamine_factor_n
+    )
+    top_rna = _fig_top_loadings(
+        multiome_mofa.get_weights(views=["rna"], df=True)[student_factor] * student_sign,
+        n_top_loadings,
+    )
+    top_msi = _fig_top_loadings(
+        multiome_mofa.get_weights(views=["msi_student"], df=True)[student_factor] * student_sign,
+        n_top_loadings,
+    )
+
+    # --- teacher factor in tissue (same selection as FIG_teacher_mofa_dopamine) ---
+    teacher_factor, teacher_sign, _ = _fig_dopamine_factor(
+        spatial_mofa, "msi_teacher", spatial_dopamine_factor_n
+    )
+    teacher_scores, teacher_spatial, _ = _fig_factor_scores_on_spatial(
+        spatial_mofa, spatial_trimodal_mudata, teacher_factor, teacher_sign
+    )
+
+    # --- student-imputed dopamine on ingest coords (same as FIG_multiome_dopamine_transfer) ---
+    student_msi = multiome_trimodal_mudata.mod["msi_student"]
+    student_dopamine = as_dense(student_msi[:, "msi:Dopamine"].X).ravel()
+    student_spatial = np.asarray(multiome_trimodal_mudata.obsm["spatial"], dtype=float)
+
+    # --- NMF<->MOFA enrichment stats (same computation as FIG_nmf_mofa_enrichment) ---
+    enrichment = _fig_nmf_mofa_enrichment_stats(
+        best_nmf_component, _fig_default_enrichment_models(), top_k
+    )
+
+    with plt.rc_context(FIG_RCPARAMS):
+        fig = plt.figure(figsize=(18, 8.5), constrained_layout=True)
+        gs = fig.add_gridspec(2, 4)
+
+        # row 0: measured dopamine + NMF program (scanpy embeddings, keep their colorbars)
+        ax_dopa = fig.add_subplot(gs[0, 0])
+        sc.pl.embedding(joint_adata, basis="spatial", color="msi:Dopamine",
+                        size=100, ax=ax_dopa, show=False)
+        ax_nmf = fig.add_subplot(gs[0, 1])
+        sc.pl.embedding(nmf_adata, basis="spatial", color=nmf_cmp,
+                        size=100, ax=ax_nmf, show=False)
+        ax_nmf.set_title(f"NMF {nmf_cmp} (biv. I = {nmf_cmp_morans_i:.3f})")
+
+        # row 0: student factor loadings, grouped under one heading
+        ax_gene = fig.add_subplot(gs[0, 2])
+        _fig_gene_loadings_barh(ax_gene, top_rna, title="", xlabel="Gene loading")
+        ax_metab = fig.add_subplot(gs[0, 3])
+        _fig_msi_loadings_barh(ax_metab, top_msi, title="", xlabel="Metabolite loading")
+
+        # row 1: teacher factor + student-imputed dopamine in tissue (no colorbars)
+        ax_teacher = fig.add_subplot(gs[1, 0])
+        _fig_spatial_scatter(ax_teacher, teacher_spatial * np.array([1, -1]), teacher_scores,
+                             f"Teacher - factor {teacher_factor[-1]}", s=12)
+        ax_student = fig.add_subplot(gs[1, 1])
+        _fig_spatial_scatter(ax_student, student_spatial * np.array([-1, -1]), student_dopamine,
+                             "Student (multiome, ingest coords) - Dopamine", s=12)
+
+        # row 1: NMF<->MOFA enrichment pair
+        _fig_draw_enrichment_box(fig.add_subplot(gs[1, 2]), enrichment, top_k,
+                                 title=f"NMF-dopamine top-{top_k} genes")
+        _fig_draw_enrichment_overlap(fig.add_subplot(gs[1, 3]), enrichment, top_k,
+                                     title=f"Top-{top_k} overlap: observed vs expected")
+
+        # single heading centred over the two loadings columns (placed after layout
+        # settles so it tracks the real axes positions under constrained_layout)
+        fig.draw_without_rendering()
+        left, right = ax_gene.get_position(), ax_metab.get_position()
+        fig.text((left.x0 + right.x1) / 2, max(left.y1, right.y1) + 0.02,
+                 f"Top-{n_top_loadings} loadings ({student_factor})",
+                 ha="center", va="bottom", fontsize=12, fontweight="bold")
+
+    return _fig_finish(fig, output_file)
+
+
+#%%
 FIG_nmf_dopamine(
     output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_nmf_xcorr.png"),
 )
@@ -2417,4 +2540,8 @@ FIG_nmf_mofa_enrichment(
     output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_nmf_mofa_enrichment.png"),
 )
 
-# %%
+# %% manuscript figures
+
+FIG_dopamine_overview(
+    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_overview.png"),
+)

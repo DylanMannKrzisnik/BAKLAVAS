@@ -529,7 +529,7 @@ joint_adata.raw = joint_adata
 # Restrict ST features to a ranked target panel (if provided) before Moran's-I selection,
 # so the candidate ST pool only contains genes the transfer target measures. Whitelisted
 # target genes sit at the top of the ranking, so they are always in the candidate pool.
-N_TARGET_TOP = 442 # 442 for whitelist Xenium genes
+N_TARGET_TOP = 2000 # 442 for whitelist Xenium genes
 if species == "human":
     TARGET_PANEL_PATH = Path(
         "/home/mcb/users/dmannk/BAKLAVA_base/outputs/target_gene_rankings/"

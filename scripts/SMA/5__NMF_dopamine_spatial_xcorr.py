@@ -1984,28 +1984,92 @@ FIG_RCPARAMS = {
     "ps.fonttype": 42,
 }
 
+# Backdrop for every tissue map. The Visium section has interleaved rows of missing
+# spots and a ragged outline, which on a white canvas read as if the model produced
+# nothing there; against a flat grey they read as "not measured", and the caption can
+# say so once for all panels.
+FIG_MISSING_COLOR = "#ededed"
+
 
 def _fig_finish(fig, output_file):
+    """Show or save a finished figure, picking the writer from the requested suffix.
+
+    save_figure_png rewrites any suffix to .png, so before this dispatch a caller who
+    asked for '...overview.svg' silently got a PNG under an .svg name. Anything that
+    is not '.svg' still goes through the 300-dpi PNG path, so existing call sites are
+    unaffected.
+    """
     if output_file is None:
         plt.show()
     else:
-        output_file = save_figure_png(fig, output_file, bbox_inches="tight")
+        writer = (save_figure_svg if Path(output_file).suffix.lower() == ".svg"
+                  else save_figure_png)
+        output_file = writer(fig, output_file, bbox_inches="tight")
         plt.close(fig)
         print(f"Wrote {output_file}")
     return fig
 
 
+def _fig_panel_letter(ax, letter, *, x=-0.06, y=1.06):
+    """Stamp a bold panel letter just outside the top-left corner of an axes."""
+    ax.text(x, y, letter, transform=ax.transAxes, fontsize=15, fontweight="bold",
+            va="bottom", ha="right")
+
+
 def _fig_spatial_scatter(ax, spatial, values, title, *, cbar_label=None,
-                         cmap="viridis", s=8, sort_by_value=True):
-    """Tissue-map panel: square aspect, inverted y, no frame or ticks."""
+                         cmap="viridis", s=8, sort_by_value=True,
+                         clip_percentile=None, gamma=None, cbar_nbins=5,
+                         bg_color=FIG_MISSING_COLOR):
+    """Tissue-map panel: square aspect, inverted y, no frame or ticks.
+
+    ``clip_percentile=p`` maps the colour scale over the [100-p, p] percentiles
+    instead of min..max, saturating the extremes. Near-symmetric fields (MOFA factor
+    scores are Gaussian-ish by prior) otherwise spend the middle of the palette on
+    background and read as a mid-viridis haze; skewed fields concentrate their bulk
+    at the dark end and look crisper for reasons that have nothing to do with the
+    spatial structure. Clipping puts the two on a common footing -- at the cost of
+    flattening whatever sits beyond the cut.
+
+    ``gamma>1`` additionally bends the colour scale (PowerNorm), pushing mid-range
+    values toward the dark end so a symmetric field stops washing the whole panel in
+    mid-viridis. Unlike raising the low clip, this discards nothing: the mapping stays
+    monotone and every value keeps a distinct colour, only the palette is
+    redistributed. It is a display transform and belongs in the caption.
+
+    ``bg_color`` paints the axes backdrop so gaps in the lattice read as unmeasured
+    rather than as a zero value, and ``cbar_nbins`` caps the colourbar tick count:
+    the default locator puts ~8 labels on a factor-score bar, which collide as soon
+    as the panel is scaled down to one column of a composite figure.
+    """
+    from matplotlib.colors import PowerNorm
+    from matplotlib.ticker import MaxNLocator
+
     values = np.asarray(values, dtype=float).ravel()
+    vmin = vmax = None
+    if clip_percentile is not None:
+        if not 50 < clip_percentile <= 100:
+            raise ValueError(f"clip_percentile must be in (50, 100], got {clip_percentile}.")
+        vmin, vmax = np.percentile(values, [100 - clip_percentile, clip_percentile])
+    scale = dict(vmin=vmin, vmax=vmax)
+    if gamma is not None:
+        if gamma <= 0:
+            raise ValueError(f"gamma must be positive, got {gamma}.")
+        # PowerNorm owns both ends, so vmin/vmax cannot also be passed to scatter.
+        scale = dict(norm=PowerNorm(
+            gamma,
+            vmin=np.min(values) if vmin is None else vmin,
+            vmax=np.max(values) if vmax is None else vmax,
+            clip=True,
+        ))
     order = np.argsort(values) if sort_by_value else np.arange(len(values))
     handle = ax.scatter(spatial[order, 0], spatial[order, 1], c=values[order],
-                        cmap=cmap, s=s, linewidths=0)
+                        cmap=cmap, s=s, linewidths=0, **scale)
     ax.set_aspect("equal")
     ax.invert_yaxis()
     ax.set_xticks([])
     ax.set_yticks([])
+    if bg_color is not None:
+        ax.set_facecolor(bg_color)
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.set_title(title)
@@ -2013,7 +2077,62 @@ def _fig_spatial_scatter(ax, spatial, values, title, *, cbar_label=None,
         cbar = ax.figure.colorbar(handle, ax=ax, fraction=0.046, pad=0.02)
         cbar.set_label(cbar_label, fontsize=9)
         cbar.ax.tick_params(labelsize=8)
+        if cbar_nbins is not None:
+            # Round tick values, thinned by their position *along the bar*. Under a
+            # PowerNorm those two spacings differ, and the default data-linear
+            # locator crushes the low end until its bottom labels overprint each
+            # other; thinning on normalised position keeps the labels readable
+            # without giving up round numbers for evenly-spaced ugly ones.
+            low, high = handle.norm.vmin, handle.norm.vmax
+            candidates = MaxNLocator(nbins=cbar_nbins * 2).tick_values(low, high)
+            candidates = candidates[(candidates >= low) & (candidates <= high)]
+            positions = np.asarray(handle.norm(candidates), dtype=float)
+            ticks, last = [], -np.inf
+            for value, position in zip(candidates, positions):
+                if position - last >= 1.0 / (cbar_nbins + 2):
+                    ticks.append(value)
+                    last = position
+            cbar.set_ticks(ticks)
     return handle
+
+
+def _fig_add_lesion_striatum(adata, *, key="lesion_striatum"):
+    """Add a striatum-only intact/lesioned obs column, NA everywhere else.
+
+    obs['lesion'] is recorded section-wide, but the 6-OHDA lesion is only
+    interpretable inside striatum -- calling a cortical spot "lesioned" says
+    nothing about dopamine. Masking the rest to NA lets the panel draw them in
+    grey instead of colouring them as though the label applied.
+
+    Mutates ``adata.obs`` in place and returns the key, so repeated figure calls
+    reuse the same column rather than recomputing it.
+    """
+    striatum = adata.obs["region"].eq("striatum")
+    labels = adata.obs["lesion"].astype("string").where(striatum, pd.NA)
+    adata.obs[key] = pd.Categorical(labels, categories=["intact", "lesioned"])
+    return key
+
+
+def _fig_mean_per_position(spatial, values, *, decimals=3):
+    """Collapse observations sharing a coordinate to one point holding their mean.
+
+    The multiome target's coordinates are ingested from the source section, so its
+    23,275 nuclei land on ~9,000 distinct positions (89% of them carrying more than
+    one nucleus, up to 29). _fig_spatial_scatter draws in ascending value order, so
+    at a stacked position only the single highest-valued nucleus stays visible --
+    a max filter that inflates the rendered field by ~0.37 SD and sprinkles the
+    background with isolated bright points. Averaging first removes that bias and
+    cuts the within-position noise, which measurably *raises* hotspot-to-background
+    separation (Cohen's d 3.97 -> 4.75) rather than blurring the map.
+
+    Returns (positions, means). A no-op in effect for targets already at one
+    observation per coordinate, such as the p22 spot lattice.
+    """
+    spatial = np.asarray(spatial, dtype=float)
+    values = np.asarray(values, dtype=float).ravel()
+    positions, inverse = np.unique(np.round(spatial, decimals), axis=0, return_inverse=True)
+    counts = np.bincount(inverse)
+    return positions, np.bincount(inverse, weights=values) / counts
 
 
 def _fig_top_loadings(weights, n=12):
@@ -2443,6 +2562,141 @@ def _fig_draw_enrichment_overlap(ax, results, top_k, *, title=None):
     ax.legend(fontsize=8, frameon=False)
 
 
+def _fig_fmt_p(p):
+    """Render a p-value as '$p=3\\times10^{-4}$' so figure and prose can match exactly."""
+    if not np.isfinite(p) or p <= 0:
+        return r"$p<10^{-300}$"
+    exponent = int(np.floor(np.log10(p)))
+    mantissa = p / 10.0 ** exponent
+    if round(mantissa) == 10:          # 9.6e-4 must not print as "10x10^-4"
+        mantissa, exponent = 1.0, exponent + 1
+    return rf"$p={mantissa:.0f}\times10^{{{exponent}}}$"
+
+
+def _fig_draw_enrichment_convergence(ax, results, top_k, *, title=None):
+    """Panel: the enrichment box and the top-k overlap test, merged into one panel.
+
+    _fig_draw_enrichment_box and _fig_draw_enrichment_overlap tell the same
+    convergence story twice -- a rank statistic over all shared genes, then a
+    coarser count over the two top-k sets -- so the composite figure carries the
+    distributions and folds the overlap in as text. The hypergeometric p is printed
+    beside the overlap it actually tests rather than over the boxes, where it read
+    as though it belonged to the AUROC.
+
+    The y-limit is opened downward first: the annotation then sits in a band that no
+    box or whisker can reach, instead of being squeezed against the lowest whisker.
+    """
+    from matplotlib.lines import Line2D
+
+    for i, res in enumerate(results):
+        box = ax.boxplot([res["rest"], res["top"]], positions=[i * 2 + 1, i * 2 + 1.7],
+                         widths=0.5, patch_artist=True, showfliers=False)
+        for patch, color in zip(box["boxes"], ["#bdbdbd", "#c0392b"]):
+            patch.set_facecolor(color)
+
+    # Open the y-limit at both ends: the annotation then sits in a band no box or
+    # whisker can reach, and the legend gets a strip of its own above the boxes
+    # instead of being drawn over the teacher's, whose loadings hug zero.
+    low, high = ax.get_ylim()
+    span = high - low
+    ax.set_ylim(low - 0.42 * span, high + 0.44 * span)
+
+    for i, res in enumerate(results):
+        centre = i * 2 + 1.35
+        ax.text(centre, 0.83, f"AUROC = {res['auroc']:.2f}", ha="center", va="center",
+                fontsize=9, transform=ax.get_xaxis_transform())
+        ax.text(centre, 0.11,
+                f"overlap {res['overlap']}/{top_k} (exp. {res['expected']:.1f})\n"
+                f"hypergeom. {_fig_fmt_p(res['hyper_p'])}",
+                ha="center", va="center", fontsize=8, color="#333333",
+                transform=ax.get_xaxis_transform())
+
+    ax.set_xticks([i * 2 + 1.35 for i in range(len(results))])
+    ax.set_xticklabels([res["name"] for res in results])
+    ax.set_ylabel("MOFA+ Factor 3 RNA loading")
+    ax.set_title(title or f"Gene-level convergence with the\nNMF dopamine program (top {top_k})")
+    ax.legend(
+        handles=[
+            Line2D([0], [0], marker="s", color="w", markerfacecolor="#c0392b",
+                   markersize=9, label=f"NMF top-{top_k}"),
+            Line2D([0], [0], marker="s", color="w", markerfacecolor="#bdbdbd",
+                   markersize=9, label="other shared genes"),
+        ],
+        fontsize=8, frameon=False, loc="upper center", ncol=2,
+        handletextpad=0.4, columnspacing=1.2,
+    )
+
+
+# --- within-source embedding benchmark ----------------------------------------
+# The benchmark itself lives in 6__benchmark_metrics.py: it needs every model's
+# latent space and a 1,000-draw spatial-block bootstrap, so it is far too heavy to
+# recompute here. That script already writes its results table to disk, and these
+# drawers read it, which also guarantees the composite figure and the standalone
+# benchmark figure report the identical numbers.
+BENCHMARK_MODEL_COLORS = {"teacher": "#66C2A5", "student": "#FC8D62",
+                          "nonspatial": "#8DA0CB"}
+BENCHMARK_MODEL_ORDER = ("teacher", "student", "nonspatial")
+BENCHMARK_METRICS_CSV = (OUTPUT_DIR / "multigrate_mouse_sma" / RUN_ID
+                         / "dopamine_metrics.csv")
+
+
+def _fig_load_benchmark_metrics(path=None):
+    """Read 6__benchmark_metrics.py's dopamine results table, or None if it is absent."""
+    path = Path(BENCHMARK_METRICS_CSV if path is None else path)
+    if not path.exists():
+        print(f"[FIG] no dopamine benchmark table at {path}; run 6__benchmark_metrics.py "
+              "to include the benchmark row.")
+        return None
+    return pd.read_csv(path)
+
+
+def _fig_benchmark_order(df, model_order=None):
+    """Requested model order, restricted to what the table actually holds."""
+    present = list(pd.unique(df["model"]))
+    requested = list(BENCHMARK_MODEL_ORDER if model_order is None else model_order)
+    return [m for m in requested if m in present] + [
+        m for m in present if m not in requested
+    ]
+
+
+def _fig_benchmark_bars(ax, df, metric, order, *, group, ylabel, title):
+    """One bar per model with its spatial-block-bootstrap interval."""
+    sub = df[(df.metric == metric) & (df.group == group)].set_index("model").reindex(order)
+    err = np.vstack([(sub.value - sub.ci_low).fillna(0).values,
+                     (sub.ci_high - sub.value).fillna(0).values])
+    ax.bar(order, sub.value.values, yerr=err, capsize=4,
+           color=[BENCHMARK_MODEL_COLORS.get(m, "#888888") for m in order],
+           edgecolor="#555", linewidth=1)
+    ax.axhline(0, color="#999", lw=0.8, ls="--")
+    ax.set_ylabel(ylabel, fontsize=9)
+    ax.set_title(title)
+    ax.tick_params(axis="x", labelsize=9)
+    return sub
+
+
+def _fig_benchmark_smoothness(ax, df, order, *, title="Dopamine latent-graph smoothness"):
+    """Moran's I of dopamine on each model's latent graph, split by region and lesion."""
+    mi = df[df.metric == "morans_I"]
+    groups = ["intact_striatum", "lesioned_striatum",
+              "intact_not_striatum", "lesioned_not_striatum"]
+    labels = ["intact\nstriatum", "lesioned\nstriatum",
+              "intact\nnon-striatum", "lesioned\nnon-striatum"]
+    x = np.arange(len(groups))
+    width = 0.8 / max(len(order), 1)
+    for i, model in enumerate(order):
+        sub = mi[mi.model == model].set_index("group").reindex(groups)
+        err = np.vstack([(sub.value - sub.ci_low).fillna(0).values,
+                         (sub.ci_high - sub.value).fillna(0).values])
+        ax.bar(x + i * width, sub.value.values, width=width, yerr=err, capsize=3,
+               label=model, color=BENCHMARK_MODEL_COLORS.get(model, "#888888"),
+               edgecolor="#555", linewidth=0.8)
+    ax.set_xticks(x + width * (len(order) - 1) / 2)
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylabel("Moran's $I$ of dopamine", fontsize=9)
+    ax.set_title(title)
+    ax.legend(frameon=False, fontsize=8)
+
+
 def FIG_nmf_mofa_enrichment(
     *,
     nmf_loadings=None,
@@ -2477,21 +2731,65 @@ def FIG_dopamine_overview(
     n_top_loadings=6,
     top_k=50,
     section_label="p22",
+    source_label="SMA Visium section V11L12-109_B1",
+    include_student_factor_map=True,
+    teacher_map_s=10,
+    student_map_s=10,
+    factor_map_clip=98,
+    factor_map_gamma=2.0,
+    aggregate_student_positions=False,
+    include_benchmark=True,
+    benchmark_metrics=None,
     output_file=None,
 ):
-    """One-page overview stitching together the key panels of the SMA dopamine story.
+    """One-page figure for the SMA dopamine story, laid out as three conceptual rows.
 
-    A 2x4 board assembled from the panel drawers used by the standalone FIG_* figures,
-    so nothing is recomputed differently here:
+    Each row is one step of the argument and carries its own heading, so the reader
+    never has to infer which dataset or model a panel belongs to:
 
-      top:    measured msi:Dopamine | dopamine-aligned NMF program |
-              student MOFA top-N gene loadings | top-N MSI loadings
-      bottom: teacher factor in tissue | student-imputed dopamine (ingest coords) |
-              NMF<->MOFA enrichment box | top-k overlap vs chance
+      1  measured source   : measured msi:Dopamine | dopamine-aligned NMF program |
+                             intact-vs-lesioned striatum -- all on the SMA source
+                             section, the only tissue here where dopamine is
+                             actually measured. The third panel defines the
+                             intact/lesioned axis that row 3 scores against.
+      2  transferred program: student Factor 3 gene loadings | its MSI loadings |
+                             teacher Factor 3 in the p22 target | student Factor 3 in
+                             the multiome target | gene-level convergence with row 1.
+      3  embedding benchmark: dopamine structural gain | latent-graph smoothness |
+                             intact-striatal specificity -- back on the source
+                             section, where dopamine is an *input* to all three
+                             models, so these panels test how it is organised, not
+                             whether it is recovered.
 
-    Panels 1-2 reuse FIG_nmf_dopamine's scanpy embeddings; the loadings reuse
-    _fig_{gene,msi}_loadings_barh on the student factor; the tissue maps reuse
-    _fig_spatial_scatter; the enrichment pair reuses the enrichment stats + drawers.
+    Rows 1 and 3 come from different analyses than row 2 and hold different panel
+    counts, so each row gets its own SubFigure: a single fine-grained gridspec
+    spanning all three would hand out unequal column widths under constrained_layout.
+
+    Row 3 reads 6__benchmark_metrics.py's results table off disk rather than
+    recomputing it -- the benchmark needs every model's latents and a 1,000-draw
+    spatial-block bootstrap. Pass ``benchmark_metrics`` (a DataFrame or a path) to
+    override, or ``include_benchmark=False`` to drop the row; if the table is missing
+    the row is dropped with a message rather than failing.
+
+    The two factor maps come from two MOFA+ models fitted to two different targets,
+    so their scores share no scale and each keeps its own colourbar -- the bars are
+    what let a reader see that neither panel is stretched to manufacture contrast.
+    Both share one ``factor_map_clip`` percentile and one ``factor_map_gamma`` so the
+    *display convention* is common even though the units are not. Their score
+    distributions differ in shape, not in width: the teacher factor is near-symmetric
+    (skew +0.50, excess kurtosis -0.02) while the student factor is right-skewed and
+    heavy-tailed (+1.56 / +2.54) over an almost identical range, so an unclipped
+    min..max linear scale spends the middle of the palette on teacher background and
+    makes only that panel look hazy. Pass ``None`` to either for the old behaviour.
+
+    The two tissue maps take separate marker sizes (``teacher_map_s`` /
+    ``student_map_s``) because the two targets differ in density.
+    ``aggregate_student_positions`` averages the multiome nuclei that share an
+    ingested coordinate before plotting; see _fig_mean_per_position for why drawing
+    them raw renders a max filter rather than the field itself.
+
+    Panels reuse the drawers behind the standalone FIG_* figures, so nothing is
+    recomputed differently here.
     """
     # --- NMF panel: the dopamine-aligned component and its spatial Moran's I ---
     if nmf_cmp is None:
@@ -2502,6 +2800,7 @@ def FIG_dopamine_overview(
     student_factor, student_sign, _ = _fig_dopamine_factor(
         multiome_mofa, "msi_student", multiome_dopamine_factor_n
     )
+    student_factor_n = student_factor.replace("Factor", "")
     top_rna = _fig_top_loadings(
         multiome_mofa.get_weights(views=["rna"], df=True)[student_factor] * student_sign,
         n_top_loadings,
@@ -2515,60 +2814,166 @@ def FIG_dopamine_overview(
     teacher_factor, teacher_sign, _ = _fig_dopamine_factor(
         spatial_mofa, "msi_teacher", spatial_dopamine_factor_n
     )
+    teacher_factor_n = teacher_factor.replace("Factor", "")
     teacher_scores, teacher_spatial, _ = _fig_factor_scores_on_spatial(
         spatial_mofa, spatial_trimodal_mudata, teacher_factor, teacher_sign
     )
 
-    # --- student-imputed dopamine on ingest coords (same as FIG_multiome_dopamine_transfer) ---
-    student_msi = multiome_trimodal_mudata.mod["msi_student"]
-    student_dopamine = as_dense(student_msi[:, "msi:Dopamine"].X).ravel()
-    student_spatial = np.asarray(multiome_trimodal_mudata.obsm["spatial"], dtype=float)
+    # --- student factor in tissue: the direct counterpart of the teacher map above ---
+    student_factor_scores = student_factor_spatial = None
+    if include_student_factor_map:
+        student_factor_scores, student_factor_spatial, _ = _fig_factor_scores_on_spatial(
+            multiome_mofa, multiome_trimodal_mudata, student_factor, student_sign
+        )
+        if aggregate_student_positions:
+            n_nuclei = student_factor_scores.size
+            student_factor_spatial, student_factor_scores = _fig_mean_per_position(
+                student_factor_spatial, student_factor_scores
+            )
+            print(f"Student factor map: {n_nuclei} nuclei -> "
+                  f"{student_factor_scores.size} ingested positions (mean per position)")
 
     # --- NMF<->MOFA enrichment stats (same computation as FIG_nmf_mofa_enrichment) ---
     enrichment = _fig_nmf_mofa_enrichment_stats(
         best_nmf_component, _fig_default_enrichment_models(), top_k
     )
 
-    with plt.rc_context(FIG_RCPARAMS):
-        fig = plt.figure(figsize=(18, 8.5), constrained_layout=True)
-        gs = fig.add_gridspec(2, 4)
+    # --- row 3 inputs, read off disk (see docstring) ---
+    bench = None
+    if include_benchmark:
+        bench = (benchmark_metrics if isinstance(benchmark_metrics, pd.DataFrame)
+                 else _fig_load_benchmark_metrics(benchmark_metrics))
+    bench_order = _fig_benchmark_order(bench) if bench is not None else None
 
-        # row 0: measured dopamine + NMF program (scanpy embeddings, keep their colorbars)
-        ax_dopa = fig.add_subplot(gs[0, 0])
+    n_transfer = 5 if include_student_factor_map else 4
+    letters = iter("abcdefghijklmnopqrstuvwxyz")
+
+    with plt.rc_context(FIG_RCPARAMS):
+        height_ratios = [0.85, 1.0] + ([0.9] if bench is not None else [])
+        fig = plt.figure(figsize=(18, 4.9 * len(height_ratios)), constrained_layout=True)
+        rows = np.atleast_1d(fig.subfigures(len(height_ratios), 1,
+                                            height_ratios=height_ratios))
+
+        # ── row 1: measured source ───────────────────────────────────────────
+        sf_source = rows[0]
+        sf_source.suptitle(
+            f"1   Measured source — {source_label}: RNA + MALDI-MSI, "
+            "unilateral 6-OHDA lesion",
+            x=0.005, ha="left", fontsize=13, fontweight="bold",
+        )
+        axes_source = sf_source.subplots(1, 3)
+        ax_dopa, ax_nmf, ax_lesion = axes_source
         sc.pl.embedding(joint_adata, basis="spatial", color="msi:Dopamine",
                         size=100, ax=ax_dopa, show=False)
-        ax_nmf = fig.add_subplot(gs[0, 1])
         sc.pl.embedding(nmf_adata, basis="spatial", color=nmf_cmp,
                         size=100, ax=ax_nmf, show=False)
-        ax_nmf.set_title(f"NMF {nmf_cmp} (biv. I = {nmf_cmp_morans_i:.3f})")
+        ax_dopa.set_title("Measured dopamine (MALDI-MSI)")
+        ax_nmf.set_title(f"NMF {nmf_cmp} — dopamine-associated\nlesion-response program "
+                         f"(biv. $I$ = {nmf_cmp_morans_i:.3f})", fontsize=11)
+        for ax in (ax_dopa, ax_nmf):
+            # set after scanpy, which installs its own white background
+            ax.set_facecolor(FIG_MISSING_COLOR)
 
-        # row 0: student factor loadings, grouped under one heading
-        ax_gene = fig.add_subplot(gs[0, 2])
-        _fig_gene_loadings_barh(ax_gene, top_rna, title="", xlabel="Gene loading")
-        ax_metab = fig.add_subplot(gs[0, 3])
-        _fig_msi_loadings_barh(ax_metab, top_msi, title="", xlabel="Metabolite loading")
+        # The lesion map is what makes row 3 readable: "intact" and "lesioned"
+        # striatum are the axis every benchmark metric is scored against, and
+        # without this panel the reader has to take those labels on trust. It keeps
+        # a white background because here the grey is drawn -- non-striatal spots --
+        # rather than absent, which is what the grey means in the other maps.
+        row1_axes = [ax_dopa, ax_nmf]
+        if {"lesion", "region"} <= set(joint_adata.obs.columns):
+            lesion_key = _fig_add_lesion_striatum(joint_adata)
+            sc.pl.embedding(joint_adata, basis="spatial", color=lesion_key,
+                            palette={"intact": "tab:blue", "lesioned": "tab:orange"},
+                            na_color="lightgray", na_in_legend=False,
+                            size=100, ax=ax_lesion, show=False)
+            ax_lesion.set_title("Striatum: intact vs lesioned")
+            row1_axes.append(ax_lesion)
+        else:
+            print("[FIG] joint_adata.obs lacks 'lesion'/'region'; skipping the "
+                  "intact-vs-lesioned striatum panel.")
+            ax_lesion.set_visible(False)
+        for ax in row1_axes:
+            _fig_panel_letter(ax, next(letters))
 
-        # row 1: teacher factor + student-imputed dopamine in tissue (no colorbars)
-        ax_teacher = fig.add_subplot(gs[1, 0])
-        _fig_spatial_scatter(ax_teacher, teacher_spatial * np.array([1, -1]), teacher_scores,
-                             f"Teacher - factor {teacher_factor[-1]}", s=12)
-        ax_student = fig.add_subplot(gs[1, 1])
-        _fig_spatial_scatter(ax_student, student_spatial * np.array([-1, -1]), student_dopamine,
-                             "Student (multiome, ingest coords) - Dopamine", s=12)
+        # ── row 2: the transferred multimodal program ────────────────────────
+        sf_transfer = rows[1]
+        sf_transfer.suptitle(
+            f"2   Transferred multimodal program — trimodal MOFA+ Factor "
+            f"{student_factor_n} on the {section_label.upper()} spatial target (teacher) "
+            "and the dissociated 10x multiome target (student)",
+            x=0.005, ha="left", fontsize=13, fontweight="bold",
+        )
+        # The convergence panel carries two annotation blocks and a two-column
+        # legend, so it needs about half again the width of a loadings panel.
+        transfer_ratios = ([1.0, 1.0, 1.1, 1.1, 1.5] if include_student_factor_map
+                           else [1.0, 1.0, 1.1, 1.5])
+        axes_transfer = np.atleast_1d(
+            sf_transfer.subplots(1, n_transfer,
+                                 gridspec_kw={"width_ratios": transfer_ratios})
+        )
 
-        # row 1: NMF<->MOFA enrichment pair
-        _fig_draw_enrichment_box(fig.add_subplot(gs[1, 2]), enrichment, top_k,
-                                 title=f"NMF-dopamine top-{top_k} genes")
-        _fig_draw_enrichment_overlap(fig.add_subplot(gs[1, 3]), enrichment, top_k,
-                                     title=f"Top-{top_k} overlap: observed vs expected")
+        _fig_gene_loadings_barh(
+            axes_transfer[0], top_rna,
+            title=f"Student Factor {student_factor_n}\ntop-{n_top_loadings} gene loadings",
+            xlabel="Gene loading",
+        )
+        _fig_msi_loadings_barh(
+            axes_transfer[1], top_msi,
+            title=f"Student Factor {student_factor_n}\ntop-{n_top_loadings} metabolite loadings",
+            xlabel="Metabolite loading",
+        )
 
-        # single heading centred over the two loadings columns (placed after layout
-        # settles so it tracks the real axes positions under constrained_layout)
-        fig.draw_without_rendering()
-        left, right = ax_gene.get_position(), ax_metab.get_position()
-        fig.text((left.x0 + right.x1) / 2, max(left.y1, right.y1) + 0.02,
-                 f"Top-{n_top_loadings} loadings ({student_factor})",
-                 ha="center", va="bottom", fontsize=12, fontweight="bold")
+        # Each map keeps the orientation convention of its standalone figure: the
+        # teacher flips y, the multiome ingest coords flip both axes.
+        slot = 2
+        _fig_spatial_scatter(
+            axes_transfer[slot], teacher_spatial * np.array([1, -1]), teacher_scores,
+            f"Factor {teacher_factor_n} — teacher\n({section_label.upper()} spatial target)",
+            s=teacher_map_s, clip_percentile=factor_map_clip, gamma=factor_map_gamma,
+            cbar_label="factor score",
+        )
+        slot += 1
+        if include_student_factor_map:
+            _fig_spatial_scatter(
+                axes_transfer[slot], student_factor_spatial * np.array([-1, -1]),
+                student_factor_scores,
+                f"Factor {student_factor_n} — student\n(dissociated multiome target)",
+                s=student_map_s, clip_percentile=factor_map_clip,
+                gamma=factor_map_gamma, cbar_label="factor score",
+            )
+            slot += 1
+
+        _fig_draw_enrichment_convergence(
+            axes_transfer[slot], enrichment, top_k,
+            title=f"Gene-level convergence with the\nNMF dopamine program (top {top_k})",
+        )
+        for ax in axes_transfer:
+            _fig_panel_letter(ax, next(letters))
+
+        # ── row 3: within-source embedding benchmark ─────────────────────────
+        if bench is not None:
+            sf_bench = rows[2]
+            sf_bench.suptitle(
+                f"3   Within-source embedding benchmark — how each model organises "
+                f"measured dopamine on {source_label} (dopamine is an input to all three)",
+                x=0.005, ha="left", fontsize=13, fontweight="bold",
+            )
+            # Structural gain leads and is given room: it is the only metric whose
+            # intervals separate the spatial models from the nonspatial baseline.
+            axes_bench = sf_bench.subplots(1, 3, gridspec_kw={"width_ratios": [1.3, 1.7, 1.0]})
+            _fig_benchmark_bars(
+                axes_bench[0], bench, "delta_auroc", bench_order, group="striatum",
+                ylabel="$\\Delta$AUROC (smoothed − raw dopamine)",
+                title="Dopamine structural gain",
+            )
+            _fig_benchmark_smoothness(axes_bench[1], bench, bench_order)
+            _fig_benchmark_bars(
+                axes_bench[2], bench, "enrich_log_odds", bench_order, group="all",
+                ylabel="log-odds (intact-striatal | dopamine-high)",
+                title="Intact-striatal specificity",
+            )
+            for ax in axes_bench:
+                _fig_panel_letter(ax, next(letters))
 
     return _fig_finish(fig, output_file)
 
@@ -2666,9 +3071,13 @@ FIG_nmf_mofa_enrichment(
 
 # %% manuscript figures
 
-FIG_dopamine_overview(
-    output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_overview.png"),
-)
+# Both formats: main.tex includes the PNG (pdflatex cannot take SVG without the svg
+# package + inkscape), the SVG is the editable copy for revisions.
+for _overview_suffix in ("png", "svg"):
+    FIG_dopamine_overview(
+        output_file=os.path.join(overleaf_figures_dir,
+                                 f"SMA_mouse_dopamine_nmf_mofa.{_overview_suffix}"),
+    )
 FIG_ccre_tf_overview(
     output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_ccre_tf_overview.svg"),
 )

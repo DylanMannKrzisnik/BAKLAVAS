@@ -44,7 +44,7 @@ import scipy.sparse as sp
 import seaborn as sns
 from scipy.stats import hypergeom, spearmanr
 from sklearn.cluster import KMeans
-from sklearn.decomposition import TruncatedSVD
+from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.linear_model import Ridge
 from sklearn.metrics import roc_auc_score
 from sklearn.neighbors import KNeighborsRegressor, NearestNeighbors
@@ -89,18 +89,26 @@ SSM_RNG = np.random.default_rng(0)
 # axis better than the nonspatial baseline. Dopamine is an input to all three models,
 # so the claim is structural (Metrics 1-3), not "the latent can decode dopamine"
 # (the decodability control, Metric 4, is expected to be at parity across models).
-DOPA_MODELS = ("teacher", "student", "nonspatial")  # core lineup; others added if present
+DOPA_MODELS = ("teacher", "student", "nonspatial", "multigrate")  # others added if present
 MODEL_COLORS = {
     "teacher": "#66C2A5",      # Teal/Green from Set2
     "student": "#FC8D62",      # Orange from Set2
-    "nonspatial": "#8DA0CB"    # Blue/Gray from Set2
+    "nonspatial": "#8DA0CB",   # Blue/Gray from Set2
+    "multigrate": "#E78AC3",   # Pink from Set2 -- an external method, not a \spajepa arm
 }
 DOPA_FEATURE = "msi:Dopamine"        # the clean intact-striatum-specific peak (vs the
                                       # weaker, ~0.2-correlated "msi:Dopamine (single)").
 DOPA_LAYER = "normalized"            # the per-spot values the models were trained on; no
                                       # extra transform (AUROC is rank-invariant; Moran's I
                                       # is reported on these same values for all models).
-DOPA_K = 15                          # kNN graph degree on the 10-D latent (NOT the UMAP).
+DOPA_K = 15                          # kNN graph degree on the joint latent (NOT the UMAP).
+DOPA_LATENT_DIMS = 10                # every model's latent is reduced to this width before
+                                      # the kNN graphs are built. SpatialMETA's arms are
+                                      # natively 10-D but Multigrate's joint latent is 16-D,
+                                      # and neighbourhood geometry depends on how many
+                                      # dimensions the distance is taken in, so comparing
+                                      # them unmatched would confound model with latent
+                                      # width. Set to None to use native widths.
 DOPA_K_SWEEP = (10, 15, 30, 50)      # robustness sweep for the headline metrics.
 DOPA_TOP_Q = 0.90                    # "dopamine-high" latent region = top 10% smoothed score.
 DOPA_N_BOOT = 1000                   # block-bootstrap resamples for CIs.
@@ -208,6 +216,10 @@ def load_inputs(sample_id):
             "st": np.asarray(d["rna"])[pos],
             "sm": np.asarray(d["msi"])[pos],
         }
+        # Also expose it the way the SpatialMETA arms are exposed. The dopamine block
+        # reaches for obsm["<model>_X_emb"] by name, so without this Multigrate is
+        # silently absent from that comparison while joining every other metric.
+        joint.obsm["multigrate_X_emb"] = x_multigrate
     else:
         warnings.warn(
             f"Multigrate latents not found at {mg_npz}; Multigrate will be excluded. "
@@ -372,14 +384,27 @@ def get_dopamine(joint, feature=DOPA_FEATURE, layer=DOPA_LAYER):
     return _dense(col).ravel().astype(float)
 
 
-def standardized_latents(joint, models=DOPA_MODELS):
-    """z-score (per dim) each model's 10-D joint latent, so kNN distances compare."""
-    out = {}
-    for m in models:
-        key = f"{m}_X_emb"
-        if key in joint.obsm:
-            out[m] = StandardScaler().fit_transform(np.asarray(joint.obsm[key], float))
-    return out
+def standardized_latents(joint, models=DOPA_MODELS, n_dims=DOPA_LATENT_DIMS):
+    """z-score (per dim) each model's joint latent, so kNN distances compare.
+
+    Latents wider than ``n_dims`` are first reduced by PCA to the narrowest width in
+    the lineup. Every metric below reads dopamine off a kNN graph, and how coherent
+    that graph looks depends on how many dimensions the distance is taken in --
+    Multigrate's joint latent is 16-D against SpatialMETA's 10-D, so scoring them at
+    native width would confound the model with its latent width and penalise the
+    wider one through distance concentration alone. Pass ``n_dims=None`` to compare
+    at native widths instead (and say so, if the numbers are reported that way).
+    """
+    raw = {m: np.asarray(joint.obsm[f"{m}_X_emb"], float)
+           for m in models if f"{m}_X_emb" in joint.obsm}
+    if n_dims is not None and raw:
+        target = min([n_dims] + [Z.shape[1] for Z in raw.values()])
+        for m, Z in list(raw.items()):
+            if Z.shape[1] > target:
+                print(f"[dopamine] {m}: {Z.shape[1]}-D latent -> {target}-D by PCA, "
+                      "to match the narrowest model in the lineup")
+                raw[m] = PCA(n_components=target, random_state=0).fit_transform(Z)
+    return {m: StandardScaler().fit_transform(Z) for m, Z in raw.items()}
 
 
 def _knn_idx(Z, k):

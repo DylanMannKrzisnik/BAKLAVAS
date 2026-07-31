@@ -25,9 +25,11 @@ def save_figure_png(fig, output_file, **savefig_kwargs):
 
 
 def save_figure_svg(fig, output_file, **savefig_kwargs):
-    """Save a figure as a vector SVG, regardless of the supplied suffix."""
+    """Save a hybrid SVG with editable text and 300-dpi rasterized artists."""
     output_path = Path(output_file).with_suffix(".svg")
-    fig.savefig(output_path, format="svg", **savefig_kwargs)
+    dpi = savefig_kwargs.pop("dpi", 300)
+    with plt.rc_context({"svg.fonttype": "none"}):
+        fig.savefig(output_path, format="svg", dpi=dpi, **savefig_kwargs)
     return output_path
 
 
@@ -2010,6 +2012,23 @@ def _fig_finish(fig, output_file):
     return fig
 
 
+def _fig_rasterize_scatters(ax):
+    """Mark every point cloud already drawn in an axes for rasterized vector export.
+
+    Used for the scanpy tissue maps. ``sc.pl.embedding`` cannot be asked for this
+    directly: it passes ``rasterized`` to ax.scatter itself, so supplying it as a
+    kwarg raises "got multiple values for keyword argument 'rasterized'", and its
+    own default (settings._vector_friendly, False here) leaves the markers vector.
+    Setting it on the finished collections sidesteps both and is version-proof.
+
+    _fig_spatial_scatter rasterizes its own scatter inline, so this is only needed
+    for panels drawn by scanpy.
+    """
+    for collection in ax.collections:
+        collection.set_rasterized(True)
+    return ax
+
+
 def _fig_panel_letter(ax, letter, *, x=-0.06, y=1.06):
     """Stamp a bold panel letter just outside the top-left corner of an axes."""
     ax.text(x, y, letter, transform=ax.transAxes, fontsize=15, fontweight="bold",
@@ -2062,8 +2081,10 @@ def _fig_spatial_scatter(ax, spatial, values, title, *, cbar_label=None,
             clip=True,
         ))
     order = np.argsort(values) if sort_by_value else np.arange(len(values))
-    handle = ax.scatter(spatial[order, 0], spatial[order, 1], c=values[order],
-                        cmap=cmap, s=s, linewidths=0, **scale)
+    handle = ax.scatter(
+        spatial[order, 0], spatial[order, 1], c=values[order],
+        cmap=cmap, s=s, linewidths=0, rasterized=True, **scale,
+    )
     ax.set_aspect("equal")
     ax.invert_yaxis()
     ax.set_xticks([])
@@ -2633,9 +2654,12 @@ def _fig_draw_enrichment_convergence(ax, results, top_k, *, title=None):
 # recompute here. That script already writes its results table to disk, and these
 # drawers read it, which also guarantees the composite figure and the standalone
 # benchmark figure report the identical numbers.
+# Kept in sync with MODEL_COLORS / DOPA_MODELS in 6__benchmark_metrics.py. Multigrate
+# sits last and in a different hue because it is an external method rather than a
+# \spajepa arm; any further model in the table is appended in grey.
 BENCHMARK_MODEL_COLORS = {"teacher": "#66C2A5", "student": "#FC8D62",
-                          "nonspatial": "#8DA0CB"}
-BENCHMARK_MODEL_ORDER = ("teacher", "student", "nonspatial")
+                          "nonspatial": "#8DA0CB", "multigrate": "#E78AC3"}
+BENCHMARK_MODEL_ORDER = ("teacher", "student", "nonspatial", "multigrate")
 BENCHMARK_METRICS_CSV = (OUTPUT_DIR / "multigrate_mouse_sma" / RUN_ID
                          / "dopamine_metrics.csv")
 
@@ -2863,16 +2887,21 @@ def FIG_dopamine_overview(
         )
         axes_source = sf_source.subplots(1, 3)
         ax_dopa, ax_nmf, ax_lesion = axes_source
-        sc.pl.embedding(joint_adata, basis="spatial", color="msi:Dopamine",
-                        size=100, ax=ax_dopa, show=False)
-        sc.pl.embedding(nmf_adata, basis="spatial", color=nmf_cmp,
-                        size=100, ax=ax_nmf, show=False)
+        sc.pl.embedding(
+            joint_adata, basis="spatial", color="msi:Dopamine",
+            size=100, ax=ax_dopa, show=False,
+        )
+        sc.pl.embedding(
+            nmf_adata, basis="spatial", color=nmf_cmp,
+            size=100, ax=ax_nmf, show=False,
+        )
         ax_dopa.set_title("Measured dopamine (MALDI-MSI)")
         ax_nmf.set_title(f"NMF {nmf_cmp} — dopamine-associated\nlesion-response program "
                          f"(biv. $I$ = {nmf_cmp_morans_i:.3f})", fontsize=11)
         for ax in (ax_dopa, ax_nmf):
             # set after scanpy, which installs its own white background
             ax.set_facecolor(FIG_MISSING_COLOR)
+            _fig_rasterize_scatters(ax)
 
         # The lesion map is what makes row 3 readable: "intact" and "lesioned"
         # striatum are the axis every benchmark metric is scored against, and
@@ -2882,11 +2911,14 @@ def FIG_dopamine_overview(
         row1_axes = [ax_dopa, ax_nmf]
         if {"lesion", "region"} <= set(joint_adata.obs.columns):
             lesion_key = _fig_add_lesion_striatum(joint_adata)
-            sc.pl.embedding(joint_adata, basis="spatial", color=lesion_key,
-                            palette={"intact": "tab:blue", "lesioned": "tab:orange"},
-                            na_color="lightgray", na_in_legend=False,
-                            size=100, ax=ax_lesion, show=False)
+            sc.pl.embedding(
+                joint_adata, basis="spatial", color=lesion_key,
+                palette={"intact": "tab:blue", "lesioned": "tab:orange"},
+                na_color="lightgray", na_in_legend=False,
+                size=100, ax=ax_lesion, show=False,
+            )
             ax_lesion.set_title("Striatum: intact vs lesioned")
+            _fig_rasterize_scatters(ax_lesion)
             row1_axes.append(ax_lesion)
         else:
             print("[FIG] joint_adata.obs lacks 'lesion'/'region'; skipping the "
@@ -3069,10 +3101,22 @@ FIG_nmf_mofa_enrichment(
     output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_nmf_mofa_enrichment.png"),
 )
 
-# %% manuscript figures
+# %% preview the dopamine overview (does NOT touch the manuscript figure)
+# Renders a single PNG into the run's output directory so the composite can be
+# eyeballed before it replaces figures/SMA_mouse_dopamine_nmf_mofa.png in the paper.
+# PNG only: the SVG runs to ~6 MB and is slow to write, which is wasted effort on a
+# render you may be about to discard.
+preview_figures_dir = OUTPUT_DIR / "figure_previews"
+preview_figures_dir.mkdir(parents=True, exist_ok=True)
 
-# Both formats: main.tex includes the PNG (pdflatex cannot take SVG without the svg
-# package + inkscape), the SVG is the editable copy for revisions.
+FIG_dopamine_overview(
+    output_file=str(preview_figures_dir / "sma_dopamine_overview_preview.png"),
+)
+
+# %% manuscript figures
+# Run this only once the preview above looks right -- it overwrites the figure that
+# main.tex includes. Both formats: main.tex takes the PNG (pdflatex cannot take SVG
+# without the svg package + inkscape), the SVG is the editable copy for revisions.
 for _overview_suffix in ("png", "svg"):
     FIG_dopamine_overview(
         output_file=os.path.join(overleaf_figures_dir,

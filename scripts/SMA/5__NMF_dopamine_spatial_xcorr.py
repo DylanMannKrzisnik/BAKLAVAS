@@ -2166,6 +2166,114 @@ def _fig_msi_bar_colors(features):
     return ["#c0392b" if ("Dopamine" in f or f == "msi:3-MT") else "#7fbf7b" for f in features]
 
 
+def _fig_is_annotated(features):
+    """True where a feature name is a chemical/gene identity rather than a bare m/z.
+
+    MALDI channels that could not be annotated keep their raw mass as their name
+    ('674.28833'), so a name that parses as a number is an unannotated peak. Gene
+    symbols and named metabolites ('3-MT', 'Dopamine') never do. Generalises the
+    hard-coded dopamine/3-MT test in _fig_msi_bar_colors, which only knew about the
+    two features it was written for.
+    """
+    flags = []
+    for feature in features:
+        name = str(feature).replace("msi:", "")
+        try:
+            float(name)
+            flags.append(False)
+        except ValueError:
+            flags.append(True)
+    return np.asarray(flags, dtype=bool)
+
+
+def _fig_loadings_dotplot(ax, top, *, title, italic=False, size_range=(20, 250),
+                          cmap="RdBu_r", n_size_refs=3, keys=True):
+    """Single-column dot panel in scanpy's dotplot idiom.
+
+    scanpy's convention, adapted to a factor's loadings: the plot area is a thin
+    box, marker area carries one quantity and marker colour another, neither is read
+    off an axis, and both scales are spelled out as keys rather than as tick labels.
+    Here area is |loading| and colour is the signed loading on a diverging map
+    centred at zero, so sign stays legible at a glance while magnitude is encoded
+    twice. Marker shape is an addition scanpy has no equivalent for: circle where the
+    feature has an identity, square where it is an unannotated m/z peak.
+
+    A bar spends its whole panel width encoding one number per row; this spends only
+    the width of the longest feature label, which is what lets the tissue maps beside
+    it expand. The keys sit under the column rather than beside it for the same
+    reason -- scanpy puts them on the right, but that would restore the width the
+    dots just saved.
+
+    Marker *area* tracks |loading| linearly (matplotlib's ``s`` is an area in
+    points^2, hence the sqrt where the same sizes are reused as ``markersize``,
+    which is a diameter).
+    """
+    from matplotlib.colors import Normalize
+    from matplotlib.lines import Line2D
+
+    values = np.asarray(top.values, dtype=float)
+    magnitude = np.abs(values)
+    span = magnitude.max() if magnitude.max() > 0 else 1.0
+    limit = span if span > 0 else 1.0
+
+    def area(mag):
+        return size_range[0] + (size_range[1] - size_range[0]) * mag / span
+
+    sizes = area(magnitude)
+    annotated = _fig_is_annotated(top.index)
+    y = np.arange(len(top))
+    norm = Normalize(vmin=-limit, vmax=limit)
+
+    handle = None
+    for mask, marker in ((annotated, "o"), (~annotated, "s")):
+        if mask.any():
+            handle = ax.scatter(
+                np.zeros(int(mask.sum())), y[mask], s=sizes[mask], marker=marker,
+                c=values[mask], cmap=cmap, norm=norm,
+                edgecolors="#555555", linewidths=0.5, zorder=3,
+            )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels([str(f).replace("msi:", "") for f in top.index],
+                       fontsize=9, fontstyle="italic" if italic else "normal")
+    ax.set_xticks([])
+    ax.set_xlim(-0.5, 0.5)
+    ax.tick_params(axis="y", length=0)
+    for spine in ax.spines.values():          # scanpy's boxed plot area
+        spine.set_visible(True)
+        spine.set_linewidth(0.8)
+        spine.set_color("#444444")
+    ax.set_title(title)
+
+    if not keys:
+        ax.set_ylim(-0.6, len(top) - 0.4)
+        return ax
+
+    # Reserve the lower third of the box for the two keys, so neither can land on a
+    # marker however the panel is scaled.
+    ax.set_ylim(-0.58 * len(top), len(top) - 0.4)
+
+    refs = np.linspace(magnitude.min(), span, n_size_refs)
+    refs = np.unique(np.round(refs, 2)) if np.ptp(magnitude) > 0 else np.array([span])
+    ax.legend(
+        handles=[Line2D([0], [0], marker="o", linestyle="none",
+                        markerfacecolor="#bbbbbb", markeredgecolor="#555555",
+                        markeredgewidth=0.5, markersize=np.sqrt(area(r)), label=f"{r:g}")
+                 for r in refs],
+        loc="lower center", bbox_to_anchor=(0.5, 0.14), frameon=False, fontsize=7.5,
+        ncol=len(refs), handletextpad=0.1, columnspacing=0.6, borderpad=0.1,
+        title="|loading|", title_fontsize=7.5,
+    )
+
+    cax = ax.inset_axes([0.12, 0.045, 0.76, 0.022])
+    cbar = ax.figure.colorbar(handle, cax=cax, orientation="horizontal")
+    cbar.set_ticks([-limit, 0, limit])
+    cbar.ax.set_xticklabels([f"{-limit:.2f}", "0", f"{limit:.2f}"], fontsize=7)
+    cbar.outline.set_linewidth(0.5)
+    cbar.set_label("loading", fontsize=7.5, labelpad=2)
+    return ax
+
+
 def _fig_gene_loadings_barh(ax, top_rna, *, title, xlabel="Gene loading"):
     """Horizontal bar of RNA loadings (blue, italic gene labels)."""
     ax.barh(range(len(top_rna)), top_rna.values, color="#2c7fb8")
@@ -2683,8 +2791,14 @@ def _fig_benchmark_order(df, model_order=None):
     ]
 
 
-def _fig_benchmark_bars(ax, df, metric, order, *, group, ylabel, title):
-    """One bar per model with its spatial-block-bootstrap interval."""
+def _fig_benchmark_bars(ax, df, metric, order, *, group, ylabel, title, fontsize=13):
+    """One bar per model with its spatial-block-bootstrap interval.
+
+    ``fontsize`` sets the axis-label/tick scale for the whole row. It defaults well
+    above the figure's base size: these panels sit at the bottom of a tall composite
+    and are the ones a reader is most likely to meet as a cropped excerpt, so their
+    labels have to survive being reproduced smaller than the rest.
+    """
     sub = df[(df.metric == metric) & (df.group == group)].set_index("model").reindex(order)
     err = np.vstack([(sub.value - sub.ci_low).fillna(0).values,
                      (sub.ci_high - sub.value).fillna(0).values])
@@ -2692,13 +2806,20 @@ def _fig_benchmark_bars(ax, df, metric, order, *, group, ylabel, title):
            color=[BENCHMARK_MODEL_COLORS.get(m, "#888888") for m in order],
            edgecolor="#555", linewidth=1)
     ax.axhline(0, color="#999", lw=0.8, ls="--")
-    ax.set_ylabel(ylabel, fontsize=9)
-    ax.set_title(title)
-    ax.tick_params(axis="x", labelsize=9)
+    ax.set_ylabel(ylabel, fontsize=fontsize)
+    ax.set_title(title, fontsize=fontsize + 2)
+    ax.tick_params(axis="y", labelsize=fontsize - 1)
+    # Four model names at this font size do not fit side by side in the narrower
+    # panels of the row -- 'nonspatial' and 'multigrate' run together -- so the
+    # labels are angled rather than shrunk back down.
+    ax.tick_params(axis="x", labelsize=fontsize, labelrotation=15)
+    for label in ax.get_xticklabels():
+        label.set_horizontalalignment("right")
     return sub
 
 
-def _fig_benchmark_smoothness(ax, df, order, *, title="Dopamine latent-graph smoothness"):
+def _fig_benchmark_smoothness(ax, df, order, *, title="Dopamine latent-graph smoothness",
+                              fontsize=13):
     """Moran's I of dopamine on each model's latent graph, split by region and lesion."""
     mi = df[df.metric == "morans_I"]
     groups = ["intact_striatum", "lesioned_striatum",
@@ -2715,10 +2836,11 @@ def _fig_benchmark_smoothness(ax, df, order, *, title="Dopamine latent-graph smo
                label=model, color=BENCHMARK_MODEL_COLORS.get(model, "#888888"),
                edgecolor="#555", linewidth=0.8)
     ax.set_xticks(x + width * (len(order) - 1) / 2)
-    ax.set_xticklabels(labels, fontsize=8)
-    ax.set_ylabel("Moran's $I$ of dopamine", fontsize=9)
-    ax.set_title(title)
-    ax.legend(frameon=False, fontsize=8)
+    ax.set_xticklabels(labels, fontsize=fontsize - 1)
+    ax.set_ylabel("Moran's $I$ of dopamine", fontsize=fontsize)
+    ax.set_title(title, fontsize=fontsize + 2)
+    ax.tick_params(axis="y", labelsize=fontsize - 1)
+    ax.legend(frameon=False, fontsize=fontsize - 1)
 
 
 def FIG_nmf_mofa_enrichment(
@@ -2869,22 +2991,24 @@ def FIG_dopamine_overview(
                  else _fig_load_benchmark_metrics(benchmark_metrics))
     bench_order = _fig_benchmark_order(bench) if bench is not None else None
 
+    from matplotlib.lines import Line2D
+
     n_transfer = 5 if include_student_factor_map else 4
     letters = iter("abcdefghijklmnopqrstuvwxyz")
 
     with plt.rc_context(FIG_RCPARAMS):
-        height_ratios = [0.85, 1.0] + ([0.9] if bench is not None else [])
-        fig = plt.figure(figsize=(18, 4.9 * len(height_ratios)), constrained_layout=True)
+        # Row 1 holds three square maps across the full width: each cell is ~1/3 of
+        # 18in, of which the y-label, ticks and colorbar take ~1in, leaving a ~5in
+        # square that needs ~0.9in more for its (two-line) title and x-label. Giving
+        # the row much more than that just pads it with whitespace, since the panels
+        # are pinned square below and cannot grow into it.
+        height_ratios = [5.9, 4.4] + ([4.2] if bench is not None else [])
+        fig = plt.figure(figsize=(18, sum(height_ratios)), constrained_layout=True)
         rows = np.atleast_1d(fig.subfigures(len(height_ratios), 1,
                                             height_ratios=height_ratios))
 
         # ── row 1: measured source ───────────────────────────────────────────
         sf_source = rows[0]
-        sf_source.suptitle(
-            f"1   Measured source — {source_label}: RNA + MALDI-MSI, "
-            "unilateral 6-OHDA lesion",
-            x=0.005, ha="left", fontsize=13, fontweight="bold",
-        )
         axes_source = sf_source.subplots(1, 3)
         ax_dopa, ax_nmf, ax_lesion = axes_source
         sc.pl.embedding(
@@ -2911,11 +3035,23 @@ def FIG_dopamine_overview(
         row1_axes = [ax_dopa, ax_nmf]
         if {"lesion", "region"} <= set(joint_adata.obs.columns):
             lesion_key = _fig_add_lesion_striatum(joint_adata)
+            lesion_palette = {"intact": "tab:blue", "lesioned": "tab:orange"}
+            # legend_loc="none": scanpy 1.9.6 only renders a legend for "right margin"
+            # and "on data" -- every other value is silently a no-op, so an in-axes
+            # legend has to be built by hand. Keeping it inside the box is what stops
+            # it reserving a right margin the tissue maps could otherwise expand into.
             sc.pl.embedding(
                 joint_adata, basis="spatial", color=lesion_key,
-                palette={"intact": "tab:blue", "lesioned": "tab:orange"},
-                na_color="lightgray", na_in_legend=False,
-                size=100, ax=ax_lesion, show=False,
+                palette=lesion_palette, na_color="lightgray", na_in_legend=False,
+                size=100, ax=ax_lesion, show=False, legend_loc="none",
+            )
+            ax_lesion.legend(
+                handles=[Line2D([0], [0], marker="o", linestyle="none", label=name,
+                                markerfacecolor=color, markeredgecolor="none",
+                                markersize=8)
+                         for name, color in lesion_palette.items()],
+                loc="lower right", frameon=False, fontsize=10, handletextpad=0.3,
+                borderpad=0.4,
             )
             ax_lesion.set_title("Striatum: intact vs lesioned")
             _fig_rasterize_scatters(ax_lesion)
@@ -2924,35 +3060,38 @@ def FIG_dopamine_overview(
             print("[FIG] joint_adata.obs lacks 'lesion'/'region'; skipping the "
                   "intact-vs-lesioned striatum panel.")
             ax_lesion.set_visible(False)
+        # sc.pl.embedding leaves the axes aspect free (unlike sc.pl.spatial), so the
+        # map boxes take whatever shape the cell has -- previously a tall rectangle.
+        # set_box_aspect pins the plot area to a square; the row height above is then
+        # only there to stop constrained_layout solving the square by shrinking the
+        # panels sideways and leaving gutters between the columns.
         for ax in row1_axes:
+            ax.set_box_aspect(1)
             _fig_panel_letter(ax, next(letters))
 
         # ── row 2: the transferred multimodal program ────────────────────────
         sf_transfer = rows[1]
-        sf_transfer.suptitle(
-            f"2   Transferred multimodal program — trimodal MOFA+ Factor "
-            f"{student_factor_n} on the {section_label.upper()} spatial target (teacher) "
-            "and the dissociated 10x multiome target (student)",
-            x=0.005, ha="left", fontsize=13, fontweight="bold",
-        )
-        # The convergence panel carries two annotation blocks and a two-column
-        # legend, so it needs about half again the width of a loadings panel.
-        transfer_ratios = ([1.0, 1.0, 1.1, 1.1, 1.5] if include_student_factor_map
-                           else [1.0, 1.0, 1.1, 1.5])
+        # The dot panels only need to fit their feature labels, so the width they
+        # used to spend on bars goes to the tissue maps, which are the panels that
+        # actually reward area. The convergence panel keeps its extra width for the
+        # two annotation blocks and the two-column legend.
+        transfer_ratios = ([0.55, 0.62, 1.5, 1.5, 1.45] if include_student_factor_map
+                           else [0.55, 0.62, 1.5, 1.45])
         axes_transfer = np.atleast_1d(
             sf_transfer.subplots(1, n_transfer,
                                  gridspec_kw={"width_ratios": transfer_ratios})
         )
 
-        _fig_gene_loadings_barh(
+        # Short titles: a two-line heading wider than its own column is what pushed
+        # the neighbouring panel's letter into this one.
+        _fig_loadings_dotplot(
             axes_transfer[0], top_rna,
-            title=f"Student Factor {student_factor_n}\ntop-{n_top_loadings} gene loadings",
-            xlabel="Gene loading",
+            title=f"Student Factor {student_factor_n}\ntop-{n_top_loadings} genes",
+            italic=True,
         )
-        _fig_msi_loadings_barh(
+        _fig_loadings_dotplot(
             axes_transfer[1], top_msi,
-            title=f"Student Factor {student_factor_n}\ntop-{n_top_loadings} metabolite loadings",
-            xlabel="Metabolite loading",
+            title=f"Student Factor {student_factor_n}\ntop-{n_top_loadings} metabolites",
         )
 
         # Each map keeps the orientation convention of its standalone figure: the
@@ -2979,20 +3118,20 @@ def FIG_dopamine_overview(
             axes_transfer[slot], enrichment, top_k,
             title=f"Gene-level convergence with the\nNMF dopamine program (top {top_k})",
         )
-        for ax in axes_transfer:
-            _fig_panel_letter(ax, next(letters))
+        # The tissue maps draw a square field inside a wider cell, so a letter at the
+        # usual outside-left offset lands in the neighbouring column rather than
+        # beside its own panel; nudge those two in to sit against the map itself.
+        map_slots = {2, 3} if include_student_factor_map else {2}
+        for slot, ax in enumerate(axes_transfer):
+            _fig_panel_letter(ax, next(letters),
+                              x=0.09 if slot in map_slots else -0.06)
 
         # ── row 3: within-source embedding benchmark ─────────────────────────
         if bench is not None:
             sf_bench = rows[2]
-            sf_bench.suptitle(
-                f"3   Within-source embedding benchmark — how each model organises "
-                f"measured dopamine on {source_label} (dopamine is an input to all three)",
-                x=0.005, ha="left", fontsize=13, fontweight="bold",
-            )
             # Structural gain leads and is given room: it is the only metric whose
             # intervals separate the spatial models from the nonspatial baseline.
-            axes_bench = sf_bench.subplots(1, 3, gridspec_kw={"width_ratios": [1.3, 1.7, 1.0]})
+            axes_bench = sf_bench.subplots(1, 3, gridspec_kw={"width_ratios": [1.25, 1.55, 1.2]})
             _fig_benchmark_bars(
                 axes_bench[0], bench, "delta_auroc", bench_order, group="striatum",
                 ylabel="$\\Delta$AUROC (smoothed − raw dopamine)",
@@ -3001,7 +3140,10 @@ def FIG_dopamine_overview(
             _fig_benchmark_smoothness(axes_bench[1], bench, bench_order)
             _fig_benchmark_bars(
                 axes_bench[2], bench, "enrich_log_odds", bench_order, group="all",
-                ylabel="log-odds (intact-striatal | dopamine-high)",
+                # The conditioning ("| dopamine-high") lives in the caption: at row-3
+                # font sizes the full phrase runs the height of the panel and collides
+                # with the panel letter.
+                ylabel="log-odds (intact-striatal)",
                 title="Intact-striatal specificity",
             )
             for ax in axes_bench:
@@ -3099,18 +3241,6 @@ FIG_multiome_dopamine_transfer(
 )
 FIG_nmf_mofa_enrichment(
     output_file=os.path.join(overleaf_figures_dir, "sma_dopamine_nmf_mofa_enrichment.png"),
-)
-
-# %% preview the dopamine overview (does NOT touch the manuscript figure)
-# Renders a single PNG into the run's output directory so the composite can be
-# eyeballed before it replaces figures/SMA_mouse_dopamine_nmf_mofa.png in the paper.
-# PNG only: the SVG runs to ~6 MB and is slow to write, which is wasted effort on a
-# render you may be about to discard.
-preview_figures_dir = OUTPUT_DIR / "figure_previews"
-preview_figures_dir.mkdir(parents=True, exist_ok=True)
-
-FIG_dopamine_overview(
-    output_file=str(preview_figures_dir / "sma_dopamine_overview_preview.png"),
 )
 
 # %% manuscript figures

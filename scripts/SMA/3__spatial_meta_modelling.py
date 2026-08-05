@@ -762,7 +762,7 @@ for sample_id in SAMPLE_IDS:
 #%% Run SpatialJEPA and vanilla SpatialMETA baseline
 
 # set training hyperparameters. disable LR scheduler for human (i.e. non-mouse)
-max_epoch = 1000
+max_epoch = 1000 if species == "mouse" else 200
 learning_rate           = 1e-3  if species == "mouse" else 1e-5
 lr_scheduler_step_size  = 200   if species == "mouse" else max_epoch
 lr_scheduler_gamma      = 0.1   if species == "mouse" else 1.0

@@ -2029,6 +2029,54 @@ def _fig_rasterize_scatters(ax):
     return ax
 
 
+def _fig_fit_markers_to_lattice(axes, *, fill=3.5):
+    """Rescale already-drawn spot markers so a lattice keeps its density in any panel.
+
+    ``sc.pl.embedding(size=...)`` is an absolute marker *area* in points^2, so the same
+    value draws the same physical dot no matter how large the panel is. size=100 spans
+    3.7x the spot-to-spot spacing in FIG_nmf_dopamine's 2.6-inch panels, where the
+    markers overlap into a continuous tissue, but only 1.8x in this script's 5.4-inch
+    composite panels, where they separate and let the grey backdrop show through every
+    gap -- the same data reading as speckle purely because the panel grew. That is the
+    whole difference between the two figures' maps; nothing about the data changed.
+
+    Sizing from the median nearest-neighbour spacing *in display units* fixes the drawn
+    density instead of the drawn dot: ``fill`` is the marker diameter in units of that
+    spacing (1.0 = circles just touching), and the default reproduces what the preview
+    figure gets. Above ~2 the markers bridge the section's missing lattice rows, which
+    is what makes the map read as tissue -- a display choice, and one that slightly
+    dilates every drawn region, including the intact/lesioned outlines.
+
+    Call once the layout is final: it forces a draw so constrained_layout and
+    set_box_aspect have settled, then reads the actual data->display scale.
+    """
+    from scipy.spatial import cKDTree
+
+    axes = np.atleast_1d(axes)
+    fig = axes.flat[0].figure
+    fig.canvas.draw()
+    for ax in axes.flat:
+        clouds = [c for c in ax.collections if len(c.get_offsets()) >= 2]
+        if not clouds:
+            continue
+        offsets = np.asarray(np.concatenate([c.get_offsets() for c in clouds]))
+        # k=2 is "the nearest point that is not itself"; keep only positive distances
+        # so coincident coordinates cannot drag the median to zero.
+        neighbour = cKDTree(offsets).query(offsets, k=2)[0][:, 1]
+        neighbour = neighbour[neighbour > 0]
+        if neighbour.size == 0:
+            continue
+        spacing = float(np.median(neighbour))
+        (x0, _), (x1, _) = ax.transData.transform([(0, 0), (spacing, 0)])
+        # Points, not pixels: the pixel scale carries a factor of dpi that 72/dpi
+        # cancels, so a size computed at screen dpi stays correct when savefig
+        # re-renders the figure at 300.
+        spacing_pt = abs(x1 - x0) * 72 / fig.dpi
+        for collection in clouds:
+            collection.set_sizes(np.array([(fill * spacing_pt) ** 2]))
+    return axes
+
+
 def _fig_panel_letter(ax, letter, *, x=-0.06, y=1.06):
     """Stamp a bold panel letter just outside the top-left corner of an axes."""
     ax.text(x, y, letter, transform=ax.transAxes, fontsize=15, fontweight="bold",
@@ -2712,6 +2760,12 @@ def _fig_draw_enrichment_convergence(ax, results, top_k, *, title=None):
     beside the overlap it actually tests rather than over the boxes, where it read
     as though it belonged to the AUROC.
 
+    Every string here is set a step or two above the drawer defaults, because this is
+    the one panel of the composite figure that is read rather than looked at: at the
+    old 8 pt the overlap counts and the legend were the first things to go when the
+    18-inch board is scaled into a manuscript column. The p-value is printed bare and
+    the y-label drops "MOFA+" to buy that size; both are named in Methods.
+
     The y-limit is opened downward first: the annotation then sits in a band that no
     box or whisker can reach, instead of being squeezed against the lowest whisker.
     """
@@ -2733,25 +2787,28 @@ def _fig_draw_enrichment_convergence(ax, results, top_k, *, title=None):
     for i, res in enumerate(results):
         centre = i * 2 + 1.35
         ax.text(centre, 0.83, f"AUROC = {res['auroc']:.2f}", ha="center", va="center",
-                fontsize=9, transform=ax.get_xaxis_transform())
+                fontsize=11, transform=ax.get_xaxis_transform())
         ax.text(centre, 0.11,
                 f"overlap {res['overlap']}/{top_k} (exp. {res['expected']:.1f})\n"
-                f"hypergeom. {_fig_fmt_p(res['hyper_p'])}",
-                ha="center", va="center", fontsize=8, color="#333333",
+                f"{_fig_fmt_p(res['hyper_p'])}",
+                ha="center", va="center", fontsize=10, color="#333333",
                 transform=ax.get_xaxis_transform())
 
     ax.set_xticks([i * 2 + 1.35 for i in range(len(results))])
     ax.set_xticklabels([res["name"] for res in results])
-    ax.set_ylabel("MOFA+ Factor 3 RNA loading")
+    # Short label: "MOFA+" is what the panel this sits beside is already about, and
+    # the words it costs come out of the loading axis a reader has to read at print
+    # size. Same reason the p-value drops "hypergeom." -- Methods names the test.
+    ax.set_ylabel("Factor 3 RNA loading")
     ax.set_title(title or f"Gene-level convergence with the\nNMF dopamine program (top {top_k})")
     ax.legend(
         handles=[
             Line2D([0], [0], marker="s", color="w", markerfacecolor="#c0392b",
-                   markersize=9, label=f"NMF top-{top_k}"),
+                   markersize=10, label=f"NMF top-{top_k}"),
             Line2D([0], [0], marker="s", color="w", markerfacecolor="#bdbdbd",
-                   markersize=9, label="other shared genes"),
+                   markersize=10, label="other shared genes"),
         ],
-        fontsize=8, frameon=False, loc="upper center", ncol=2,
+        fontsize=10, frameon=False, loc="upper center", ncol=2,
         handletextpad=0.4, columnspacing=1.2,
     )
 
@@ -2879,6 +2936,8 @@ def FIG_dopamine_overview(
     section_label="p22",
     source_label="SMA Visium section V11L12-109_B1",
     include_student_factor_map=True,
+    lattice_fill=4.5,
+    lesion_legend_fontsize=14,
     teacher_map_s=10,
     student_map_s=10,
     factor_map_clip=98,
@@ -2893,14 +2952,17 @@ def FIG_dopamine_overview(
     Each row is one step of the argument and carries its own heading, so the reader
     never has to infer which dataset or model a panel belongs to:
 
-      1  measured source   : measured msi:Dopamine | dopamine-aligned NMF program |
-                             intact-vs-lesioned striatum -- all on the SMA source
+      1  measured source   : intact-vs-lesioned striatum | measured msi:Dopamine |
+                             dopamine-aligned NMF program -- all on the SMA source
                              section, the only tissue here where dopamine is
-                             actually measured. The third panel defines the
-                             intact/lesioned axis that row 3 scores against.
-      2  transferred program: student Factor 3 gene loadings | its MSI loadings |
-                             teacher Factor 3 in the p22 target | student Factor 3 in
-                             the multiome target | gene-level convergence with row 1.
+                             actually measured. The lesion panel leads because it
+                             defines the intact/lesioned axis the other two maps and
+                             row 3 are read against.
+      2  transferred program: teacher Factor 3 in the p22 target | student Factor 3 in
+                             the multiome target | student Factor 3 gene loadings |
+                             its MSI loadings | gene-level convergence with row 1.
+                             The two loadings dotplots share one panel letter: they
+                             are one factor shown in its two views.
       3  embedding benchmark: dopamine structural gain | latent-graph smoothness |
                              intact-striatal specificity -- back on the source
                              section, where dopamine is an *input* to all three
@@ -2928,7 +2990,17 @@ def FIG_dopamine_overview(
     min..max linear scale spends the middle of the palette on teacher background and
     makes only that panel look hazy. Pass ``None`` to either for the old behaviour.
 
-    The two tissue maps take separate marker sizes (``teacher_map_s`` /
+    Row 1's three maps do not take a marker size at all: ``lattice_fill`` sets their
+    marker diameter as a multiple of the measured spot spacing once the layout is
+    final, so they hold the density of FIG_nmf_dopamine's preview panels instead of
+    thinning out into speckle at composite-panel size. The default 4.5 is above the
+    ~3.7 that reproduces the preview, because the section is missing whole lattice
+    rows and only a marker wider than two row spacings closes them; the cost is that
+    every drawn region, the intact/lesioned outlines included, is dilated by about
+    two spot widths at its edge. See _fig_fit_markers_to_lattice; pass ``None`` to
+    keep scanpy's absolute size.
+
+    The two row-2 tissue maps take separate marker sizes (``teacher_map_s`` /
     ``student_map_s``) because the two targets differ in density.
     ``aggregate_student_positions`` averages the multiome nuclei that share an
     ingested coordinate before plotting; see _fig_mean_per_position for why drawing
@@ -3008,9 +3080,51 @@ def FIG_dopamine_overview(
                                             height_ratios=height_ratios))
 
         # ── row 1: measured source ───────────────────────────────────────────
+        # The lesion map leads the row: it defines the intact/lesioned axis that the
+        # next two maps and all of row 3 are read against, so it comes before the
+        # fields that are interpreted on it rather than after them.
         sf_source = rows[0]
         axes_source = sf_source.subplots(1, 3)
-        ax_dopa, ax_nmf, ax_lesion = axes_source
+        ax_lesion, ax_dopa, ax_nmf = axes_source
+
+        # The lesion map is what makes row 3 readable: "intact" and "lesioned"
+        # striatum are the axis every benchmark metric is scored against, and without
+        # this panel the reader has to take those labels on trust. It keeps a white
+        # background because here the grey is drawn -- non-striatal spots -- rather
+        # than absent, which is what the grey means in the other two maps.
+        row1_axes = []
+        if {"lesion", "region"} <= set(joint_adata.obs.columns):
+            lesion_key = _fig_add_lesion_striatum(joint_adata)
+            lesion_palette = {"intact": "tab:blue", "lesioned": "tab:orange"}
+            # legend_loc="none": scanpy 1.9.6 only renders a legend for "right margin"
+            # and "on data" -- every other value is silently a no-op, so an in-axes
+            # legend has to be built by hand. Keeping it inside the box is what stops
+            # it reserving a right margin the tissue maps could otherwise expand into.
+            sc.pl.embedding(
+                joint_adata, basis="spatial", color=lesion_key,
+                palette=lesion_palette, na_color="lightgray", na_in_legend=False,
+                size=100, ax=ax_lesion, show=False, legend_loc="none",
+            )
+            # Deliberately larger than the tick labels: this legend is the key to the
+            # whole intact/lesioned contrast, and it has to survive the figure being
+            # scaled down to a single column of a printed page. The dots take the
+            # label size as their diameter in points, so one knob scales both.
+            ax_lesion.legend(
+                handles=[Line2D([0], [0], marker="o", linestyle="none", label=name,
+                                markerfacecolor=color, markeredgecolor="none",
+                                markersize=lesion_legend_fontsize)
+                         for name, color in lesion_palette.items()],
+                loc="lower right", frameon=False, fontsize=lesion_legend_fontsize,
+                handletextpad=0.4, labelspacing=0.5, borderpad=0.4,
+            )
+            ax_lesion.set_title("Striatum: intact vs lesioned")
+            _fig_rasterize_scatters(ax_lesion)
+            row1_axes.append(ax_lesion)
+        else:
+            print("[FIG] joint_adata.obs lacks 'lesion'/'region'; skipping the "
+                  "intact-vs-lesioned striatum panel.")
+            ax_lesion.set_visible(False)
+
         sc.pl.embedding(
             joint_adata, basis="spatial", color="msi:Dopamine",
             size=100, ax=ax_dopa, show=False,
@@ -3026,40 +3140,7 @@ def FIG_dopamine_overview(
             # set after scanpy, which installs its own white background
             ax.set_facecolor(FIG_MISSING_COLOR)
             _fig_rasterize_scatters(ax)
-
-        # The lesion map is what makes row 3 readable: "intact" and "lesioned"
-        # striatum are the axis every benchmark metric is scored against, and
-        # without this panel the reader has to take those labels on trust. It keeps
-        # a white background because here the grey is drawn -- non-striatal spots --
-        # rather than absent, which is what the grey means in the other maps.
-        row1_axes = [ax_dopa, ax_nmf]
-        if {"lesion", "region"} <= set(joint_adata.obs.columns):
-            lesion_key = _fig_add_lesion_striatum(joint_adata)
-            lesion_palette = {"intact": "tab:blue", "lesioned": "tab:orange"}
-            # legend_loc="none": scanpy 1.9.6 only renders a legend for "right margin"
-            # and "on data" -- every other value is silently a no-op, so an in-axes
-            # legend has to be built by hand. Keeping it inside the box is what stops
-            # it reserving a right margin the tissue maps could otherwise expand into.
-            sc.pl.embedding(
-                joint_adata, basis="spatial", color=lesion_key,
-                palette=lesion_palette, na_color="lightgray", na_in_legend=False,
-                size=100, ax=ax_lesion, show=False, legend_loc="none",
-            )
-            ax_lesion.legend(
-                handles=[Line2D([0], [0], marker="o", linestyle="none", label=name,
-                                markerfacecolor=color, markeredgecolor="none",
-                                markersize=8)
-                         for name, color in lesion_palette.items()],
-                loc="lower right", frameon=False, fontsize=10, handletextpad=0.3,
-                borderpad=0.4,
-            )
-            ax_lesion.set_title("Striatum: intact vs lesioned")
-            _fig_rasterize_scatters(ax_lesion)
-            row1_axes.append(ax_lesion)
-        else:
-            print("[FIG] joint_adata.obs lacks 'lesion'/'region'; skipping the "
-                  "intact-vs-lesioned striatum panel.")
-            ax_lesion.set_visible(False)
+        row1_axes += [ax_dopa, ax_nmf]
         # sc.pl.embedding leaves the axes aspect free (unlike sc.pl.spatial), so the
         # map boxes take whatever shape the cell has -- previously a tall rectangle.
         # set_box_aspect pins the plot area to a square; the row height above is then
@@ -3068,6 +3149,8 @@ def FIG_dopamine_overview(
         for ax in row1_axes:
             ax.set_box_aspect(1)
             _fig_panel_letter(ax, next(letters))
+        # The size=100 above is scanpy's placeholder; the markers are refit to the
+        # lattice at the end of the figure, once every row has claimed its space.
 
         # ── row 2: the transferred multimodal program ────────────────────────
         sf_transfer = rows[1]
@@ -3075,34 +3158,26 @@ def FIG_dopamine_overview(
         # used to spend on bars goes to the tissue maps, which are the panels that
         # actually reward area. The convergence panel keeps its extra width for the
         # two annotation blocks and the two-column legend.
-        transfer_ratios = ([0.55, 0.62, 1.5, 1.5, 1.45] if include_student_factor_map
-                           else [0.55, 0.62, 1.5, 1.45])
+        # The maps lead the row, the loadings that name what they show follow, and the
+        # convergence panel closes it -- the same order the row's sentence is read in.
+        transfer_ratios = ([1.5, 1.5, 0.55, 0.62, 1.45] if include_student_factor_map
+                           else [1.5, 0.55, 0.62, 1.45])
         axes_transfer = np.atleast_1d(
             sf_transfer.subplots(1, n_transfer,
                                  gridspec_kw={"width_ratios": transfer_ratios})
         )
 
-        # Short titles: a two-line heading wider than its own column is what pushed
-        # the neighbouring panel's letter into this one.
-        _fig_loadings_dotplot(
-            axes_transfer[0], top_rna,
-            title=f"Student Factor {student_factor_n}\ntop-{n_top_loadings} genes",
-            italic=True,
-        )
-        _fig_loadings_dotplot(
-            axes_transfer[1], top_msi,
-            title=f"Student Factor {student_factor_n}\ntop-{n_top_loadings} metabolites",
-        )
-
         # Each map keeps the orientation convention of its standalone figure: the
         # teacher flips y, the multiome ingest coords flip both axes.
-        slot = 2
+        slot = 0
+        map_slots = set()
         _fig_spatial_scatter(
             axes_transfer[slot], teacher_spatial * np.array([1, -1]), teacher_scores,
             f"Factor {teacher_factor_n} — teacher\n({section_label.upper()} spatial target)",
             s=teacher_map_s, clip_percentile=factor_map_clip, gamma=factor_map_gamma,
             cbar_label="factor score",
         )
+        map_slots.add(slot)
         slot += 1
         if include_student_factor_map:
             _fig_spatial_scatter(
@@ -3112,7 +3187,25 @@ def FIG_dopamine_overview(
                 s=student_map_s, clip_percentile=factor_map_clip,
                 gamma=factor_map_gamma, cbar_label="factor score",
             )
+            map_slots.add(slot)
             slot += 1
+
+        # Short titles: a two-line heading wider than its own column is what pushed
+        # the neighbouring panel's letter into this one.
+        _fig_loadings_dotplot(
+            axes_transfer[slot], top_rna,
+            title=f"Student Factor {student_factor_n}\ntop-{n_top_loadings} genes",
+            italic=True,
+        )
+        slot += 1
+        # The two dotplots are one panel in two halves -- the same factor's loadings in
+        # its two views -- so they share a letter rather than being lettered apart.
+        msi_dot_slot = slot
+        _fig_loadings_dotplot(
+            axes_transfer[slot], top_msi,
+            title=f"Student Factor {student_factor_n}\ntop-{n_top_loadings} metabolites",
+        )
+        slot += 1
 
         _fig_draw_enrichment_convergence(
             axes_transfer[slot], enrichment, top_k,
@@ -3121,8 +3214,9 @@ def FIG_dopamine_overview(
         # The tissue maps draw a square field inside a wider cell, so a letter at the
         # usual outside-left offset lands in the neighbouring column rather than
         # beside its own panel; nudge those two in to sit against the map itself.
-        map_slots = {2, 3} if include_student_factor_map else {2}
         for slot, ax in enumerate(axes_transfer):
+            if slot == msi_dot_slot:
+                continue          # covered by the letter on the gene dotplot
             _fig_panel_letter(ax, next(letters),
                               x=0.09 if slot in map_slots else -0.06)
 
@@ -3148,6 +3242,11 @@ def FIG_dopamine_overview(
             )
             for ax in axes_bench:
                 _fig_panel_letter(ax, next(letters))
+
+        # Last, because it needs the final axes geometry: rows 2 and 3 both change
+        # what constrained_layout leaves row 1, and marker size has to follow that.
+        if lattice_fill is not None:
+            _fig_fit_markers_to_lattice(row1_axes, fill=lattice_fill)
 
     return _fig_finish(fig, output_file)
 
